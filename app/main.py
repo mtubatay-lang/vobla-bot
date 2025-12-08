@@ -1,19 +1,24 @@
 """Главный файл приложения."""
 import asyncio
 import logging
+import sentry_sdk
 
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
-from app.config import BOT_TOKEN
-from app.handlers import start_router, echo_router
+from app.config import BOT_TOKEN, LOG_LEVEL, SENTRY_DSN
 
+if SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        traces_sample_rate=0.0,
+    )
 
 # Настройка логирования
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
 
