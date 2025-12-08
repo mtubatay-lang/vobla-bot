@@ -14,6 +14,8 @@ propcache==0.4.1
 pydantic==2.12.5
 pydantic_core==2.41.5
 python-dotenv==1.2.1
+sentry-sdk==2.47.0
 typing-inspection==0.4.2
 typing_extensions==4.15.0
+urllib3==2.6.1
 yarl==1.22.0

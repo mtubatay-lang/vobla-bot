@@ -1,6 +1,6 @@
-"""Пакет обработчиков."""
-from .start import router as start_router
-from .echo import router as echo_router
+"""Пакет с хендлерами бота Vobla Bot.
 
-__all__ = ["start_router", "echo_router"]
-
+Роутеры импортируются напрямую в app.main:
+- from app.handlers.start import router as start_router
+- from app.handlers.echo import router as echo_router
+"""
