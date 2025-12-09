@@ -3,9 +3,28 @@
 from typing import Optional, List, Dict
 import math
 import asyncio
+import re
 
 from app.services.sheets_client import load_faq_rows
 from app.services.openai_client import create_embedding
+
+
+# -----------------------------
+#   ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# -----------------------------
+
+def normalize(text: str) -> str:
+    """Простая нормализация текста для эмбеддингов.
+
+    - нижний регистр
+    - убираем пунктуацию
+    - схлопываем пробелы
+    """
+    text = text.lower()
+    # оставляем буквы/цифры/пробелы (включая русские)
+    text = re.sub(r"[^\w\sёЁа-яА-Я0-9]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 
 # -----------------------------
@@ -24,19 +43,30 @@ async def load_faq_cache() -> None:
     if CACHE_READY:
         return
 
-    # Загружаем строки из таблицы
-    rows = load_faq_rows()
+    rows = load_faq_rows()  # [{question, answer}, ...]
 
-    FAQ_DATA = rows
+    FAQ_DATA = []
     FAQ_EMBEDS = []
 
-    # Генерируем embedding для каждого вопроса
     for row in rows:
-        emb = await asyncio.to_thread(create_embedding, row["question"])
+        question = row["question"]
+        answer = row["answer"]
+
+        norm_question = normalize(question)
+
+        emb = await asyncio.to_thread(create_embedding, norm_question)
+
+        FAQ_DATA.append(
+            {
+                "question": question,
+                "norm_question": norm_question,
+                "answer": answer,
+            }
+        )
         FAQ_EMBEDS.append(emb)
 
     CACHE_READY = True
-    print(f"[FAQ] Загружено {len(FAQ_DATA)} записей FAQ.")
+    print(f"[FAQ] Загружено {len(FAQ_DATA)} записей FAQ (эмбеддинги готовы).")
 
 
 # -----------------------------
@@ -56,11 +86,10 @@ def cosine_similarity(a: List[float], b: List[float]) -> float:
 async def find_similar_question(user_question: str) -> Optional[Dict[str, str]]:
     """Возвращает {question, answer, score} или None, если ничего похожего нет."""
 
-    # Убедимся, что кэш загружен
     await load_faq_cache()
 
-    # Создаем embedding вопроса пользователя
-    user_emb = await asyncio.to_thread(create_embedding, user_question)
+    norm_user = normalize(user_question)
+    user_emb = await asyncio.to_thread(create_embedding, norm_user)
 
     best_idx = None
     best_score = 0.0
@@ -71,13 +100,15 @@ async def find_similar_question(user_question: str) -> Optional[Dict[str, str]]:
             best_idx = idx
             best_score = score
 
-    # Если максимальное сходство слишком маленькое → похожего вопроса нет
-    if best_idx is None or best_score < 0.82:   # порог можно регулировать
+    # Порог похожести – можно потом подкрутить (0.65–0.75)
+    THRESHOLD = 0.70
+
+    if best_idx is None or best_score < THRESHOLD:
         return None
 
+    data = FAQ_DATA[best_idx]
     return {
-        "question": FAQ_DATA[best_idx]["question"],
-        "answer": FAQ_DATA[best_idx]["answer"],
+        "question": data["question"],
+        "answer": data["answer"],
         "score": best_score,
     }
-
