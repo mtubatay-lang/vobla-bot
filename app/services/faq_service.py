@@ -1,4 +1,4 @@
-"""Поиск похожих вопросов среди FAQ (Google Sheets + OpenAI embeddings)."""
+"""Поиск похожих вопросов среди FAQ (Google Sheets + OpenAI embeddings + AI rerank)."""
 
 from typing import Optional, List, Dict
 import math
@@ -6,7 +6,7 @@ import asyncio
 import re
 
 from app.services.sheets_client import load_faq_rows
-from app.services.openai_client import create_embedding
+from app.services.openai_client import create_embedding, choose_best_faq_answer
 
 
 # -----------------------------
@@ -21,10 +21,19 @@ def normalize(text: str) -> str:
     - схлопываем пробелы
     """
     text = text.lower()
-    # оставляем буквы/цифры/пробелы (включая русские)
-    text = re.sub(r"[^\w\sёЁа-яА-Я0-9]", " ", text)
+    text = re.sub(r"[^\w\sёЁа-яА-Я0-9]", " ", text)  # оставляем буквы/цифры/пробелы
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def cosine_similarity(a: List[float], b: List[float]) -> float:
+    """Косинусное сходство двух векторов."""
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(y * y for y in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
 
 
 # -----------------------------
@@ -53,7 +62,6 @@ async def load_faq_cache() -> None:
         answer = row["answer"]
 
         norm_question = normalize(question)
-
         emb = await asyncio.to_thread(create_embedding, norm_question)
 
         FAQ_DATA.append(
@@ -73,42 +81,60 @@ async def load_faq_cache() -> None:
 #    ПОИСК ПОХОЖЕГО ВОПРОСА
 # -----------------------------
 
-def cosine_similarity(a: List[float], b: List[float]) -> float:
-    """Косинусное сходство двух векторов."""
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(y * y for y in b))
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot / (norm_a * norm_b)
-
-
 async def find_similar_question(user_question: str) -> Optional[Dict[str, str]]:
-    """Возвращает {question, answer, score} или None, если ничего похожего нет."""
+    """Возвращает {question, answer, score} или None, если ничего похожего нет.
+
+    Этап 1: эмбеддинги → выбираем топ-K по cosine similarity.
+    Этап 2: передаём кандидатов в GPT, он решает, что лучше подходит
+            (или что лучше ничего не отвечать).
+    """
 
     await load_faq_cache()
 
+    if not FAQ_DATA:
+        return None
+
+    # Этап 1: эмбеддинг пользователя + базовый фильтр по cosine
     norm_user = normalize(user_question)
     user_emb = await asyncio.to_thread(create_embedding, norm_user)
 
-    best_idx = None
-    best_score = 0.0
+    scores: List[float] = []
+    for emb in FAQ_EMBEDS:
+        scores.append(cosine_similarity(user_emb, emb))
 
-    for idx, emb in enumerate(FAQ_EMBEDS):
-        score = cosine_similarity(user_emb, emb)
-        if score > best_score:
-            best_idx = idx
-            best_score = score
+    # Базовый порог, чтобы совсем мусор не отправлять в GPT
+    BASE_THRESHOLD = 0.55
 
-    # Порог похожести – можно потом подкрутить (0.65–0.75)
-    THRESHOLD = 0.70
+    indexed_scores = [
+        (idx, score) for idx, score in enumerate(scores) if score >= BASE_THRESHOLD
+    ]
 
-    if best_idx is None or best_score < THRESHOLD:
+    if not indexed_scores:
+        # Ничего даже отдалённо похожего
         return None
 
-    data = FAQ_DATA[best_idx]
-    return {
-        "question": data["question"],
-        "answer": data["answer"],
-        "score": best_score,
-    }
+    # Сортируем по убыванию, берём топ-K
+    indexed_scores.sort(key=lambda x: x[1], reverse=True)
+    TOP_K = 5
+    top_indices = [idx for idx, _ in indexed_scores[:TOP_K]]
+
+    candidates: List[Dict[str, str]] = []
+    for idx in top_indices:
+        data = FAQ_DATA[idx]
+        candidates.append(
+            {
+                "question": data["question"],
+                "answer": data["answer"],
+                "score": scores[idx],
+            }
+        )
+
+    # Этап 2: AI-rerank — даём GPT выбрать лучшего кандидата
+    best = await asyncio.to_thread(
+        choose_best_faq_answer,
+        user_question,
+        candidates,
+    )
+
+    # best либо dict с question/answer/score, либо None
+    return best
