@@ -5,25 +5,27 @@ import logging
 
 import sentry_sdk
 from aiogram import Bot, Dispatcher
-from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.types import BotCommand
 
 from app.config import BOT_TOKEN, LOG_LEVEL, SENTRY_DSN
 from app.handlers.start import router as start_router
 from app.handlers.echo import router as echo_router
+from app.handlers.faq import router as faq_router
 
 
 async def main() -> None:
     """Основная функция запуска бота."""
 
-    # Инициализация Sentry (если указан DSN)
+    # --- Инициализация Sentry (если указан DSN) ---
     if SENTRY_DSN:
         sentry_sdk.init(
             dsn=SENTRY_DSN,
             traces_sample_rate=0.0,  # только ошибки, без трейсинга
         )
 
-    # Настройка логирования
+    # --- Настройка логирования ---
     logging.basicConfig(
         level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -35,15 +37,25 @@ async def main() -> None:
             "BOT_TOKEN не задан. Проверь .env или переменные окружения на сервере."
         )
 
-    # Создаём бота и диспетчер
+    # --- Создаём бота и диспетчер ---
     bot = Bot(
         token=BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dp = Dispatcher()
 
-    # Регистрируем роутеры
+    # --- Команды бота в меню Telegram ---
+    await bot.set_my_commands(
+        [
+            BotCommand(command="start", description="Начать"),
+            BotCommand(command="help", description="Помощь"),
+            BotCommand(command="faq", description="Частые вопросы"),
+        ]
+    )
+
+    # --- Регистрируем роутеры ---
     dp.include_router(start_router)
+    dp.include_router(faq_router)   # наш новый FAQ-роутер
     dp.include_router(echo_router)
 
     logger.info("Запускаем бота...")

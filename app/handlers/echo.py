@@ -1,12 +1,12 @@
-"""Обработчик эхо-сообщений."""
-from aiogram import Router
+"""Простой echo-хендлер."""
+
+from aiogram import Router, F
 from aiogram.types import Message
 
 router = Router()
 
 
-@router.message()
-async def echo_handler(message: Message):
-    """Обработчик всех сообщений (эхо)."""
-    await message.answer(f"Вы написали: {message.text}")
-
+@router.message(F.text)
+async def echo(message: Message):
+    """Отправляет пользователю его же текст."""
+    await message.answer(message.text)
