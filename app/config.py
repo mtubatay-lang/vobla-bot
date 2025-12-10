@@ -61,3 +61,7 @@ if not GOOGLE_SERVICE_ACCOUNT_JSON:
         "GOOGLE_SERVICE_ACCOUNT_JSON не задан. "
         "Вставь JSON сервисного аккаунта в .env/Variables."
     )
+
+# Google Sheets: пользователи бота
+USERS_SHEET_ID = os.getenv("USERS_SHEET_ID")
+USERS_SHEET_RANGE = os.getenv("USERS_SHEET_RANGE", "'Пользователи'!A2:H1000")

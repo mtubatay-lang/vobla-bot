@@ -11,6 +11,7 @@ from aiogram.types import BotCommand
 
 from app.config import BOT_TOKEN, LOG_LEVEL, SENTRY_DSN
 from app.handlers.start import router as start_router
+from app.handlers.auth_handler import auth_router
 from app.handlers.echo import router as echo_router
 from app.handlers.faq import router as faq_router
 
@@ -49,13 +50,15 @@ async def main() -> None:
         [
             BotCommand(command="start", description="Начать"),
             BotCommand(command="help", description="Помощь"),
+            BotCommand(command="login", description="Авторизация"),
             BotCommand(command="faq", description="Частые вопросы"),
         ]
     )
 
     # --- Регистрируем роутеры ---
     dp.include_router(start_router)
-    dp.include_router(faq_router)   # наш новый FAQ-роутер
+    dp.include_router(auth_router)  # роутер авторизации
+    dp.include_router(faq_router)   # FAQ-роутер
     dp.include_router(echo_router)
 
     logger.info("Запускаем бота...")

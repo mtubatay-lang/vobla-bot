@@ -25,6 +25,23 @@ def _get_client() -> gspread.Client:
     return gspread.authorize(creds)
 
 
+def get_sheets_client() -> gspread.Client:
+    """Публичная функция для получения gspread-клиента с правами на чтение и запись."""
+    if not GOOGLE_SERVICE_ACCOUNT_JSON:
+        raise ValueError(
+            "GOOGLE_SERVICE_ACCOUNT_JSON не задан. "
+            "Добавь JSON сервисного аккаунта в переменные окружения."
+        )
+
+    info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+
+    # Права на чтение и запись (нужно для auth_service)
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds = Credentials.from_service_account_info(info, scopes=scopes)
+
+    return gspread.authorize(creds)
+
+
 def load_faq_rows() -> List[Dict[str, str]]:
     """Загружает строки FAQ из Google Sheets.
 

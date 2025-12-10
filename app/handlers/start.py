@@ -1,62 +1,124 @@
-"""Обработчики команд /start, /help, /status."""
+"""Обработчики команды /start и авторизации через inline-кнопку."""
 
-import time
-import platform
+import asyncio
+from typing import Dict
 
-import aiogram
-from aiogram import Router
-from aiogram.types import Message
-from aiogram.filters import Command, CommandStart
+from aiogram import Router, F
+from aiogram.dispatcher.event.bases import SkipHandler
+from aiogram.filters import Command
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
+from aiogram.enums import ChatAction
 
-from app.config import LOG_LEVEL
+from app.services.auth_service import (
+    find_user_by_telegram_id,
+    find_user_by_code,
+    bind_telegram_id,
+)
+from app.handlers.auth_handler import _commands_menu_text  # общее меню команд
 
-# Создаем роутер
 router = Router()
 
-# Фиксируем время запуска — для вычисления uptime
-start_time = time.time()
+# Пользователи, от которых ждём ввод кода доступа
+pending_auth: Dict[int, bool] = {}
 
 
-@router.message(CommandStart())
-async def cmd_start(message: Message):
-    """Обработчик команды /start."""
-    text = (
-        f"Привет, {message.from_user.first_name}! 👋\n\n"
-        "Я корпоративный бот Воблабир, работаю 24/7 на Railway.\n\n"
-        "Доступные команды:\n"
-        "/start — приветствие\n"
-        "/help — список команд\n"
-        "/status — информация о состоянии бота"
-    )
-    await message.answer(text)
-
-
-@router.message(Command("help"))
-async def cmd_help(message: Message):
-    """Обработчик команды /help."""
-    text = (
-        "Команды:\n"
-        "/start — приветствие\n"
-        "/help — список команд\n"
-        "/status — состояние бота"
-    )
-    await message.answer(text)
-
-
-@router.message(Command("status"))
-async def cmd_status(message: Message):
-    """Обработчик команды /status — показывает текущее состояние бота."""
-    uptime = time.time() - start_time
-    hours = int(uptime // 3600)
-    minutes = int((uptime % 3600) // 60)
-
-    text = (
-        "📊 <b>Статус бота</b>\n\n"
-        "🟢 Бот работает нормально\n"
-        f"⏱ <b>Uptime:</b> {hours} ч {minutes} мин\n"
-        f"🐍 <b>Python:</b> {platform.python_version()}\n"
-        f"🤖 <b>Aiogram:</b> {aiogram.__version__}\n"
-        f"⚙️ <b>LOG_LEVEL:</b> {LOG_LEVEL}"
+def build_auth_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура с кнопкой авторизации."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔐 Авторизация",
+                    callback_data="start_auth",
+                )
+            ]
+        ]
     )
 
-    await message.answer(text)
+
+@router.message(Command("start"))
+async def cmd_start(message: Message) -> None:
+    """Старт: проверяем авторизацию и показываем кнопку."""
+    tg_id = message.from_user.id
+
+    # 1. Уже авторизованный пользователь
+    user = find_user_by_telegram_id(tg_id)
+    if user:
+        await message.answer(
+            f"👋 Привет, {user.name}!\n"
+            f"Вы авторизованы как <b>{user.role}</b>.\n\n"
+            + _commands_menu_text()
+        )
+        return
+
+    # 2. Новый / неавторизованный пользователь
+    text = (
+        "🔒 Этот бот доступен только для партнёров Воблабир.\n\n"
+        "Если у вас есть код доступа, нажмите кнопку ниже, "
+        "чтобы пройти авторизацию."
+    )
+
+    await message.answer(text, reply_markup=build_auth_keyboard())
+
+
+@router.callback_query(F.data == "start_auth")
+async def on_start_auth(callback: CallbackQuery) -> None:
+    """Нажатие на кнопку «Авторизация» под /start."""
+    tg_id = callback.from_user.id
+
+    pending_auth[tg_id] = True
+
+    await callback.message.answer(
+        "🔐 Для входа в систему введите код доступа, выданный менеджером.\n"
+        "Код можно использовать только один раз."
+    )
+    # закрываем «крутилку» на кнопке
+    await callback.answer()
+
+
+@router.message(F.text)
+async def process_auth_code(message: Message) -> None:
+    """Обработка текста как кода авторизации (если мы его ждём)."""
+    tg_id = message.from_user.id
+    text = message.text.strip()
+
+    # Если бот НЕ ждёт код — передаём обработку дальше другим хендлерам
+    if tg_id not in pending_auth:
+        raise SkipHandler()
+
+    # Анимация печати перед обработкой
+    await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+    await asyncio.sleep(1.2)
+
+    # Ищем пользователя по коду
+    user = find_user_by_code(text)
+
+    if not user:
+        await message.answer(
+            "❌ Код не найден. Проверьте правильность и попробуйте снова."
+        )
+        return
+
+    # Проверяем статус
+    if not user.is_active:
+        await message.answer(
+            "⛔ Ваш код не активирован. Обратитесь к менеджеру."
+        )
+        return
+
+    # Привязываем Telegram ID + фиксируем дату
+    bind_telegram_id(user, tg_id)
+
+    # Удаляем из ожидания
+    pending_auth.pop(tg_id, None)
+
+    await message.answer(
+        f"✅ Добро пожаловать, {user.name}!\n"
+        f"Вы авторизованы как <b>{user.role}</b>.\n\n"
+        + _commands_menu_text()
+    )

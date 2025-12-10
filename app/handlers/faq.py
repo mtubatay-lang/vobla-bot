@@ -4,12 +4,14 @@ import asyncio
 from typing import Set
 
 from aiogram import Router, F
+from aiogram.enums import ChatAction
 from aiogram.filters import Command
 from aiogram.types import Message
 
 from app.config import MANAGER_CHAT_ID
 from app.services.faq_service import find_similar_question
 from app.services.openai_client import adapt_faq_answer
+from app.services.auth_service import find_user_by_telegram_id
 
 router = Router()
 
@@ -19,8 +21,20 @@ PENDING_FAQ_USERS: Set[int] = set()
 
 @router.message(Command("faq"))
 async def cmd_faq(message: Message) -> None:
-    """Команда /faq — включаем режим ожидания вопроса."""
+    """Команда /faq — включает режим ожидания вопроса для авторизованных пользователей."""
     user_id = message.from_user.id
+
+    # 1. Проверяем авторизацию
+    user = find_user_by_telegram_id(user_id)
+    if not user:
+        await message.answer(
+            "🔐 Доступ к базе FAQ только для авторизованных пользователей.\n\n"
+            "Если у вас есть код доступа, отправьте команду /login "
+            "и введите выданный вам код."
+        )
+        return
+
+    # 2. Включаем режим ожидания вопроса
     PENDING_FAQ_USERS.add(user_id)
 
     await message.answer(
@@ -51,13 +65,19 @@ async def handle_faq_question(message: Message) -> None:
 
     await message.answer("🔎 Ищу ответ в базе часто задаваемых вопросов...")
 
+    # Анимация печати перед поиском
+    await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+
     # Ищем похожий вопрос
     match = await find_similar_question(user_question)
 
     if match is not None:
         base_answer = match["answer"]
 
-        # Адаптация ответа через ChatGPT
+        # Анимация печати перед адаптацией ответа
+        await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+
+        # Адаптация ответа через ChatGPT (сносим в поток, чтобы не блокировать event-loop)
         adapted_text = await asyncio.to_thread(
             adapt_faq_answer,
             user_question,
@@ -90,4 +110,3 @@ async def handle_faq_question(message: Message) -> None:
             chat_id=MANAGER_CHAT_ID,
             text=manager_text,
         )
-
