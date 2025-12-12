@@ -97,7 +97,7 @@ async def handle_faq_question(message: Message) -> None:
         # Анимация печати перед адаптацией ответа
         await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
 
-        # Адаптация ответа через ChatGPT (сносим в поток, чтобы не блокировать event-loop)
+        # Адаптация ответа через ChatGPT (в поток, чтобы не блокировать event-loop)
         adapted_text = await asyncio.to_thread(
             adapt_faq_answer,
             user_question,
@@ -119,10 +119,16 @@ async def handle_faq_question(message: Message) -> None:
         "Скоро менеджер свяжется с вами 🙏"
     )
 
-    # Отправляем уведомление менеджерам, если указан MANAGER_CHAT_ID
+    # --- Уведомление менеджерам (с телефоном и юр.лицом) ---
     if MANAGER_CHAT_ID != 0:
         username = message.from_user.username
         full_name = message.from_user.full_name
+
+        # Берём данные из таблицы авторизации
+        auth_user = find_user_by_telegram_id(user_id)
+        phone = (auth_user.phone if auth_user else "") or "не указан"
+        legal_entity = (auth_user.legal_entity if auth_user else "") or "не указано"
+        role = (auth_user.role if auth_user else "") or "unknown"
 
         manager_text = (
             "❓ <b>Новый вопрос от франчайзи</b>\n\n"
@@ -130,8 +136,13 @@ async def handle_faq_question(message: Message) -> None:
         )
         if username:
             manager_text += f" (@{username})"
-        manager_text += f"\n🆔 User ID: <code>{user_id}</code>\n\n"
-        manager_text += f"Вопрос:\n{user_question}"
+        manager_text += (
+            f"\n🆔 User ID: <code>{user_id}</code>"
+            f"\n🎭 Роль: <b>{role}</b>"
+            f"\n📞 Телефон: <b>{phone}</b>"
+            f"\n🏢 Юр. лицо: <b>{legal_entity}</b>\n\n"
+            f"📝 Вопрос:\n{user_question}"
+        )
 
         await message.bot.send_message(
             chat_id=MANAGER_CHAT_ID,
