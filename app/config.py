@@ -69,3 +69,4 @@ USERS_SHEET_RANGE = os.getenv("USERS_SHEET_RANGE", "'Пользователи'!A
 # Google Sheets: статистика и логирование событий
 STATS_SHEET_ID = os.getenv("STATS_SHEET_ID", "")
 STATS_SHEET_TAB = os.getenv("STATS_SHEET_TAB", "bot_stats")
+PENDING_SHEET_TAB = os.getenv("PENDING_SHEET_TAB", "pending_questions")
