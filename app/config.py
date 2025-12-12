@@ -65,3 +65,7 @@ if not GOOGLE_SERVICE_ACCOUNT_JSON:
 # Google Sheets: пользователи бота
 USERS_SHEET_ID = os.getenv("USERS_SHEET_ID")
 USERS_SHEET_RANGE = os.getenv("USERS_SHEET_RANGE", "'Пользователи'!A2:H1000")
+
+# Google Sheets: статистика и логирование событий
+STATS_SHEET_ID = os.getenv("STATS_SHEET_ID", "")
+STATS_SHEET_TAB = os.getenv("STATS_SHEET_TAB", "bot_stats")

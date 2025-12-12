@@ -11,6 +11,7 @@ from app.services.auth_service import (
     bind_telegram_id,
     find_user_by_telegram_id,
 )
+from app.services.metrics_service import log_event
 
 auth_router = Router()
 
@@ -55,11 +56,23 @@ async def login_start(message: Message, state: FSMContext) -> None:
         "который выдали вам менеджеры."
     )
 
+    log_event(
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        event="login_command",
+    )
+
 
 # 🔹 Обработка ввода кода
 @auth_router.message(AuthState.waiting_for_code)
 async def process_code(message: Message, state: FSMContext) -> None:
     code = message.text.strip()
+
+    log_event(
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        event="auth_code_submitted",
+    )
 
     if not code:
         await message.answer("Я не увидел кода. Введите, пожалуйста, текстом 🙏")
@@ -68,11 +81,23 @@ async def process_code(message: Message, state: FSMContext) -> None:
     user = find_user_by_code(code)
 
     if not user:
+        log_event(
+            user_id=message.from_user.id,
+            username=message.from_user.username,
+            event="auth_failed_code_not_found",
+        )
         await message.answer("❌ Неверный код доступа. Попробуйте ещё раз.")
         return
 
     # Привязываем Telegram ID
     bind_telegram_id(user, message.from_user.id)
+
+    log_event(
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        event="auth_success",
+        meta={"role": getattr(user, "role", ""), "name": getattr(user, "name", "")},
+    )
 
     # Чистим состояние
     await state.clear()

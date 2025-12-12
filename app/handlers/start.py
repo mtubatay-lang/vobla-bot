@@ -20,6 +20,7 @@ from app.services.auth_service import (
     bind_telegram_id,
 )
 from app.handlers.auth_handler import _commands_menu_text  # общее меню команд
+from app.services.metrics_service import log_event
 
 router = Router()
 
@@ -49,6 +50,12 @@ async def cmd_start(message: Message) -> None:
     # 1. Уже авторизованный пользователь
     user = find_user_by_telegram_id(tg_id)
     if user:
+        log_event(
+            user_id=tg_id,
+            username=message.from_user.username,
+            event="start_authorized",
+            meta={"role": getattr(user, "role", "")},
+        )
         await message.answer(
             f"👋 Привет, {user.name}!\n"
             f"Вы авторизованы как <b>{user.role}</b>.\n\n"
@@ -57,6 +64,11 @@ async def cmd_start(message: Message) -> None:
         return
 
     # 2. Новый / неавторизованный пользователь
+    log_event(
+        user_id=tg_id,
+        username=message.from_user.username,
+        event="start_unauthorized",
+    )
     text = (
         "🔒 Этот бот доступен только для партнёров Воблабир.\n\n"
         "Если у вас есть код доступа, нажмите кнопку ниже, "
@@ -72,6 +84,12 @@ async def on_start_auth(callback: CallbackQuery) -> None:
     tg_id = callback.from_user.id
 
     pending_auth[tg_id] = True
+
+    log_event(
+        user_id=tg_id,
+        username=callback.from_user.username,
+        event="auth_button_click",
+    )
 
     await callback.message.answer(
         "🔐 Для входа в систему введите код доступа, выданный менеджером.\n"
@@ -95,10 +113,21 @@ async def process_auth_code(message: Message) -> None:
     await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
     await asyncio.sleep(1.2)
 
+    log_event(
+        user_id=tg_id,
+        username=message.from_user.username,
+        event="auth_code_submitted",
+    )
+
     # Ищем пользователя по коду
     user = find_user_by_code(text)
 
     if not user:
+        log_event(
+            user_id=tg_id,
+            username=message.from_user.username,
+            event="auth_failed_code_not_found",
+        )
         await message.answer(
             "❌ Код не найден. Проверьте правильность и попробуйте снова."
         )
@@ -106,6 +135,11 @@ async def process_auth_code(message: Message) -> None:
 
     # Проверяем статус
     if not user.is_active:
+        log_event(
+            user_id=tg_id,
+            username=message.from_user.username,
+            event="auth_failed_inactive",
+        )
         await message.answer(
             "⛔ Ваш код не активирован. Обратитесь к менеджеру."
         )
@@ -113,6 +147,13 @@ async def process_auth_code(message: Message) -> None:
 
     # Привязываем Telegram ID + фиксируем дату
     bind_telegram_id(user, tg_id)
+
+    log_event(
+        user_id=tg_id,
+        username=message.from_user.username,
+        event="auth_success",
+        meta={"role": getattr(user, "role", ""), "name": getattr(user, "name", "")},
+    )
 
     # Удаляем из ожидания
     pending_auth.pop(tg_id, None)

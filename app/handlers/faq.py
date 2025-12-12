@@ -12,6 +12,7 @@ from app.config import MANAGER_CHAT_ID
 from app.services.faq_service import find_similar_question
 from app.services.openai_client import adapt_faq_answer
 from app.services.auth_service import find_user_by_telegram_id
+from app.services.metrics_service import log_event
 
 router = Router()
 
@@ -36,6 +37,12 @@ async def cmd_faq(message: Message) -> None:
 
     # 2. Включаем режим ожидания вопроса
     PENDING_FAQ_USERS.add(user_id)
+
+    log_event(
+        user_id=user_id,
+        username=message.from_user.username,
+        event="faq_mode_enter",
+    )
 
     await message.answer(
         "✉️ Напишите, пожалуйста, ваш вопрос по работе Воблабир.\n"
@@ -63,6 +70,13 @@ async def handle_faq_question(message: Message) -> None:
         await message.answer("Я не увидел вопроса. Напишите, пожалуйста, текстом 🙏")
         return
 
+    log_event(
+        user_id=user_id,
+        username=message.from_user.username,
+        event="faq_question_submitted",
+        meta={"text": user_question},
+    )
+
     await message.answer("🔎 Ищу ответ в базе часто задаваемых вопросов...")
 
     # Анимация печати перед поиском
@@ -72,6 +86,12 @@ async def handle_faq_question(message: Message) -> None:
     match = await find_similar_question(user_question)
 
     if match is not None:
+        log_event(
+            user_id=user_id,
+            username=message.from_user.username,
+            event="faq_answer_found",
+            meta={"matched_question": match.get("question", "")},
+        )
         base_answer = match["answer"]
 
         # Анимация печати перед адаптацией ответа
@@ -87,6 +107,13 @@ async def handle_faq_question(message: Message) -> None:
         return
 
     # Если похожего вопроса не нашли
+    log_event(
+        user_id=user_id,
+        username=message.from_user.username,
+        event="faq_answer_not_found",
+        meta={"text": user_question},
+    )
+
     await message.answer(
         "Пока у меня нет готового ответа на этот вопрос. "
         "Скоро менеджер свяжется с вами 🙏"
