@@ -59,8 +59,8 @@ async def main() -> None:
     # --- Регистрируем роутеры ---
     dp.include_router(start_router)
     dp.include_router(auth_router)  # роутер авторизации
-    dp.include_router(faq_router)   # FAQ-роутер
     dp.include_router(manager_router)  # роутер для менеджеров
+    dp.include_router(faq_router)   # FAQ-роутер
     dp.include_router(echo_router)
 
     logger.info("Запускаем бота...")

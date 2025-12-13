@@ -5,7 +5,7 @@ import inspect
 import logging
 import re
 from datetime import datetime
-from typing import Optional, Any, Dict
+from typing import Optional, Any
 
 from aiogram import Router, F
 from aiogram.enums import ParseMode, ChatAction
@@ -31,6 +31,7 @@ def _now() -> str:
 
 
 def _manager_chat_id_int() -> Optional[int]:
+    """MANAGER_CHAT_ID может приходить строкой из env — приводим к int."""
     if not MANAGER_CHAT_ID:
         return None
     try:
@@ -70,6 +71,16 @@ def _append_faq_to_sheet_sync(question: str, answer: str) -> None:
     ws.append_row(["", "", question, answer], value_input_option="RAW")
 
 
+# --- ФИЛЬТРЫ НА УРОВНЕ РОУТЕРА: только менеджерский чат ---
+_mgr_chat = _manager_chat_id_int()
+if _mgr_chat:
+    router.message.filter(F.chat.id == _mgr_chat)
+    router.callback_query.filter(F.message.chat.id == _mgr_chat)
+else:
+    # Если вдруг не настроен MANAGER_CHAT_ID — логируем, чтобы сразу видно в Railway
+    logger.warning("MANAGER_CHAT_ID is empty or invalid. Manager handlers will not be chat-restricted.")
+
+
 @router.callback_query(F.data.startswith("mgr_reply:"))
 async def on_manager_reply_click(callback: CallbackQuery) -> None:
     """Менеджер нажал кнопку 'Ответить' под тикетом."""
@@ -77,15 +88,12 @@ async def on_manager_reply_click(callback: CallbackQuery) -> None:
         await callback.answer()
         return
 
-    mgr_chat = _manager_chat_id_int()
-    if mgr_chat and callback.message.chat.id != mgr_chat:
-        await callback.answer("Эта кнопка доступна только менеджерам.", show_alert=True)
-        return
-
     ticket_id = callback.data.split("mgr_reply:", 1)[1].strip()
     if not ticket_id:
         await callback.answer("Не вижу ticket_id", show_alert=True)
         return
+
+    logger.info("[MANAGER_REPLY] click mgr_reply ticket_id=%s chat_id=%s", ticket_id, callback.message.chat.id)
 
     ticket = await _maybe_await(get_ticket(ticket_id))
     if not ticket:
@@ -118,14 +126,19 @@ async def on_manager_text(message: Message) -> None:
     """
     Ловим ответ менеджера ТОЛЬКО если это reply на сообщение бота с Ticket: ...
     """
-    mgr_chat = _manager_chat_id_int()
-    if mgr_chat and message.chat.id != mgr_chat:
-        return
+    logger.info(
+        "[MANAGER_REPLY] HIT on_manager_text chat_id=%s from=%s",
+        message.chat.id,
+        message.from_user.id if message.from_user else None,
+    )
 
     src_text = (message.reply_to_message.text or "") if message.reply_to_message else ""
     ticket_id = _extract_ticket_id(src_text)
     if not ticket_id:
+        logger.info("[MANAGER_REPLY] reply_to_message has no Ticket: ... ; skip")
         return
+
+    logger.info("[MANAGER_REPLY] ticket_id=%s", ticket_id)
 
     answer_text = (message.text or "").strip()
     if not answer_text:
@@ -147,7 +160,7 @@ async def on_manager_text(message: Message) -> None:
     # Пытаемся отправить пользователю (и ЛОВИМ ошибки!)
     try:
         await message.bot.send_chat_action(user_id, ChatAction.TYPING)
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.2)
 
         user_message = (
             "✅ <b>Менеджер ответил на ваш вопрос</b>\n\n"
@@ -157,15 +170,26 @@ async def on_manager_text(message: Message) -> None:
         await message.bot.send_message(chat_id=user_id, text=user_message, parse_mode=ParseMode.HTML)
 
     except TelegramForbiddenError:
-        # пользователь не стартовал бота / заблокировал
         await message.reply("❌ Не смог отправить: пользователь не нажал Start или заблокировал бота.")
-        # всё равно фиксируем ответ в тикете, чтобы не терять
         await _maybe_await(
-            update_ticket_fields(ticket_id, {"status": "answered_not_delivered", "manager_answer": answer_text, "answered_at": _now()})
+            update_ticket_fields(
+                ticket_id,
+                {
+                    "status": "answered_not_delivered",
+                    "manager_answer": answer_text,
+                    "answered_at": _now(),
+                },
+            )
         )
         return
+
     except TelegramBadRequest as e:
         await message.reply(f"❌ Ошибка отправки пользователю: {e}")
+        return
+
+    except Exception as e:
+        logger.exception("[MANAGER_REPLY] Unexpected error sending to user")
+        await message.reply(f"❌ Неожиданная ошибка при отправке пользователю: {e}")
         return
 
     # Обновляем тикет (успешная доставка)
@@ -207,6 +231,7 @@ async def on_manager_text(message: Message) -> None:
             )
         )
     except Exception as e:
+        logger.exception("[MANAGER_REPLY] FAQ write failed")
         await message.reply(f"⚠️ Ответ отправлен пользователю, но не смог записать в FAQ: {e}")
         return
 
