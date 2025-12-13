@@ -16,6 +16,7 @@ from app.config import MANAGER_CHAT_ID, SHEET_ID  # SHEET_ID — FAQ-табли�
 from app.services.pending_questions_service import get_ticket, update_ticket_fields
 from app.services.metrics_service import log_event
 from app.services.sheets_client import get_sheets_client
+from app.services.faq_service import add_faq_entry_to_cache
 
 logger = logging.getLogger(__name__)
 
@@ -221,6 +222,7 @@ async def on_manager_text(message: Message) -> None:
     # Пишем в FAQ (в отдельном потоке, чтобы не блокировать бота)
     try:
         await asyncio.to_thread(_append_faq_to_sheet_sync, ticket.get("question", ""), answer_text)
+        await add_faq_entry_to_cache(ticket.get("question", ""), answer_text)
         await _maybe_await(update_ticket_fields(ticket_id, {"faq_written_at": _now()}))
         await _maybe_await(
             log_event(
