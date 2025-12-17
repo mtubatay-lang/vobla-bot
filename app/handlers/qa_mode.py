@@ -31,6 +31,19 @@ async def qa_start(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 
+@router.message(F.text == "❓ Задать вопрос")
+async def qa_start_text(message: Message, state: FSMContext):
+    await state.set_state(QAMode.active)
+    await message.answer(
+        "🧠 <b>Навык: Ответы на вопросы</b>\n\n"
+        "Напиши вопрос — я попробую ответить по базе знаний.\n"
+        "Можно задавать вопросы подряд.\n\n"
+        "Чтобы выйти — нажми «Завершить навык».",
+        reply_markup=qa_kb(),
+        parse_mode="HTML",
+    )
+
+
 @router.callback_query(F.data == "qa_exit")
 async def qa_exit(cb: CallbackQuery, state: FSMContext):
     await state.clear()
