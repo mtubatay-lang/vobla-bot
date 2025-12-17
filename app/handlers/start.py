@@ -21,6 +21,7 @@ from app.services.auth_service import (
 )
 from app.handlers.auth_handler import _commands_menu_text  # общее меню команд
 from app.services.metrics_service import log_event
+from app.ui.keyboards import main_menu_kb
 
 router = Router()
 
@@ -59,7 +60,8 @@ async def cmd_start(message: Message) -> None:
         await message.answer(
             f"👋 Привет, {user.name}!\n"
             f"Вы авторизованы как <b>{user.role}</b>.\n\n"
-            + _commands_menu_text()
+            + _commands_menu_text(),
+            reply_markup=main_menu_kb(),
         )
         return
 
@@ -161,5 +163,6 @@ async def process_auth_code(message: Message) -> None:
     await message.answer(
         f"✅ Добро пожаловать, {user.name}!\n"
         f"Вы авторизованы как <b>{user.role}</b>.\n\n"
-        + _commands_menu_text()
+        + _commands_menu_text(),
+        reply_markup=main_menu_kb(),
     )

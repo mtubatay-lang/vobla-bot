@@ -12,6 +12,7 @@ from app.services.auth_service import (
     find_user_by_telegram_id,
 )
 from app.services.metrics_service import log_event
+from app.ui.keyboards import main_menu_kb
 
 auth_router = Router()
 
@@ -44,7 +45,8 @@ async def login_start(message: Message, state: FSMContext) -> None:
             f"✅ Вы уже авторизованы.\n"
             f"👤 Имя: <b>{user.name}</b>\n"
             f"🎯 Роль: <b>{user.role}</b>\n\n"
-            + _commands_menu_text()
+            + _commands_menu_text(),
+            reply_markup=main_menu_kb(),
         )
         return
 
@@ -107,5 +109,6 @@ async def process_code(message: Message, state: FSMContext) -> None:
         f"✅ Доступ подтверждён!\n"
         f"Добро пожаловать, <b>{user.name}</b> 👋\n"
         f"Ваша роль: <b>{user.role}</b>.\n\n"
-        + _commands_menu_text()
+        + _commands_menu_text(),
+        reply_markup=main_menu_kb(),
     )
