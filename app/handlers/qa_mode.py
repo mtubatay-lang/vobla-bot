@@ -1,3 +1,5 @@
+import logging
+
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, Message
 from aiogram.fsm.context import FSMContext
@@ -7,6 +9,8 @@ from app.services.faq_service import find_similar_question
 from app.services.metrics_service import alog_event  # async-логгер
 from app.services.pending_questions_service import create_ticket_and_notify_managers
 from app.ui.keyboards import qa_kb, main_menu_kb
+
+logger = logging.getLogger(__name__)
 
 router = Router()
 
@@ -97,4 +101,10 @@ async def qa_handle_question(message: Message, state: FSMContext):
     )
 
     await create_ticket_and_notify_managers(message, q)
+
+
+@router.callback_query()
+async def debug_all_callbacks(cb: CallbackQuery):
+    logger.info("[DEBUG CALLBACK] data=%s", cb.data)
+    await cb.answer()
 
