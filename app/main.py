@@ -7,14 +7,17 @@ import sentry_sdk
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand
 
 from app.config import BOT_TOKEN, LOG_LEVEL, SENTRY_DSN
+from app.handlers.debug_passthrough import router as debug_router
 from app.handlers.start import router as start_router
 from app.handlers.auth_handler import auth_router
 from app.handlers.echo import router as echo_router
 from app.handlers.faq import router as faq_router
 from app.handlers.manager_reply import router as manager_router
+from app.handlers.qa_mode import router as qa_router
 
 
 async def main() -> None:
@@ -44,7 +47,7 @@ async def main() -> None:
         token=BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
-    dp = Dispatcher()
+    dp = Dispatcher(storage=MemoryStorage())
 
     # --- Команды бота в меню Telegram ---
     await bot.set_my_commands(
@@ -57,9 +60,11 @@ async def main() -> None:
     )
 
     # --- Регистрируем роутеры ---
+    dp.include_router(debug_router)  # сквозной дебаг (первым!)
     dp.include_router(start_router)
     dp.include_router(auth_router)  # роутер авторизации
     dp.include_router(manager_router)  # роутер для менеджеров
+    dp.include_router(qa_router)  # роутер режима навыка
     dp.include_router(faq_router)   # FAQ-роутер
     dp.include_router(echo_router)
 
