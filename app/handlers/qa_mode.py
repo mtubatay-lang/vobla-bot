@@ -25,6 +25,7 @@ class QAMode(StatesGroup):
 @router.callback_query(F.data == "qa_start")
 async def qa_start(cb: CallbackQuery, state: FSMContext):
     await state.set_state(QAMode.active)
+    await state.update_data(qa_history=[])  # сброс истории при входе
 
     await cb.message.answer(
         "🧠 <b>Навык: Ответы на вопросы</b>\n\n"
@@ -41,6 +42,7 @@ async def qa_start(cb: CallbackQuery, state: FSMContext):
 @router.message(F.text == "❓ Задать вопрос")
 async def qa_start_text(message: Message, state: FSMContext):
     await state.set_state(QAMode.active)
+    await state.update_data(qa_history=[])  # сброс истории при входе
     await message.answer(
         "🧠 <b>Навык: Ответы на вопросы</b>\n\n"
         "Напиши вопрос — я попробую ответить по базе знаний.\n"
@@ -54,6 +56,7 @@ async def qa_start_text(message: Message, state: FSMContext):
 @router.message(Command("ask"))
 async def qa_start_command(message: Message, state: FSMContext):
     await state.set_state(QAMode.active)
+    await state.update_data(qa_history=[])  # сброс истории при входе
     await message.answer(
         "🧠 <b>Навык: Ответы на вопросы</b>\n\n"
         "Напиши вопрос — я попробую ответить по базе знаний.\n"
@@ -104,9 +107,8 @@ async def qa_handle_question(message: Message, state: FSMContext):
         # Обновим историю: ответ бота (уже красивый)
         history.append({"role": "assistant", "text": pretty})
 
-        # Обрежем историю (последние 8 сообщений)
-        history = history[-8:]
-        await state.update_data(qa_history=history)
+        # Обрежем историю до последних 8 сообщений и сохраним
+        await state.update_data(qa_history=history[-8:])
 
         # ✅ автоответ из FAQ (полированный)
         await message.answer(

@@ -1,6 +1,7 @@
 """Клиент OpenAI для эмбеддингов и работы с ответами FAQ."""
 
 import os
+import re
 from typing import List, Dict, Optional
 
 from openai import OpenAI
@@ -163,6 +164,16 @@ def choose_best_faq_answer(
 #      ПОЛИРОВКА ОТВЕТА
 # -----------------------------
 
+def _strip_greeting(text: str) -> str:
+    """Убирает приветствие из начала текста, если оно там есть."""
+    return re.sub(
+        r"^(Здравствуйте|Добрый день|Привет)[!,.]?\s*",
+        "",
+        text.strip(),
+        flags=re.IGNORECASE,
+    )
+
+
 def polish_faq_answer(
     user_question: str,
     raw_answer: str,
@@ -194,6 +205,8 @@ def polish_faq_answer(
         "4) Сохраняй все числа, даты, время, названия без изменений.\n"
         "5) Можно: переформулировать, убрать канцелярит, разбить на абзацы/списки, добавить эмодзи.\n"
         "6) Адаптируй под вопрос пользователя и контекст диалога (тон/обращение), но без новых фактов.\n"
+        "7) НЕ начинай ответ с приветствия, если это не первое сообщение в диалоге.\n"
+        "8) Если пользователь не здоровался — не здоровайся.\n"
     )
 
     user = (
@@ -216,5 +229,10 @@ def polish_faq_answer(
         ],
         temperature=0.2,
     )
-    content = resp.choices[0].message.content or ""
-    return content.strip()
+    out = (resp.choices[0].message.content or "").strip()
+    
+    # Убираем приветствие, если это не первое сообщение в диалоге
+    if history and any(h.get("role") == "assistant" for h in history):
+        out = _strip_greeting(out)
+    
+    return out
