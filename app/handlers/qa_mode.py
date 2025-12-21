@@ -1,6 +1,7 @@
 import logging
 
 from aiogram import Router, F
+from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
@@ -37,6 +38,19 @@ async def qa_start(cb: CallbackQuery, state: FSMContext):
 
 @router.message(F.text == "❓ Задать вопрос")
 async def qa_start_text(message: Message, state: FSMContext):
+    await state.set_state(QAMode.active)
+    await message.answer(
+        "🧠 <b>Навык: Ответы на вопросы</b>\n\n"
+        "Напиши вопрос — я попробую ответить по базе знаний.\n"
+        "Можно задавать вопросы подряд.\n\n"
+        "Чтобы выйти — нажми «✅ Завершить навык».",
+        reply_markup=qa_kb(),
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("ask"))
+async def qa_start_command(message: Message, state: FSMContext):
     await state.set_state(QAMode.active)
     await message.answer(
         "🧠 <b>Навык: Ответы на вопросы</b>\n\n"

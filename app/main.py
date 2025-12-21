@@ -55,7 +55,7 @@ async def main() -> None:
             BotCommand(command="start", description="Начать"),
             BotCommand(command="help", description="Помощь"),
             BotCommand(command="login", description="Авторизация"),
-            BotCommand(command="faq", description="Частые вопросы"),
+            BotCommand(command="ask", description="Задать вопрос"),
         ]
     )
 
