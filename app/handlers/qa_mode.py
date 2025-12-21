@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from aiogram import Router, F
@@ -8,6 +9,7 @@ from aiogram.fsm.state import StatesGroup, State
 
 from app.services.faq_service import find_similar_question
 from app.services.metrics_service import alog_event  # async-логгер
+from app.services.openai_client import polish_faq_answer
 from app.services.pending_questions_service import create_ticket_and_notify_managers
 from app.ui.keyboards import qa_kb, main_menu_kb
 
@@ -84,10 +86,31 @@ async def qa_handle_question(message: Message, state: FSMContext):
     best = await find_similar_question(q)
 
     if best:
-        # ✅ автоответ из FAQ
+        # Достаём историю из FSM state
+        data = await state.get_data()
+        history = data.get("qa_history", [])
+
+        raw_answer = best["answer"]
+
+        # Обновим историю: пользовательский вопрос
+        history.append({"role": "user", "text": q})
+
+        # Полировка в отдельном потоке, чтобы не блокировать loop
+        try:
+            pretty = await asyncio.to_thread(polish_faq_answer, q, raw_answer, history)
+        except Exception:
+            pretty = raw_answer
+
+        # Обновим историю: ответ бота (уже красивый)
+        history.append({"role": "assistant", "text": pretty})
+
+        # Обрежем историю (последние 8 сообщений)
+        history = history[-8:]
+        await state.update_data(qa_history=history)
+
+        # ✅ автоответ из FAQ (полированный)
         await message.answer(
-            f"🤖 <b>Ответ из базы знаний</b>\n\n{best['answer']}\n\n"
-            "Если есть ещё вопрос — просто напиши его 👇",
+            pretty + "\n\nЕсли есть ещё вопрос — просто напиши его 👇",
             reply_markup=qa_kb(),
             parse_mode="HTML",
         )
