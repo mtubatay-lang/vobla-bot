@@ -70,3 +70,4 @@ USERS_SHEET_RANGE = os.getenv("USERS_SHEET_RANGE", "'Пользователи'!A
 STATS_SHEET_ID = os.getenv("STATS_SHEET_ID", "")
 STATS_SHEET_TAB = os.getenv("STATS_SHEET_TAB", "bot_stats")
 PENDING_SHEET_TAB = os.getenv("PENDING_SHEET_TAB", "pending_questions")
+QA_FEEDBACK_SHEET_TAB = os.getenv("QA_FEEDBACK_SHEET_TAB", "qa_feedback")
