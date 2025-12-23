@@ -8,6 +8,7 @@ from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKe
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 
+from app.services.auth_service import find_user_by_telegram_id
 from app.services.faq_service import find_similar_question
 from app.services.metrics_service import alog_event  # async-логгер
 from app.services.openai_client import polish_faq_answer
@@ -57,8 +58,37 @@ def _kb_skip_comment() -> InlineKeyboardMarkup:
     ]])
 
 
+async def _require_auth(obj) -> bool:
+    """
+    Возвращает True если авторизован, иначе отправляет сообщение и False.
+    obj может быть Message или CallbackQuery (у обоих есть from_user и bot/message).
+    """
+    user_id = obj.from_user.id if obj.from_user else 0
+    user = find_user_by_telegram_id(user_id)
+
+    if user:
+        return True
+
+    # универсально отправляем ответ
+    text = (
+        "🔒 Доступ к навыку «Задать вопрос» доступен только партнёрам Воблабир.\n\n"
+        "Пожалуйста, пройдите авторизацию: /start → 🔐 Авторизация."
+    )
+
+    if hasattr(obj, "message") and obj.message:
+        await obj.message.answer(text)
+        await obj.answer()
+    else:
+        await obj.answer(text)
+
+    return False
+
+
 @router.callback_query(F.data == "qa_start")
 async def qa_start(cb: CallbackQuery, state: FSMContext):
+    if not await _require_auth(cb):
+        return
+
     session_id = uuid.uuid4().hex[:12]
     await state.set_state(QAMode.active)
     await state.update_data(
@@ -83,6 +113,9 @@ async def qa_start(cb: CallbackQuery, state: FSMContext):
 
 @router.message(F.text == "❓ Задать вопрос")
 async def qa_start_text(message: Message, state: FSMContext):
+    if not await _require_auth(message):
+        return
+
     session_id = uuid.uuid4().hex[:12]
     await state.set_state(QAMode.active)
     await state.update_data(
@@ -104,6 +137,9 @@ async def qa_start_text(message: Message, state: FSMContext):
 
 @router.message(Command("ask"))
 async def qa_start_command(message: Message, state: FSMContext):
+    if not await _require_auth(message):
+        return
+
     session_id = uuid.uuid4().hex[:12]
     await state.set_state(QAMode.active)
     await state.update_data(
@@ -137,6 +173,9 @@ async def qa_exit(cb: CallbackQuery, state: FSMContext):
 
 @router.message(QAMode.active, F.text)
 async def qa_handle_question(message: Message, state: FSMContext):
+    if not await _require_auth(message):
+        return
+
     q = (message.text or "").strip()
     if not q:
         await message.answer("Напиши вопрос текстом 🙂", reply_markup=qa_kb())
