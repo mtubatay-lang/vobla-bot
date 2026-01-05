@@ -88,26 +88,40 @@ def read_events_by_dates(date_from: str, date_to: str) -> List[Dict[str, Any]]:
     if not values or len(values) < 2:
         return []
 
-    # ожидаем заголовок в первой строке
-    rows = values[1:]
+    headers = [h.strip() for h in values[0]]
+    idx = {h: i for i, h in enumerate(headers) if h}
+
+    def col(name: str) -> Optional[int]:
+        return idx.get(name)
+
+    ts_i = col("ts")
+    d_i = col("date")
+    uid_i = col("user_id")
+    uname_i = col("username")
+    ev_i = col("event")
+    meta_i = col("meta_json")
+
+    # если вдруг таблица не по ожидаемым заголовкам — лучше явно не врать отчётами
+    required = [ts_i, d_i, uid_i, uname_i, ev_i, meta_i]
+    if any(i is None for i in required):
+        return []
 
     out: List[Dict[str, Any]] = []
-    for r in rows:
-        # ts | date | user_id | username | event | meta_json
-        ts = r[0] if len(r) > 0 else ""
-        d = r[1] if len(r) > 1 else ""
-        uid = r[2] if len(r) > 2 else ""
-        uname = r[3] if len(r) > 3 else ""
-        ev = r[4] if len(r) > 4 else ""
-        meta_json = r[5] if len(r) > 5 else ""
+    for r in values[1:]:
+        def get(i: int) -> str:
+            return (r[i] if i < len(r) else "").strip()
 
-        if not d:
+        d_raw = get(d_i)
+        if not d_raw:
             continue
 
-        # фильтр по диапазону дат строкой (ISO сортируемый)
+        # нормализуем дату в ISO day: YYYY-MM-DD
+        d = d_raw[:10].strip()
+
         if d < date_from or d > date_to:
             continue
 
+        meta_json = get(meta_i)
         meta: Dict[str, Any] = {}
         if meta_json:
             try:
@@ -117,11 +131,11 @@ def read_events_by_dates(date_from: str, date_to: str) -> List[Dict[str, Any]]:
 
         out.append(
             {
-                "ts": ts,
+                "ts": get(ts_i),
                 "date": d,
-                "user_id": uid,
-                "username": uname,
-                "event": ev,
+                "user_id": get(uid_i),
+                "username": get(uname_i),
+                "event": get(ev_i),
                 "meta": meta,
             }
         )

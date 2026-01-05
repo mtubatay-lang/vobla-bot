@@ -44,3 +44,4 @@ async def cmd_help(message: Message) -> None:
     else:
         await message.answer(_help_text_unauthorized())
 
+
