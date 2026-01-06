@@ -58,6 +58,10 @@ def create_ticket(
     created_at = _utc_now_iso()
     status = "open"
 
+    # Проверяем наличие колонки manager_media_json
+    headers = ws.row_values(1)
+    has_manager_media_json = "manager_media_json" in [h.strip() for h in headers]
+
     row = [
         ticket_id,
         created_at,
@@ -72,6 +76,10 @@ def create_ticket(
         "",  # answered_by
         "",  # answered_at
     ]
+
+    # Добавляем пустое значение для manager_media_json, если колонка есть
+    if has_manager_media_json:
+        row.append("")  # manager_media_json
 
     ws.append_row(row, value_input_option="RAW")
     return ticket_id

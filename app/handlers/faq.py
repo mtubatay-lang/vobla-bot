@@ -1,10 +1,11 @@
 """Хендлеры для работы с частыми вопросами франчайзи (/faq)."""
 
 import asyncio
-from typing import Set, Optional
+import json
+from typing import Set, Optional, List, Dict, Any
 
 from aiogram import Router, F
-from aiogram.enums import ChatAction
+from aiogram.enums import ChatAction, ParseMode
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 
@@ -143,6 +144,34 @@ async def handle_faq_question(message: Message) -> None:
         )
 
         await message.answer(adapted_text)
+
+        # Отправляем медиа-вложения, если есть
+        media_json = match.get("media_json", "")
+        if media_json:
+            try:
+                attachments: List[Dict[str, Any]] = json.loads(media_json)
+                for att in attachments:
+                    file_id = att.get("file_id")
+                    if not file_id:
+                        continue
+                    caption = att.get("caption", "")
+                    att_type = att.get("type", "")
+                    if att_type == "photo":
+                        await message.bot.send_photo(chat_id=message.chat.id, photo=file_id, caption=caption or None, parse_mode=ParseMode.HTML if caption else None)
+                    elif att_type == "video":
+                        await message.bot.send_video(chat_id=message.chat.id, video=file_id, caption=caption or None, parse_mode=ParseMode.HTML if caption else None)
+                    elif att_type == "document":
+                        await message.bot.send_document(chat_id=message.chat.id, document=file_id, caption=caption or None, parse_mode=ParseMode.HTML if caption else None)
+                log_event(
+                    user_id=user_id,
+                    username=message.from_user.username,
+                    event="faq_media_sent",
+                    meta={"matched_question": match.get("question", "")},
+                )
+            except Exception as e:
+                # Логируем ошибку, но не прерываем выполнение
+                pass
+
         return
 
     # --- НЕ НАШЛИ ОТВЕТ ---

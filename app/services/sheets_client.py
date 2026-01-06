@@ -48,8 +48,9 @@ def load_faq_rows() -> List[Dict[str, str]]:
     Ожидаем:
     - столбец C: вопрос
     - столбец D: ответ
+    - столбец E: media_json (опционально)
 
-    Диапазон задаем через SHEET_RANGE, например: 'Sheet1'!C:D
+    Диапазон задаем через SHEET_RANGE, например: 'Sheet1'!C:D или 'Sheet1'!C:E
     """
     client = _get_client()
     sh = client.open_by_key(SHEET_ID)
@@ -66,13 +67,18 @@ def load_faq_rows() -> List[Dict[str, str]]:
 
     result: List[Dict[str, str]] = []
     for row in rows:
-        # row = [вопрос, ответ]
+        # row = [вопрос, ответ, media_json?]
         if not row or len(row) < 2:
             continue
         question = (row[0] or "").strip()
         answer = (row[1] or "").strip()
+        media_json = (row[2] or "").strip() if len(row) > 2 else ""
         if question and answer:
-            result.append({"question": question, "answer": answer})
+            result.append({
+                "question": question,
+                "answer": answer,
+                "media_json": media_json,
+            })
 
     return result
 

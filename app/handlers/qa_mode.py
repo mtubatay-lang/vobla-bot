@@ -1,12 +1,15 @@
 import asyncio
+import json
 import logging
 import uuid
+from typing import List, Dict, Any
 
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
+from aiogram.enums import ParseMode
 
 from app.services.auth_service import find_user_by_telegram_id
 from app.services.faq_service import find_similar_question
@@ -56,6 +59,34 @@ def _kb_skip_comment() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="Пропустить", callback_data="fb_skip_comment"),
     ]])
+
+
+async def _send_media_from_json(bot, chat_id: int, media_json: str) -> None:
+    """Отправляет медиа-вложения из JSON строки."""
+    if not media_json or not media_json.strip():
+        return
+
+    try:
+        attachments: List[Dict[str, Any]] = json.loads(media_json)
+        if not attachments:
+            return
+
+        for att in attachments:
+            file_id = att.get("file_id")
+            if not file_id:
+                continue
+
+            caption = att.get("caption", "")
+            att_type = att.get("type", "")
+
+            if att_type == "photo":
+                await bot.send_photo(chat_id=chat_id, photo=file_id, caption=caption or None, parse_mode=ParseMode.HTML if caption else None)
+            elif att_type == "video":
+                await bot.send_video(chat_id=chat_id, video=file_id, caption=caption or None, parse_mode=ParseMode.HTML if caption else None)
+            elif att_type == "document":
+                await bot.send_document(chat_id=chat_id, document=file_id, caption=caption or None, parse_mode=ParseMode.HTML if caption else None)
+    except Exception as e:
+        logger.exception(f"[QA_MODE] Error sending media: {e}")
 
 
 async def _require_auth(obj) -> bool:
@@ -223,6 +254,17 @@ async def qa_handle_question(message: Message, state: FSMContext):
             reply_markup=qa_kb(),
             parse_mode="HTML",
         )
+
+        # Отправляем медиа-вложения, если есть
+        media_json = best.get("media_json", "")
+        if media_json:
+            await _send_media_from_json(message.bot, message.chat.id, media_json)
+            await alog_event(
+                user_id=message.from_user.id if message.from_user else None,
+                username=message.from_user.username if message.from_user else None,
+                event="faq_media_sent",
+                meta={"score": best.get("score"), "matched_q": best.get("question")},
+            )
 
         await alog_event(
             user_id=message.from_user.id if message.from_user else None,

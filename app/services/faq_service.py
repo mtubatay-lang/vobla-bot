@@ -82,11 +82,13 @@ async def load_faq_cache(force: bool = False) -> None:
             norm_question = normalize(question)
             emb = await asyncio.to_thread(create_embedding, norm_question)
 
+            media_json = (row.get("media_json") or "").strip()
             FAQ_DATA.append(
                 {
                     "question": question,
                     "norm_question": norm_question,
                     "answer": answer,
+                    "media_json": media_json,
                 }
             )
             FAQ_EMBEDS.append(emb)
@@ -96,12 +98,13 @@ async def load_faq_cache(force: bool = False) -> None:
         print(f"[FAQ] Загружено {len(FAQ_DATA)} записей FAQ (эмбеддинги готовы).")
 
 
-async def add_faq_entry_to_cache(question: str, answer: str) -> None:
+async def add_faq_entry_to_cache(question: str, answer: str, media_json: str = "") -> None:
     """Добавляет одну новую пару Q/A в in-memory кэш (без перечитывания всего Sheet)."""
     global CACHE_READY
 
     question = (question or "").strip()
     answer = (answer or "").strip()
+    media_json = (media_json or "").strip()
     if not question or not answer:
         return
 
@@ -124,6 +127,7 @@ async def add_faq_entry_to_cache(question: str, answer: str) -> None:
                 "question": question,
                 "norm_question": norm_question,
                 "answer": answer,
+                "media_json": media_json,
             }
         )
         FAQ_EMBEDS.append(emb)
@@ -211,6 +215,7 @@ async def find_similar_question(user_question: str) -> Optional[Dict[str, Any]]:
                 "question": data["question"],
                 "answer": data["answer"],
                 "score": scores[idx],
+                "media_json": data.get("media_json", ""),
             }
         )
 
