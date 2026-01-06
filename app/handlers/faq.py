@@ -145,32 +145,57 @@ async def handle_faq_question(message: Message) -> None:
 
         await message.answer(adapted_text)
 
-        # Отправляем медиа-вложения, если есть
+        # Отправляем медиа-вложения, если есть (все вложения)
         media_json = match.get("media_json", "")
         if media_json:
             try:
+                from aiogram.types import InputMediaPhoto, InputMediaVideo
+                
                 attachments: List[Dict[str, Any]] = json.loads(media_json)
-                for att in attachments:
-                    file_id = att.get("file_id")
-                    if not file_id:
-                        continue
-                    caption = att.get("caption", "")
-                    att_type = att.get("type", "")
-                    if att_type == "photo":
-                        await message.bot.send_photo(chat_id=message.chat.id, photo=file_id, caption=caption or None, parse_mode=ParseMode.HTML if caption else None)
-                    elif att_type == "video":
-                        await message.bot.send_video(chat_id=message.chat.id, video=file_id, caption=caption or None, parse_mode=ParseMode.HTML if caption else None)
-                    elif att_type == "document":
-                        await message.bot.send_document(chat_id=message.chat.id, document=file_id, caption=caption or None, parse_mode=ParseMode.HTML if caption else None)
-                log_event(
-                    user_id=user_id,
-                    username=message.from_user.username,
-                    event="faq_media_sent",
-                    meta={"matched_question": match.get("question", "")},
-                )
+                if attachments:
+                    photos = [att for att in attachments if att.get("type") == "photo"]
+                    videos = [att for att in attachments if att.get("type") == "video"]
+                    documents = [att for att in attachments if att.get("type") == "document"]
+                    
+                    # Отправляем фото батчами по 10
+                    for i in range(0, len(photos), 10):
+                        batch = photos[i:i+10]
+                        media_group = []
+                        for idx, att in enumerate(batch):
+                            caption = att.get("caption", "") if idx == 0 else None
+                            media_group.append(InputMediaPhoto(media=att["file_id"], caption=caption, parse_mode=ParseMode.HTML if caption else None))
+                        if media_group:
+                            await message.bot.send_media_group(chat_id=message.chat.id, media=media_group)
+                    
+                    # Отправляем видео батчами по 10
+                    for i in range(0, len(videos), 10):
+                        batch = videos[i:i+10]
+                        media_group = []
+                        for idx, att in enumerate(batch):
+                            caption = att.get("caption", "") if idx == 0 else None
+                            media_group.append(InputMediaVideo(media=att["file_id"], caption=caption, parse_mode=ParseMode.HTML if caption else None))
+                        if media_group:
+                            await message.bot.send_media_group(chat_id=message.chat.id, media=media_group)
+                    
+                    # Отправляем документы по одному
+                    for att in documents:
+                        caption = att.get("caption", "")
+                        await message.bot.send_document(
+                            chat_id=message.chat.id,
+                            document=att["file_id"],
+                            caption=caption or None,
+                            parse_mode=ParseMode.HTML if caption else None
+                        )
+                    
+                    log_event(
+                        user_id=user_id,
+                        username=message.from_user.username,
+                        event="faq_media_sent",
+                        meta={"matched_question": match.get("question", "")},
+                    )
             except Exception as e:
                 # Логируем ошибку, но не прерываем выполнение
-                pass
+                logger.exception(f"[FAQ] Error sending media: {e}")
 
         return
 
