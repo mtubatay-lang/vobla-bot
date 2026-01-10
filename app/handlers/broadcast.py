@@ -486,7 +486,8 @@ async def handle_broadcast_choice(callback: CallbackQuery, state: FSMContext) ->
     )
     
     # Логируем событие
-    await log_event(
+    await asyncio.to_thread(
+        log_event,
         user_id=created_by_user_id,
         username=created_by_username,
         event="broadcast_sent",
