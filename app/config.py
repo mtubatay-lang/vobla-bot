@@ -71,3 +71,9 @@ STATS_SHEET_ID = os.getenv("STATS_SHEET_ID", "")
 STATS_SHEET_TAB = os.getenv("STATS_SHEET_TAB", "bot_stats")
 PENDING_SHEET_TAB = os.getenv("PENDING_SHEET_TAB", "pending_questions")
 QA_FEEDBACK_SHEET_TAB = os.getenv("QA_FEEDBACK_SHEET_TAB", "qa_feedback")
+
+# Google Sheets: получатели для рассылок
+RECIPIENTS_USERS_TAB = os.getenv("RECIPIENTS_USERS_TAB", "recipients_users")
+RECIPIENTS_CHATS_TAB = os.getenv("RECIPIENTS_CHATS_TAB", "recipients_chats")
+BROADCASTS_TAB = os.getenv("BROADCASTS_TAB", "broadcasts")
+BROADCAST_LOGS_TAB = os.getenv("BROADCAST_LOGS_TAB", "broadcast_logs")

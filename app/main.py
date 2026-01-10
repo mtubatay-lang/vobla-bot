@@ -11,6 +11,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand
 
 from app.config import BOT_TOKEN, LOG_LEVEL, SENTRY_DSN
+from app.handlers.recipients_collector import router as recipients_router
 from app.handlers.debug_passthrough import router as debug_router
 from app.handlers.start import router as start_router
 from app.handlers.help import router as help_router
@@ -61,7 +62,8 @@ async def main() -> None:
     )
 
     # --- Регистрируем роутеры ---
-    dp.include_router(debug_router)  # сквозной дебаг (первым!)
+    dp.include_router(recipients_router)  # сбор получателей (самым первым!)
+    dp.include_router(debug_router)  # сквозной дебаг
     dp.include_router(start_router)
     dp.include_router(help_router)  # роутер помощи
     dp.include_router(auth_router)  # роутер авторизации
