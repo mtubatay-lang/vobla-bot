@@ -52,7 +52,11 @@ class BroadcastState(StatesGroup):
 
 def _check_admin(user) -> bool:
     """Проверяет, является ли пользователь админом."""
-    return user and hasattr(user, "role") and user.role == "admin"
+    if not user or not hasattr(user, "role"):
+        return False
+    # Нормализуем роль (убираем пробелы, приводим к нижнему регистру)
+    role = str(user.role).strip().lower()
+    return role == "admin"
 
 
 async def _require_admin(message: Message) -> bool:
@@ -61,10 +65,15 @@ async def _require_admin(message: Message) -> bool:
     user = find_user_by_telegram_id(tg_id)
     
     if not user:
+        logger.warning(f"[BROADCAST] User {tg_id} not found")
         await message.answer("🔒 Доступно только администраторам. Нажмите /login")
         return False
     
+    role = getattr(user, "role", "")
+    logger.info(f"[BROADCAST] User {tg_id} role: {role!r}, is_admin: {_check_admin(user)}")
+    
     if not _check_admin(user):
+        logger.warning(f"[BROADCAST] User {tg_id} is not admin (role: {role!r})")
         await message.answer("🔒 Доступно только администраторам. Нажмите /login")
         return False
     
