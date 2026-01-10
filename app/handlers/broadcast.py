@@ -48,7 +48,8 @@ class BroadcastState(StatesGroup):
     waiting_text = State()
     waiting_media = State()
     choosing_variant = State()  # Выбор варианта текста (оригинал/улучшенный)
-    choosing_audience = State()  # Выбор аудитории (self/users/chats/users_chats)
+    choosing_audience = State()  # Первичный выбор аудитории (с "тест себе")
+    choosing_audience_final = State()  # Финальный выбор аудитории (после теста)
 
 
 def _check_admin(user) -> bool:
@@ -425,18 +426,15 @@ async def handle_choose_variant(callback: CallbackQuery, state: FSMContext) -> N
     )
     await state.set_state(BroadcastState.choosing_audience)
     
-    # Показываем выбор аудитории
+    # Показываем первичный выбор аудитории (с "тест себе")
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🧪 Тестовая рассылка себе", callback_data="broadcast:send:self")],
-        [InlineKeyboardButton(text="👤 Отправить пользователям бота", callback_data="broadcast:send:users")],
-        [InlineKeyboardButton(text="👥 Отправить во все чаты", callback_data="broadcast:send:chats")],
-        [InlineKeyboardButton(text="🚀 Отправить в бот и чаты", callback_data="broadcast:send:users_chats")],
-        [InlineKeyboardButton(text="❌ Отмена рассылки", callback_data="broadcast:cancel")],
+        [InlineKeyboardButton(text="🧪 Тестовая рассылка себе", callback_data="broadcast:aud:test_self")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast:cancel")],
     ])
     
     await callback.message.answer(
         "👥 <b>Кому отправить?</b>\n\n"
-        "Выберите аудиторию для рассылки:",
+        "Сначала отправьте тестовую рассылку себе или отмените:",
         reply_markup=keyboard,
         parse_mode=ParseMode.HTML
     )
@@ -464,9 +462,9 @@ async def handle_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     await _cancel_broadcast(callback, state, broadcast_id)
 
 
-@router.callback_query(F.data.startswith("broadcast:send:"))
-async def handle_send_broadcast(callback: CallbackQuery, state: FSMContext) -> None:
-    """Обработка отправки рассылки по выбранной аудитории."""
+@router.callback_query(F.data == "broadcast:aud:test_self")
+async def handle_test_self(callback: CallbackQuery, state: FSMContext) -> None:
+    """Обработка тестовой рассылки себе."""
     if not callback.message:
         await callback.answer()
         return
@@ -480,10 +478,94 @@ async def handle_send_broadcast(callback: CallbackQuery, state: FSMContext) -> N
     
     data = await state.get_data()
     
-    # Определяем режим отправки
-    if callback.data == "broadcast:send:self":
-        mode = "self"
-    elif callback.data == "broadcast:send:users":
+    # Проверка наличия данных
+    text_final = data.get("text_final", "")
+    media_json = data.get("media_json", "")
+    
+    if not text_final and not media_json:
+        await callback.answer("❌ Нет данных рассылки, начните заново /broadcast", show_alert=True)
+        await state.clear()
+        return
+    
+    await callback.answer("📤 Отправляю тест...")
+    
+    # Отправляем тест инициатору
+    created_by_user_id = callback.from_user.id if callback.from_user else 0
+    
+    try:
+        # Парсим медиа
+        attachments = []
+        if media_json:
+            try:
+                attachments = json.loads(media_json)
+            except Exception:
+                pass
+        
+        # Отправляем тест
+        if attachments:
+            await _send_media_to_recipient(callback.message.bot, created_by_user_id, attachments, text_final)
+        else:
+            await callback.message.bot.send_message(chat_id=created_by_user_id, text=text_final, parse_mode=ParseMode.HTML)
+        
+        # Показываем финальный выбор аудитории
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="👥 Пользователям бота", callback_data="broadcast:send:users")],
+            [InlineKeyboardButton(text="💬 Во все чаты", callback_data="broadcast:send:chats")],
+            [InlineKeyboardButton(text="👥💬 В бот и чаты", callback_data="broadcast:send:users_chats")],
+            [InlineKeyboardButton(text="❌ Отмена рассылки", callback_data="broadcast:cancel_send")],
+        ])
+        
+        await callback.message.answer(
+            "✅ Тест отправлен. Кому отправляем финально?",
+            reply_markup=keyboard
+        )
+        
+        await state.set_state(BroadcastState.choosing_audience_final)
+        
+    except Exception as e:
+        logger.exception(f"[BROADCAST] Error sending test: {e}")
+        await callback.message.answer(f"❌ Ошибка при отправке теста: {str(e)[:200]}")
+
+
+@router.callback_query(F.data.startswith("broadcast:send:"))
+async def handle_send_broadcast(callback: CallbackQuery, state: FSMContext) -> None:
+    """Обработка финальной отправки рассылки по выбранной аудитории."""
+    if not callback.message:
+        await callback.answer()
+        return
+    
+    if not await _require_admin(callback):
+        await callback.answer()
+        return
+    
+    if not await _check_user_owns_broadcast(callback, state):
+        return
+    
+    # Проверка, что мы в финальном состоянии
+    current_state = await state.get_state()
+    if current_state != BroadcastState.choosing_audience_final:
+        await callback.answer("❌ Сначала отправьте тестовую рассылку", show_alert=True)
+        return
+    
+    data = await state.get_data()
+    
+    # Проверка наличия данных
+    broadcast_id = data.get("broadcast_id")
+    text_final = data.get("text_final", "")
+    media_json = data.get("media_json", "")
+    
+    if not text_final and not media_json:
+        await callback.answer("❌ Нет данных рассылки, начните заново /broadcast", show_alert=True)
+        await state.clear()
+        return
+    
+    # Проверка: должен быть хотя бы текст или медиа
+    if not text_final and not media_json:
+        await callback.answer("❌ Нужно ввести хотя бы текст или прикрепить медиа", show_alert=True)
+        return
+    
+    # Определяем режим отправки (без self, так как он обрабатывается отдельно)
+    if callback.data == "broadcast:send:users":
         mode = "users"
     elif callback.data == "broadcast:send:chats":
         mode = "chats"
@@ -491,14 +573,6 @@ async def handle_send_broadcast(callback: CallbackQuery, state: FSMContext) -> N
         mode = "users_chats"
     else:
         await callback.answer("❌ Неизвестная команда")
-        return
-    
-    # Проверка: должен быть хотя бы текст или медиа
-    text_final = data.get("text_final", "")
-    media_json = data.get("media_json", "")
-    
-    if not text_final and not media_json:
-        await callback.answer("❌ Нужно ввести хотя бы текст или прикрепить медиа", show_alert=True)
         return
     
     await callback.answer("📤 Рассылка начата...")
@@ -509,14 +583,11 @@ async def handle_send_broadcast(callback: CallbackQuery, state: FSMContext) -> N
     text_original = data.get("text_original", "")
     selected_variant = data.get("selected_variant", "original")
     
-    # Получаем списки получателей в зависимости от режима
+    # Получаем списки получателей в зависимости от режима (без self, так как он обрабатывается отдельно)
     users = []
     chats = []
     
-    if mode == "self":
-        users = [created_by_user_id]
-        chats = []
-    elif mode == "users":
+    if mode == "users":
         users = await asyncio.to_thread(read_active_recipients_users)
         chats = []
     elif mode == "chats":
@@ -532,7 +603,6 @@ async def handle_send_broadcast(callback: CallbackQuery, state: FSMContext) -> N
     chats_count = len(chats)
     
     # Создаём черновик рассылки (если ещё не создан)
-    broadcast_id = data.get("broadcast_id")
     if not broadcast_id:
         broadcast_id = await asyncio.to_thread(
             create_broadcast_draft,
@@ -678,5 +748,33 @@ async def handle_send_broadcast(callback: CallbackQuery, state: FSMContext) -> N
 
 @router.callback_query(F.data == "broadcast:cancel_send")
 async def handle_cancel_send(callback: CallbackQuery, state: FSMContext) -> None:
-    """Обработка отмены на этапе выбора аудитории."""
-    await handle_cancel(callback, state)
+    """Обработка отмены на финальном этапе выбора аудитории."""
+    if not callback.message:
+        await callback.answer()
+        return
+    
+    if not await _require_admin(callback):
+        await callback.answer()
+        return
+    
+    if not await _check_user_owns_broadcast(callback, state):
+        return
+    
+    await callback.answer()
+    
+    data = await state.get_data()
+    broadcast_id = data.get("broadcast_id")
+    
+    # Помечаем рассылку как cancelled
+    if broadcast_id:
+        await asyncio.to_thread(
+            finalize_broadcast,
+            broadcast_id=broadcast_id,
+            text_final="",
+            status="cancelled",
+            sent_ok=0,
+            sent_fail=0,
+        )
+    
+    await state.clear()
+    await callback.message.answer("❌ Рассылка отменена")
