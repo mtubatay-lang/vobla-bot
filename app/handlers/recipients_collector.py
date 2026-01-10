@@ -4,6 +4,7 @@ import asyncio
 import logging
 
 from aiogram import Router
+from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.types import Message
 
 from app.services.broadcast_recipients_service import upsert_user_recipient, upsert_chat_recipient
@@ -18,7 +19,7 @@ async def collect_recipient(message: Message) -> None:
     """
     Собирает данные о получателях для будущих рассылок.
     Не отвечает пользователю, только логирует в Google Sheets.
-    Обработка продолжается для других хендлеров (не блокируем).
+    Явно пропускает обработку дальше через SkipHandler.
     """
     try:
         # Если это приватный чат - собираем данные пользователя
@@ -45,5 +46,6 @@ async def collect_recipient(message: Message) -> None:
         # Тихий лог ошибок, чтобы не ломать основной функционал
         logger.debug(f"[RECIPIENTS_COLLECTOR] Error collecting recipient: {e}")
     
-    # Не возвращаем ответ и не вызываем SkipHandler - обработка продолжается автоматически
+    # Явно пропускаем обработку дальше другим хендлерам
+    raise SkipHandler()
 
