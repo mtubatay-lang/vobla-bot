@@ -65,13 +65,29 @@ def upsert_user_recipient(user_id: int, username: Optional[str] = None, full_nam
         if row_num:
             # Обновляем существующую строку
             updates = {}
+            
+            # Обязательные поля при обновлении
+            if "updated_at" in header_map:
+                updates["updated_at"] = now_iso
+            if "is_active" in header_map:
+                updates["is_active"] = "1"
+            if "last_error" in header_map:
+                updates["last_error"] = ""
+            
+            # Опциональные поля
             if "username" in header_map:
                 updates["username"] = username or ""
             if "full_name" in header_map:
                 updates["full_name"] = full_name or ""
-            if "updated_at" in header_map:
-                updates["updated_at"] = now_iso
             
+            # Если created_at пустой — заполняем (один раз)
+            if "created_at" in header_map:
+                created_at_col = header_map["created_at"]
+                existing_created_at = ws.cell(row_num, created_at_col).value
+                if not existing_created_at or not existing_created_at.strip():
+                    updates["created_at"] = now_iso
+            
+            # Обновляем все поля по header_map
             for key, value in updates.items():
                 col = header_map[key]
                 ws.update_cell(row_num, col, value)
@@ -92,6 +108,10 @@ def upsert_user_recipient(user_id: int, username: Optional[str] = None, full_nam
                     row.append(now_iso)
                 elif header_clean == "updated_at":
                     row.append(now_iso)
+                elif header_clean == "is_active":
+                    row.append("1")
+                elif header_clean == "last_error":
+                    row.append("")
                 else:
                     row.append("")
             
@@ -125,15 +145,31 @@ def upsert_chat_recipient(chat_id: int, chat_type: str, title: Optional[str] = N
         if row_num:
             # Обновляем существующую строку
             updates = {}
+            
+            # Обязательные поля при обновлении
+            if "updated_at" in header_map:
+                updates["updated_at"] = now_iso
+            if "is_active" in header_map:
+                updates["is_active"] = "1"
+            if "last_error" in header_map:
+                updates["last_error"] = ""
+            
+            # Опциональные поля
             if "title" in header_map:
                 updates["title"] = title or ""
             if "username" in header_map:
                 updates["username"] = username or ""
             if "chat_type" in header_map:
                 updates["chat_type"] = chat_type
-            if "updated_at" in header_map:
-                updates["updated_at"] = now_iso
             
+            # Если created_at пустой — заполняем (один раз)
+            if "created_at" in header_map:
+                created_at_col = header_map["created_at"]
+                existing_created_at = ws.cell(row_num, created_at_col).value
+                if not existing_created_at or not existing_created_at.strip():
+                    updates["created_at"] = now_iso
+            
+            # Обновляем все поля по header_map
             for key, value in updates.items():
                 col = header_map[key]
                 ws.update_cell(row_num, col, value)
@@ -156,6 +192,10 @@ def upsert_chat_recipient(chat_id: int, chat_type: str, title: Optional[str] = N
                     row.append(now_iso)
                 elif header_clean == "updated_at":
                     row.append(now_iso)
+                elif header_clean == "is_active":
+                    row.append("1")
+                elif header_clean == "last_error":
+                    row.append("")
                 else:
                     row.append("")
             
