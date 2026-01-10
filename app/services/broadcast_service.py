@@ -34,8 +34,8 @@ def create_broadcast_draft(
     created_by_username: Optional[str],
     text_original: str,
     media_json: str,
-    users_count: int,
-    chats_count: int,
+    users_count: int = 0,
+    chats_count: int = 0,
 ) -> str:
     """
     Создает черновик рассылки в таблице broadcasts.
@@ -68,6 +68,10 @@ def create_broadcast_draft(
             row.append(text_original)
         elif header_clean == "text_final":
             row.append("")
+        elif header_clean == "selected_variant":
+            row.append("")
+        elif header_clean == "mode":
+            row.append("")
         elif header_clean == "media_json":
             row.append(media_json)
         elif header_clean == "recipients_users_count":
@@ -77,6 +81,8 @@ def create_broadcast_draft(
         elif header_clean == "sent_ok":
             row.append("0")
         elif header_clean == "sent_fail":
+            row.append("0")
+        elif header_clean == "total":
             row.append("0")
         else:
             row.append("")
@@ -91,6 +97,8 @@ def finalize_broadcast(
     status: str,
     sent_ok: int,
     sent_fail: int,
+    selected_variant: str = "",
+    mode: str = "",
 ) -> None:
     """Обновляет рассылку: статус, финальный текст, количество отправленных."""
     if not STATS_SHEET_ID:
@@ -121,6 +129,12 @@ def finalize_broadcast(
         updates["sent_ok"] = str(sent_ok)
     if "sent_fail" in header_map:
         updates["sent_fail"] = str(sent_fail)
+    if "selected_variant" in header_map and selected_variant:
+        updates["selected_variant"] = selected_variant
+    if "mode" in header_map and mode:
+        updates["mode"] = mode
+    if "total" in header_map:
+        updates["total"] = str(sent_ok + sent_fail)
     
     for key, value in updates.items():
         col = header_map[key]
