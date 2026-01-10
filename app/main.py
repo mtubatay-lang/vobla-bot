@@ -16,6 +16,7 @@ from app.handlers.debug_passthrough import router as debug_router
 from app.handlers.start import router as start_router
 from app.handlers.help import router as help_router
 from app.handlers.auth_handler import auth_router
+from app.handlers.broadcast import router as broadcast_router
 from app.handlers.echo import router as echo_router
 from app.handlers.faq import router as faq_router
 from app.handlers.manager_reply import router as manager_router
@@ -67,6 +68,7 @@ async def main() -> None:
     dp.include_router(start_router)
     dp.include_router(help_router)  # роутер помощи
     dp.include_router(auth_router)  # роутер авторизации
+    dp.include_router(broadcast_router)  # роутер рассылок
     dp.include_router(manager_router)  # роутер для менеджеров
     dp.include_router(qa_router)  # роутер режима навыка
     dp.include_router(faq_router)   # FAQ-роутер

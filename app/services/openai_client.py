@@ -1,5 +1,6 @@
 """Клиент OpenAI для эмбеддингов и работы с ответами FAQ."""
 
+import json
 import os
 import re
 from typing import List, Dict, Optional
@@ -236,3 +237,72 @@ def polish_faq_answer(
         out = _strip_greeting(out)
     
     return out
+
+
+# -----------------------------
+#   УЛУЧШЕНИЕ ТЕКСТА РАССЫЛКИ
+# -----------------------------
+
+def improve_broadcast_text(text: str) -> Dict[str, str]:
+    """
+    Улучшает текст рассылки: исправляет орфографию/пунктуацию и предлагает улучшенный вариант.
+    
+    Возвращает:
+    {
+        "fixed": "...",      # минимальные правки орфографии/пунктуации
+        "suggested": "..."   # улучшенный формат
+    }
+    
+    Если text пустой — возвращает пустые строки.
+    """
+    if not text or not text.strip():
+        return {"fixed": "", "suggested": ""}
+    
+    system_prompt = (
+        "Ты помощник корпоративного бота сети магазинов Воблабир.\n"
+        "Твоя задача — улучшить текст рассылки для партнёров.\n\n"
+        "Правила:\n"
+        "1. НЕ меняй фактический смысл и факты. Никаких новых акций, цен или правил.\n"
+        "2. Исправь орфографию и пунктуацию.\n"
+        "3. Сделай текст структурированным и читаемым:\n"
+        "   • разбивай на абзацы по смыслу;\n"
+        "   • используй маркированные списки, если есть перечисления, шаги или варианты.\n"
+        "4. Эмодзи используй умеренно (2-4 на весь текст, не больше).\n"
+        "5. Пиши простым, человеческим языком, без канцелярита.\n"
+        "6. Не добавляй ссылок, если их не было в исходном тексте.\n\n"
+        "Верни JSON с двумя полями:\n"
+        "- \"fixed\": текст с минимальными правками орфографии/пунктуации\n"
+        "- \"suggested\": улучшенный формат с структурой и абзацами\n"
+        "Оба текста должны сохранять смысл оригинала."
+    )
+    
+    user_prompt = (
+        "Вот текст рассылки, который нужно улучшить:\n\n"
+        f"{text}\n\n"
+        "Верни JSON с полями \"fixed\" и \"suggested\"."
+    )
+    
+    try:
+        resp = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.3,
+            response_format={"type": "json_object"},
+        )
+        
+        result_text = resp.choices[0].message.content.strip()
+        result_json = json.loads(result_text)
+        
+        fixed = result_json.get("fixed", text)
+        suggested = result_json.get("suggested", text)
+        
+        return {
+            "fixed": fixed if fixed else text,
+            "suggested": suggested if suggested else text,
+        }
+    except Exception:
+        # При ошибке возвращаем оригинал
+        return {"fixed": text, "suggested": text}
