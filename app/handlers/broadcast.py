@@ -59,14 +59,31 @@ def _check_admin(user) -> bool:
     return role == "admin"
 
 
-async def _require_admin(message: Message) -> bool:
-    """Проверяет, является ли пользователь админом. Возвращает True если админ."""
-    tg_id = message.from_user.id if message.from_user else 0
+async def _require_admin(obj) -> bool:
+    """
+    Проверяет, является ли пользователь админом. Возвращает True если админ.
+    Принимает Message или CallbackQuery.
+    """
+    # Определяем откуда брать user_id: из Message или CallbackQuery
+    if isinstance(obj, CallbackQuery):
+        tg_id = obj.from_user.id if obj.from_user else 0
+        reply_func = obj.message.answer if obj.message else None
+    else:  # Message
+        tg_id = obj.from_user.id if obj.from_user else 0
+        reply_func = obj.answer
+    
+    if not tg_id:
+        logger.warning("[BROADCAST] No user ID found")
+        if reply_func:
+            await reply_func("🔒 Доступно только администраторам. Нажмите /login")
+        return False
+    
     user = find_user_by_telegram_id(tg_id)
     
     if not user:
         logger.warning(f"[BROADCAST] User {tg_id} not found")
-        await message.answer("🔒 Доступно только администраторам. Нажмите /login")
+        if reply_func:
+            await reply_func("🔒 Доступно только администраторам. Нажмите /login")
         return False
     
     role = getattr(user, "role", "")
@@ -74,7 +91,8 @@ async def _require_admin(message: Message) -> bool:
     
     if not _check_admin(user):
         logger.warning(f"[BROADCAST] User {tg_id} is not admin (role: {role!r})")
-        await message.answer("🔒 Доступно только администраторам. Нажмите /login")
+        if reply_func:
+            await reply_func("🔒 Доступно только администраторам. Нажмите /login")
         return False
     
     return True
@@ -196,7 +214,7 @@ async def skip_media(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer()
         return
     
-    if not await _require_admin(callback.message):
+    if not await _require_admin(callback):
         await callback.answer()
         return
     
@@ -327,7 +345,7 @@ async def handle_broadcast_choice(callback: CallbackQuery, state: FSMContext) ->
         await callback.answer()
         return
     
-    if not await _require_admin(callback.message):
+    if not await _require_admin(callback):
         await callback.answer()
         return
     
