@@ -90,7 +90,7 @@ CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
 # --- RAG Test Chat Settings (для ограничения работы только в тестовом чате) ---
 # Опциональная переменная: если не указана, бот работает во всех чатах
-_test_chat_id_raw = os.getenv("RAG_TEST_CHAT_ID")  # Не указываем default, чтобы Railway не требовал её
+_test_chat_id_raw = os.environ.get("RAG_TEST_CHAT_ID")  # Не указываем default, чтобы Railway не требовал её
 RAG_TEST_CHAT_ID = None
 if _test_chat_id_raw:
     try:
