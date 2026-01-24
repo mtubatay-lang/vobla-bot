@@ -501,23 +501,25 @@ async def _should_escalate_to_manager_private(
     
     max_score = max((chunk.get("score", 0) for chunk in found_chunks), default=0)
     
-    if not sufficient:
-        if missing_info and any(word in missing_info.lower() for word in ["конкретн", "детал", "уточн"]):
-            logger.info(f"[QA_MODE] Не эскалируем: данных недостаточно, но можно уточнить (max_score={max_score:.3f})")
-            return False
-        # Если данных недостаточно, но score хороший - все равно пытаемся ответить
-        if max_score >= 0.6:
-            logger.info(f"[QA_MODE] Не эскалируем: данных недостаточно, но score хороший ({max_score:.3f})")
-            return False
-        logger.info(f"[QA_MODE] Эскалация: данных недостаточно, score низкий ({max_score:.3f})")
-        return True
+    # Если данные признаны достаточными, не эскалируем только из-за низкого score
+    if sufficient:
+        # Эскалируем только если score критически низкий (< 0.3)
+        if max_score < 0.3:
+            logger.info(f"[QA_MODE] Эскалация: данные достаточны, но score критически низкий ({max_score:.3f})")
+            return True
+        logger.info(f"[QA_MODE] Не эскалируем: данных достаточно, score приемлемый ({max_score:.3f})")
+        return False
     
-    if max_score < 0.5:
-        logger.info(f"[QA_MODE] Эскалация: max_score слишком низкий ({max_score:.3f})")
-        return True
-    
-    logger.info(f"[QA_MODE] Не эскалируем: данных достаточно, score хороший ({max_score:.3f})")
-    return False
+    # Если данных недостаточно
+    if missing_info and any(word in missing_info.lower() for word in ["конкретн", "детал", "уточн"]):
+        logger.info(f"[QA_MODE] Не эскалируем: данных недостаточно, но можно уточнить (max_score={max_score:.3f})")
+        return False
+    # Если данных недостаточно, но score хороший - все равно пытаемся ответить
+    if max_score >= 0.6:
+        logger.info(f"[QA_MODE] Не эскалируем: данных недостаточно, но score хороший ({max_score:.3f})")
+        return False
+    logger.info(f"[QA_MODE] Эскалация: данных недостаточно, score низкий ({max_score:.3f})")
+    return True
 
 
 @router.callback_query(F.data == "qa_start")
