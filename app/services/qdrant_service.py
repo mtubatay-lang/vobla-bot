@@ -52,9 +52,30 @@ class QdrantService:
                 logger.info(f"[QDRANT] Создана коллекция {self.collection_name}")
             else:
                 logger.debug(f"[QDRANT] Коллекция {self.collection_name} уже существует")
+            
+            # Обеспечиваем наличие индекса для поля source
+            self._ensure_payload_index()
         except Exception as e:
             logger.exception(f"[QDRANT] Ошибка создания коллекции: {e}")
             raise
+    
+    def _ensure_payload_index(self) -> None:
+        """Создает индекс для поля source в payload, если его нет."""
+        try:
+            self.client.create_payload_index(
+                collection_name=self.collection_name,
+                field_name="source",
+                field_schema="keyword",
+            )
+            logger.info(f"[QDRANT] Создан индекс для поля 'source' в коллекции {self.collection_name}")
+        except Exception as e:
+            # Индекс уже существует или другая ошибка
+            # Проверяем, что это не критичная ошибка
+            error_msg = str(e).lower()
+            if "already exists" in error_msg or "index" in error_msg:
+                logger.debug(f"[QDRANT] Индекс для 'source' уже существует или не требуется: {e}")
+            else:
+                logger.warning(f"[QDRANT] Не удалось создать индекс для 'source': {e}")
     
     def add_documents(
         self,
