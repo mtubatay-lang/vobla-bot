@@ -173,6 +173,7 @@ class QdrantService:
             # Преобразуем результаты в удобный формат
             # query_points возвращает объект QueryResult, нужно получить points
             formatted_results = []
+            scores_list = []
             for point in results.points:
                 # Получаем score из объекта ScoredPoint
                 score = getattr(point, 'score', None)
@@ -180,12 +181,30 @@ class QdrantService:
                     # Если score не указан напрямую, пропускаем точку
                     continue
                 
+                scores_list.append(score)
                 payload = getattr(point, 'payload', {}) or {}
                 formatted_results.append({
                     "text": payload.get("text", ""),
                     "metadata": {k: v for k, v in payload.items() if k != "text"},
                     "score": score,
                 })
+            
+            # Логируем результаты поиска для диагностики
+            if formatted_results:
+                logger.info(
+                    f"[QDRANT] Найдено {len(formatted_results)} чанков "
+                    f"(scores: {[f'{s:.3f}' for s in scores_list[:3]]})"
+                )
+            else:
+                logger.warning(
+                    f"[QDRANT] Не найдено чанков с score >= {score_threshold}. "
+                    f"Всего точек в результате: {len(results.points)}"
+                )
+                # Логируем все scores, если они есть, но не прошли threshold
+                if results.points:
+                    all_scores = [getattr(p, 'score', None) for p in results.points if hasattr(p, 'score')]
+                    if all_scores:
+                        logger.warning(f"[QDRANT] Все scores: {[f'{s:.3f}' for s in all_scores[:5]]}")
             
             return formatted_results
         except Exception as e:

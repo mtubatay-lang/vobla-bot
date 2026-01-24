@@ -291,17 +291,27 @@ async def _should_escalate_to_manager_private(
     sufficient, missing_info = ai_decision
     
     if not found_chunks:
-        return True
-    
-    if not sufficient:
-        if missing_info and any(word in missing_info.lower() for word in ["конкретн", "детал", "уточн"]):
-            return False
+        logger.info("[QA_MODE] Эскалация: чанки не найдены")
         return True
     
     max_score = max((chunk.get("score", 0) for chunk in found_chunks), default=0)
-    if max_score < 0.5:
+    
+    if not sufficient:
+        if missing_info and any(word in missing_info.lower() for word in ["конкретн", "детал", "уточн"]):
+            logger.info(f"[QA_MODE] Не эскалируем: данных недостаточно, но можно уточнить (max_score={max_score:.3f})")
+            return False
+        # Если данных недостаточно, но score хороший - все равно пытаемся ответить
+        if max_score >= 0.6:
+            logger.info(f"[QA_MODE] Не эскалируем: данных недостаточно, но score хороший ({max_score:.3f})")
+            return False
+        logger.info(f"[QA_MODE] Эскалация: данных недостаточно, score низкий ({max_score:.3f})")
         return True
     
+    if max_score < 0.5:
+        logger.info(f"[QA_MODE] Эскалация: max_score слишком низкий ({max_score:.3f})")
+        return True
+    
+    logger.info(f"[QA_MODE] Не эскалируем: данных достаточно, score хороший ({max_score:.3f})")
     return False
 
 
@@ -430,8 +440,17 @@ async def qa_handle_question(message: Message, state: FSMContext):
         found_chunks = qdrant_service.search(
             query_embedding=embedding,
             top_k=5,
-            score_threshold=0.7,
+            score_threshold=0.5,  # Понижен с 0.7 для более гибкого поиска
         )
+        
+        # Детальное логирование для диагностики
+        logger.info(
+            f"[QA_MODE] Поиск в RAG: вопрос='{q[:50]}...', "
+            f"найдено чанков={len(found_chunks)}"
+        )
+        if found_chunks:
+            scores = [chunk.get("score", 0) for chunk in found_chunks]
+            logger.info(f"[QA_MODE] Scores найденных чанков: {[f'{s:.3f}' for s in scores]}")
         
         await alog_event(
             user_id=message.from_user.id if message.from_user else None,
@@ -444,15 +463,24 @@ async def qa_handle_question(message: Message, state: FSMContext):
         if found_chunks:
             # Проверка достаточности данных
             sufficient, missing_info = await _check_sufficient_data_private(q, found_chunks)
+            logger.info(
+                f"[QA_MODE] Проверка достаточности данных: sufficient={sufficient}, "
+                f"missing_info={missing_info[:50] if missing_info else None}"
+            )
             
             # Проверяем, нужно ли эскалировать
-            if not await _should_escalate_to_manager_private(found_chunks, (sufficient, missing_info)):
+            should_escalate = await _should_escalate_to_manager_private(found_chunks, (sufficient, missing_info))
+            logger.info(f"[QA_MODE] Решение об эскалации: should_escalate={should_escalate}")
+            
+            if not should_escalate:
                 # Если данных недостаточно, задаем уточняющий вопрос
                 if not sufficient and missing_info:
+                    logger.info("[QA_MODE] Задаем уточняющий вопрос пользователю")
                     await _ask_clarification_question_private(message, q, found_chunks, missing_info)
                     return
                 
                 # Генерируем ответ из Qdrant
+                logger.info("[QA_MODE] Генерируем ответ из найденных чанков RAG")
                 answer = await _generate_answer_from_chunks_private(q, found_chunks, history)
                 
                 # Обновляем историю
@@ -477,6 +505,11 @@ async def qa_handle_question(message: Message, state: FSMContext):
                 return
         
         # ШАГ 2: Если не нашли в Qdrant или нужно эскалировать - ищем в FAQ
+        if not found_chunks:
+            logger.info("[QA_MODE] Чанки не найдены в RAG, переходим к поиску в FAQ")
+        else:
+            logger.info("[QA_MODE] Чанки найдены, но требуется эскалация, переходим к поиску в FAQ")
+        
         best = await find_similar_question(q)
         
         if best:
@@ -512,6 +545,10 @@ async def qa_handle_question(message: Message, state: FSMContext):
             return
         
         # ШАГ 3: Если не нашли ни в Qdrant, ни в FAQ - эскалируем менеджеру
+        logger.warning(
+            f"[QA_MODE] Не найдено ответа ни в RAG, ни в FAQ. "
+            f"Вопрос: '{q[:100]}...'. Эскалируем менеджеру."
+        )
         await state.update_data(qa_last_answer_source="manager")
         
         await message.answer(
