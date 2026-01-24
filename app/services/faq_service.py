@@ -10,6 +10,7 @@ import time
 
 from app.services.sheets_client import load_faq_rows
 from app.services.openai_client import create_embedding, choose_best_faq_answer
+from app.services.qdrant_service import get_qdrant_service
 
 
 # -----------------------------
@@ -99,7 +100,7 @@ async def load_faq_cache(force: bool = False) -> None:
 
 
 async def add_faq_entry_to_cache(question: str, answer: str, media_json: str = "") -> None:
-    """Добавляет одну новую пару Q/A в in-memory кэш (без перечитывания всего Sheet)."""
+    """Добавляет одну новую пару Q/A в Qdrant и in-memory кэш (для обратной совместимости)."""
     global CACHE_READY
 
     question = (question or "").strip()
@@ -108,7 +109,62 @@ async def add_faq_entry_to_cache(question: str, answer: str, media_json: str = "
     if not question or not answer:
         return
 
-    # если кэш еще не загружен — загрузим полностью (чтобы структура была консистентной)
+    # Сохраняем в Qdrant
+    try:
+        from app.services.chunking_service import chunk_text
+        from app.services.context_enrichment import enrich_chunks_batch
+        from app.services.qdrant_service import get_qdrant_service
+        from datetime import datetime
+        
+        # Создаем единый текст
+        full_text = f"Вопрос: {question}\nОтвет: {answer}"
+        
+        # Разбиваем на чанки
+        chunks = chunk_text(full_text)
+        if not chunks:
+            chunks = [{
+                "text": full_text,
+                "chunk_index": 0,
+                "total_chunks": 1,
+                "start_char": 0,
+                "end_char": len(full_text),
+            }]
+        
+        # Обогащаем контекстом
+        document_title = f"FAQ: {question[:50]}..." if len(question) > 50 else f"FAQ: {question}"
+        enriched_chunks = await enrich_chunks_batch(chunks, document_title)
+        
+        # Создаем эмбеддинги
+        embeddings = []
+        for chunk in enriched_chunks:
+            embedding = await asyncio.to_thread(create_embedding, chunk.get("text", ""))
+            embeddings.append(embedding)
+        
+        # Подготавливаем метаданные
+        timestamp = datetime.now().isoformat()
+        chunks_with_metadata = []
+        for chunk in enriched_chunks:
+            chunks_with_metadata.append({
+                "text": chunk.get("text", ""),
+                "metadata": {
+                    "source": "faq_manual_add",
+                    "original_question": question,
+                    "original_answer": answer,
+                    "media_json": media_json,
+                    "added_at": timestamp,
+                },
+            })
+        
+        # Загружаем в Qdrant
+        qdrant_service = get_qdrant_service()
+        qdrant_service.add_documents(chunks_with_metadata, embeddings)
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.exception(f"[FAQ_SERVICE] Ошибка сохранения в Qdrant: {e}")
+        # Продолжаем с fallback на in-memory кэш
+
+    # Также сохраняем в in-memory кэш для обратной совместимости
     if not CACHE_READY:
         await load_faq_cache()
         return
@@ -117,8 +173,8 @@ async def add_faq_entry_to_cache(question: str, answer: str, media_json: str = "
     emb = await asyncio.to_thread(create_embedding, norm_question)
 
     async with FAQ_LOCK:
-        # защита от дублей (если кто-то добавил вручную и менеджер тоже)
-        for item in FAQ_DATA[-50:]:  # дешёвая проверка хвоста
+        # защита от дублей
+        for item in FAQ_DATA[-50:]:
             if item["norm_question"] == norm_question and item["answer"] == answer:
                 return
 
@@ -173,10 +229,58 @@ async def refresh_faq_cache_from_sheet_if_needed(force: bool = False) -> None:
 async def find_similar_question(user_question: str) -> Optional[Dict[str, Any]]:
     """Возвращает {question, answer, score} или None, если ничего похожего нет.
 
-    Этап 1: эмбеддинги → выбираем топ-K по cosine similarity.
-    Этап 2: передаём кандидатов в GPT, он решает, что лучше подходит
-            (или что лучше ничего не отвечать).
+    Использует Qdrant для поиска, с fallback на in-memory кэш, если Qdrant недоступен.
     """
+    try:
+        # Пробуем использовать Qdrant
+        qdrant_service = get_qdrant_service()
+        
+        # Создаем эмбеддинг запроса
+        norm_user = normalize(user_question)
+        user_emb = await asyncio.to_thread(create_embedding, norm_user)
+        
+        # Ищем в Qdrant (приоритет FAQ из миграции)
+        found_chunks = qdrant_service.search(
+            query_embedding=user_emb,
+            top_k=5,
+            score_threshold=0.7,
+            source_filter="faq_migration",
+        )
+        
+        # Если не нашли в FAQ, ищем во всех источниках
+        if not found_chunks:
+            found_chunks = qdrant_service.search(
+                query_embedding=user_emb,
+                top_k=5,
+                score_threshold=0.7,
+            )
+        
+        if found_chunks:
+            # Преобразуем результаты Qdrant в формат для choose_best_faq_answer
+            candidates = []
+            for chunk in found_chunks:
+                metadata = chunk.get("metadata", {})
+                candidates.append({
+                    "question": metadata.get("original_question", ""),
+                    "answer": metadata.get("original_answer", ""),
+                    "score": chunk.get("score", 0),
+                    "media_json": metadata.get("media_json", ""),
+                })
+            
+            # AI reranking
+            best = await asyncio.to_thread(
+                choose_best_faq_answer,
+                user_question,
+                candidates,
+            )
+            return best
+    except Exception as e:
+        # Fallback на старый метод с in-memory кэшем
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(f"[FAQ_SERVICE] Qdrant недоступен, используем fallback: {e}")
+    
+    # Fallback: старый метод с in-memory кэшем
     await load_faq_cache()
     await refresh_faq_cache_from_sheet_if_needed()
 

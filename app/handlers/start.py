@@ -61,7 +61,7 @@ async def cmd_start(message: Message) -> None:
             f"👋 Привет, {user.name}!\n"
             f"Вы авторизованы как <b>{user.role}</b>.\n\n"
             + _commands_menu_text(),
-            reply_markup=main_menu_kb(),
+            reply_markup=main_menu_kb(user_id=tg_id),
         )
         return
 
@@ -164,5 +164,5 @@ async def process_auth_code(message: Message) -> None:
         f"✅ Добро пожаловать, {user.name}!\n"
         f"Вы авторизованы как <b>{user.role}</b>.\n\n"
         + _commands_menu_text(),
-        reply_markup=main_menu_kb(),
+        reply_markup=main_menu_kb(user_id=tg_id),
     )

@@ -21,6 +21,8 @@ from app.handlers.echo import router as echo_router
 from app.handlers.faq import router as faq_router
 from app.handlers.manager_reply import router as manager_router
 from app.handlers.qa_mode import router as qa_router
+from app.handlers.knowledge_base_admin import router as kb_admin_router
+from app.handlers.group_chat_qa import router as group_chat_qa_router
 
 
 async def main() -> None:
@@ -60,16 +62,20 @@ async def main() -> None:
             BotCommand(command="login", description="Авторизация"),
             BotCommand(command="ask", description="Задать вопрос"),
             BotCommand(command="broadcast", description="Рассылка (админ)"),
+            BotCommand(command="kb_add", description="Пополнение базы знаний (админ)"),
+            BotCommand(command="kb_migrate", description="Миграция FAQ в Qdrant (админ)"),
         ]
     )
 
     # --- Регистрируем роутеры ---
     dp.include_router(recipients_router)  # сбор получателей (самым первым!)
+    dp.include_router(group_chat_qa_router)  # обработка вопросов в групповых чатах (раньше других, чтобы перехватывать сообщения)
     dp.include_router(debug_router)  # сквозной дебаг
     dp.include_router(start_router)
     dp.include_router(help_router)  # роутер помощи
     dp.include_router(auth_router)  # роутер авторизации
     dp.include_router(broadcast_router)  # роутер рассылок
+    dp.include_router(kb_admin_router)  # админ-панель для базы знаний
     dp.include_router(manager_router)  # роутер для менеджеров
     dp.include_router(qa_router)  # роутер режима навыка
     dp.include_router(faq_router)   # FAQ-роутер

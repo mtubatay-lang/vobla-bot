@@ -64,26 +64,40 @@ async def _maybe_await(result: Any) -> Any:
 
 def _append_faq_to_sheet_sync(question: str, answer: str, media_json: str = "") -> None:
     """
-    Добавляет новую пару Q/A в FAQ-таблицу.
+    Добавляет новую пару Q/A в FAQ-таблицу и в Qdrant.
     Предполагаем, что вопросы в колонке C, ответы в D, media_json в E (если есть).
     """
     if not SHEET_ID:
         return
 
-    client = get_sheets_client()
-    sh = client.open_by_key(SHEET_ID)
-    ws = sh.worksheet(FAQ_SHEET_NAME)
+    # Сохраняем в Google Sheets (для обратной совместимости)
+    try:
+        client = get_sheets_client()
+        sh = client.open_by_key(SHEET_ID)
+        ws = sh.worksheet(FAQ_SHEET_NAME)
 
-    # Проверяем наличие колонки media_json
-    headers = ws.row_values(1)
-    has_media_json = "media_json" in [h.strip() for h in headers]
+        # Проверяем наличие колонки media_json
+        headers = ws.row_values(1)
+        has_media_json = "media_json" in [h.strip() for h in headers]
 
-    # Пишем в C/D, оставляя A/B пустыми
-    row = ["", "", question, answer]
-    if has_media_json:
-        row.append(media_json or "")
+        # Пишем в C/D, оставляя A/B пустыми
+        row = ["", "", question, answer]
+        if has_media_json:
+            row.append(media_json or "")
 
-    ws.append_row(row, value_input_option="RAW")
+        ws.append_row(row, value_input_option="RAW")
+    except Exception as e:
+        logger.exception(f"[MANAGER_REPLY] Ошибка записи в Google Sheets: {e}")
+    
+    # Также сохраняем в Qdrant через faq_service
+    try:
+        import asyncio
+        from app.services.faq_service import add_faq_entry_to_cache
+        
+        # Запускаем асинхронно, чтобы не блокировать
+        asyncio.create_task(add_faq_entry_to_cache(question, answer, media_json))
+    except Exception as e:
+        logger.exception(f"[MANAGER_REPLY] Ошибка сохранения в Qdrant: {e}")
 
 
 def _extract_media_attachments(message: Message) -> List[Dict[str, Any]]:

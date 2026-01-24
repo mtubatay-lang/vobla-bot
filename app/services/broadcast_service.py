@@ -58,32 +58,46 @@ def create_broadcast_draft(
             row.append(broadcast_id)
         elif header_clean == "created_at":
             row.append(now_iso)
-        elif header_clean == "created_by_user_id":
-            row.append(str(created_by_user_id))
-        elif header_clean == "created_by_username":
-            row.append(created_by_username or "")
-        elif header_clean == "status":
-            row.append("draft")
-        elif header_clean == "text_original":
+        elif header_clean == "created_by":
+            # Объединяем user_id и username в одну колонку
+            created_by_str = f"{created_by_user_id}"
+            if created_by_username:
+                created_by_str += f" (@{created_by_username})"
+            row.append(created_by_str)
+        elif header_clean == "text":
+            # Записываем оригинальный текст (позже обновится финальным)
             row.append(text_original)
-        elif header_clean == "text_final":
-            row.append("")
-        elif header_clean == "selected_variant":
-            row.append("")
-        elif header_clean == "mode":
-            row.append("")
         elif header_clean == "media_json":
             row.append(media_json)
-        elif header_clean == "recipients_users_count":
-            row.append(str(users_count))
-        elif header_clean == "recipients_chats_count":
-            row.append(str(chats_count))
+        elif header_clean == "targets":
+            # Объединяем counts в одну колонку
+            targets_str = f"users:{users_count},chats:{chats_count}"
+            row.append(targets_str)
+        elif header_clean == "status":
+            row.append("draft")
         elif header_clean == "sent_ok":
             row.append("0")
         elif header_clean == "sent_fail":
             row.append("0")
-        elif header_clean == "total":
-            row.append("0")
+        # Поддержка дополнительных колонок (если есть)
+        elif header_clean in ("created_by_user_id", "created_by_username"):
+            # Дополнительные колонки для совместимости
+            if header_clean == "created_by_user_id":
+                row.append(str(created_by_user_id))
+            else:
+                row.append(created_by_username or "")
+        elif header_clean in ("text_original", "text_final"):
+            if header_clean == "text_original":
+                row.append(text_original)
+            else:
+                row.append("")
+        elif header_clean in ("selected_variant", "mode", "total"):
+            row.append("")
+        elif header_clean in ("recipients_users_count", "recipients_chats_count"):
+            if header_clean == "recipients_users_count":
+                row.append(str(users_count))
+            else:
+                row.append(str(chats_count))
         else:
             row.append("")
     
@@ -121,7 +135,11 @@ def finalize_broadcast(
         return
     
     updates = {}
-    if "text_final" in header_map:
+    # Обновляем text (финальный текст)
+    if "text" in header_map:
+        updates["text"] = text_final
+    # Также поддерживаем text_final для совместимости
+    elif "text_final" in header_map:
         updates["text_final"] = text_final
     if "status" in header_map:
         updates["status"] = status
@@ -129,6 +147,7 @@ def finalize_broadcast(
         updates["sent_ok"] = str(sent_ok)
     if "sent_fail" in header_map:
         updates["sent_fail"] = str(sent_fail)
+    # Поддержка дополнительных колонок (если есть)
     if "selected_variant" in header_map and selected_variant:
         updates["selected_variant"] = selected_variant
     if "mode" in header_map and mode:
@@ -165,14 +184,29 @@ def log_broadcast_recipient(
             row.append(broadcast_id)
         elif header_clean == "ts":
             row.append(now_iso)
-        elif header_clean == "recipient_type":
+        elif header_clean == "target_type":
+            # В таблице target_type, а не recipient_type
             row.append(recipient_type)
+        elif header_clean == "recipient_type":
+            # Поддержка для совместимости
+            row.append(recipient_type)
+        elif header_clean == "chat_id":
+            # В таблице chat_id, а не recipient_id
+            row.append(str(recipient_id))
         elif header_clean == "recipient_id":
+            # Поддержка для совместимости
             row.append(str(recipient_id))
         elif header_clean == "status":
             row.append(status)
-        elif header_clean == "error_text":
+        elif header_clean == "error":
+            # В таблице error, а не error_text
             row.append(error_text)
+        elif header_clean == "error_text":
+            # Поддержка для совместимости
+            row.append(error_text)
+        elif header_clean == "targets":
+            # Дополнительное поле (может быть пустым)
+            row.append("")
         else:
             row.append("")
     

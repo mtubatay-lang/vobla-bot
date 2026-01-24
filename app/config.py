@@ -77,3 +77,14 @@ RECIPIENTS_USERS_TAB = os.getenv("RECIPIENTS_USERS_TAB", "recipients_users")
 RECIPIENTS_CHATS_TAB = os.getenv("RECIPIENTS_CHATS_TAB", "recipients_chats")
 BROADCASTS_TAB = os.getenv("BROADCASTS_TAB", "broadcasts")
 BROADCAST_LOGS_TAB = os.getenv("BROADCAST_LOGS_TAB", "broadcast_logs")
+
+# --- Qdrant Vector Database ---
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", "")
+QDRANT_COLLECTION_NAME = os.getenv("QDRANT_COLLECTION_NAME", "knowledge_base")
+
+# --- Knowledge Base Settings ---
+_manager_usernames_raw = os.getenv("MANAGER_USERNAMES", "")
+MANAGER_USERNAMES = [u.strip() for u in _manager_usernames_raw.split(",") if u.strip()] if _manager_usernames_raw else []
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
