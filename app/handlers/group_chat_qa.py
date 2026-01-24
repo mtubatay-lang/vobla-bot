@@ -13,7 +13,7 @@ from app.services.auth_service import find_user_by_telegram_id
 from app.services.qdrant_service import get_qdrant_service
 from app.services.openai_client import create_embedding, client, CHAT_MODEL
 from app.services.metrics_service import alog_event
-from app.config import MANAGER_USERNAMES, RAG_TEST_CHAT_ID
+from app.config import MANAGER_USERNAMES, get_rag_test_chat_id
 
 logger = logging.getLogger(__name__)
 
@@ -407,7 +407,8 @@ async def handle_group_chat_message(message: Message):
 async def handle_manager_reply_in_group_chat(message: Message):
     """Перехватывает ответы менеджеров на вопросы в групповых чатах."""
     # Если указан тестовый чат, обрабатываем только его
-    if RAG_TEST_CHAT_ID is not None and message.chat.id != RAG_TEST_CHAT_ID:
+    rag_test_chat_id = get_rag_test_chat_id()
+    if rag_test_chat_id is not None and message.chat.id != rag_test_chat_id:
         return
     
     # Игнорируем сообщения от бота

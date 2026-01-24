@@ -103,6 +103,3 @@ def get_rag_test_chat_id() -> int | None:
     except (ValueError, TypeError, KeyError):
         pass
     return None
-
-# Для обратной совместимости создаем переменную через функцию
-RAG_TEST_CHAT_ID = get_rag_test_chat_id()
