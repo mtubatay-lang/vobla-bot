@@ -68,26 +68,33 @@ async def kb_add_callback(cb: CallbackQuery, state: FSMContext):
 @router.message(Command("kb_migrate"))
 async def cmd_kb_migrate(message: Message):
     """Команда /kb_migrate для миграции FAQ из Google Sheets в Qdrant."""
-    logger.info(f"[KB_ADMIN] Получена команда /kb_migrate от пользователя {message.from_user.id if message.from_user else 'unknown'}")
-    
-    if not await _require_admin(message):
-        logger.warning(f"[KB_ADMIN] Пользователь {message.from_user.id if message.from_user else 'unknown'} не имеет прав админа")
-        return
-    
-    logger.info(f"[KB_ADMIN] Начинаю миграцию FAQ для админа {message.from_user.id}")
-    
-    # Отправляем сообщение о начале миграции
-    status_msg = await message.answer("⏳ Начинаю миграцию FAQ из Google Sheets в Qdrant...")
-    
-    # Запускаем асинхронную миграцию
-    asyncio.create_task(
-        migrate_faq_async(
-            message.bot,
-            message.chat.id,
-            status_msg.message_id,
-            message.from_user.id if message.from_user else None,
+    try:
+        logger.info(f"[KB_ADMIN] Получена команда /kb_migrate от пользователя {message.from_user.id if message.from_user else 'unknown'}")
+        
+        if not await _require_admin(message):
+            logger.warning(f"[KB_ADMIN] Пользователь {message.from_user.id if message.from_user else 'unknown'} не имеет прав админа")
+            return
+        
+        logger.info(f"[KB_ADMIN] Начинаю миграцию FAQ для админа {message.from_user.id}")
+        
+        # Отправляем сообщение о начале миграции
+        status_msg = await message.answer("⏳ Начинаю миграцию FAQ из Google Sheets в Qdrant...")
+        
+        # Запускаем асинхронную миграцию
+        asyncio.create_task(
+            migrate_faq_async(
+                message.bot,
+                message.chat.id,
+                status_msg.message_id,
+                message.from_user.id if message.from_user else None,
+            )
         )
-    )
+    except Exception as e:
+        logger.exception(f"[KB_ADMIN] Ошибка в обработчике команды /kb_migrate: {e}")
+        try:
+            await message.answer(f"❌ Произошла ошибка: {str(e)}")
+        except:
+            pass
 
 
 async def migrate_faq_async(
@@ -495,3 +502,7 @@ async def save_manager_answer_to_qdrant(
         logger.exception(f"[KB_ADMIN] Ошибка сохранения ответа менеджера в Qdrant: {e}")
         raise
         await state.clear()
+
+
+# Логирование при импорте модуля
+logger.info("[KB_ADMIN] Модуль загружен, обработчики команд: kb_add, kb_migrate, cancel")

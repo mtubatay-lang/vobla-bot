@@ -4,11 +4,11 @@ import asyncio
 import logging
 
 import sentry_sdk
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, BaseMiddleware
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import BotCommand
+from aiogram.types import BotCommand, Update
 
 from app.config import BOT_TOKEN, LOG_LEVEL, SENTRY_DSN
 from app.handlers.debug_passthrough import router as debug_router
@@ -51,6 +51,15 @@ async def main() -> None:
     )
     dp = Dispatcher(storage=MemoryStorage())
 
+    # --- Middleware для логирования команд ---
+    class CommandLoggingMiddleware(BaseMiddleware):
+        async def __call__(self, handler, event: Update, data):
+            if event.message and event.message.text and event.message.text.startswith('/'):
+                logger.info(f"[COMMAND] Получена команда: {event.message.text} от пользователя {event.message.from_user.id if event.message.from_user else 'unknown'}")
+            return await handler(event, data)
+
+    dp.message.middleware(CommandLoggingMiddleware())
+
     # --- Команды бота в меню Telegram ---
     await bot.set_my_commands(
         [
@@ -67,12 +76,17 @@ async def main() -> None:
     dp.include_router(start_router)
     dp.include_router(help_router)  # роутер помощи
     dp.include_router(auth_router)  # роутер авторизации
+    dp.include_router(kb_admin_router)  # админ-панель для базы знаний (перемещен выше)
     dp.include_router(manager_router)  # роутер для менеджеров
     dp.include_router(qa_router)  # роутер режима навыка
     dp.include_router(faq_router)   # FAQ-роутер
-    dp.include_router(kb_admin_router)  # админ-панель для базы знаний
-    logger.info("Роутер knowledge_base_admin подключен")
     dp.include_router(echo_router)
+    
+    # Проверка зарегистрированных роутеров
+    logger.info(f"[MAIN] Зарегистрировано роутеров: {len(dp.sub_routers)}")
+    for idx, router in enumerate(dp.sub_routers):
+        router_name = getattr(router, 'name', f'router_{idx}')
+        logger.info(f"[MAIN] Роутер {idx+1}: {router_name}")
 
     logger.info("Запускаем бота...")
 
