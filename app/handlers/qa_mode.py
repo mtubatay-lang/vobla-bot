@@ -187,6 +187,7 @@ async def _ask_clarification_question_private(
     question: str,
     found_chunks: List[Dict[str, Any]],
     missing_info: str,
+    state: FSMContext,
 ) -> None:
     """Задает уточняющий вопрос пользователю (для приватных чатов)."""
     try:
@@ -199,21 +200,37 @@ async def _ask_clarification_question_private(
             f"Пользователь спросил: {question}\n\n"
             f"Найденные фрагменты:\n{chunks_summary}\n\n"
             f"Недостающая информация: {missing_info}\n\n"
-            "Сформулируй один уточняющий вопрос, который поможет найти нужный ответ.\n"
-            "Вопрос должен быть конкретным и понятным."
+            "Сформулируй один развернутый и понятный уточняющий вопрос, который поможет найти нужный ответ.\n"
+            "Вопрос должен быть максимально конкретным и понятным, как будто ты менеджер, который хочет помочь клиенту.\n"
+            "Не используй технические термины, говори простым языком.\n"
+            "Вопрос должен быть полным предложением, не используй сокращения."
         )
         
         resp = client.chat.completions.create(
             model=CHAT_MODEL,
             messages=[
-                {"role": "system", "content": "Ты помощник, который формулирует уточняющие вопросы."},
+                {"role": "system", "content": "Ты дружелюбный менеджер, который помогает клиентам, задавая понятные уточняющие вопросы."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.3,
         )
         
-        clarification = resp.choices[0].message.content or "Можете уточнить ваш вопрос?"
+        clarification_text = resp.choices[0].message.content or "Можете уточнить ваш вопрос?"
+        
+        # Добавляем вводную фразу
+        intro = "Чтобы ответить на ваш вопрос, мне нужны некоторые уточнения.\n\n"
+        clarification = intro + clarification_text
+        
         await message.answer(clarification, reply_markup=qa_kb())
+        
+        # Сохраняем уточняющий вопрос в историю и устанавливаем флаг ожидания уточнения
+        data = await state.get_data()
+        history = data.get("qa_history", [])
+        history.append({"role": "assistant", "text": clarification})
+        await state.update_data(
+            qa_history=history[-8:],
+            qa_awaiting_clarification=True,
+        )
         
         await alog_event(
             user_id=message.from_user.id if message.from_user else None,
@@ -223,7 +240,7 @@ async def _ask_clarification_question_private(
         )
     except Exception as e:
         logger.exception(f"[QA_MODE] Ошибка формулировки уточняющего вопроса: {e}")
-        await message.answer("Можете уточнить ваш вопрос?", reply_markup=qa_kb())
+        await message.answer("Чтобы ответить на ваш вопрос, мне нужны некоторые уточнения.\n\nМожете уточнить ваш вопрос?", reply_markup=qa_kb())
 
 
 async def _generate_answer_from_chunks_private(
@@ -328,6 +345,8 @@ async def qa_start(cb: CallbackQuery, state: FSMContext):
         qa_questions_count=0,
         qa_last_question="",
         qa_last_answer_source="",
+        qa_original_question="",
+        qa_awaiting_clarification=False,
     )
 
     await cb.message.answer(
@@ -355,6 +374,8 @@ async def qa_start_text(message: Message, state: FSMContext):
         qa_questions_count=0,
         qa_last_question="",
         qa_last_answer_source="",
+        qa_original_question="",
+        qa_awaiting_clarification=False,
     )
     await message.answer(
         "🧠 <b>Навык: Ответы на вопросы</b>\n\n"
@@ -379,6 +400,8 @@ async def qa_start_command(message: Message, state: FSMContext):
         qa_questions_count=0,
         qa_last_question="",
         qa_last_answer_source="",
+        qa_original_question="",
+        qa_awaiting_clarification=False,
     )
     await message.answer(
         "🧠 <b>Навык: Ответы на вопросы</b>\n\n"
@@ -416,13 +439,33 @@ async def qa_handle_question(message: Message, state: FSMContext):
     data = await state.get_data()
     cnt = int(data.get("qa_questions_count", 0)) + 1
     history = data.get("qa_history", [])
+    original_question = data.get("qa_original_question", "")
+    awaiting_clarification = data.get("qa_awaiting_clarification", False)
     
-    # Добавляем вопрос в историю
-    history.append({"role": "user", "text": q})
+    # Определяем, является ли это первым вопросом или ответом на уточнение
+    # Первый вопрос - когда история пустая или содержит только системные сообщения
+    user_messages = [msg for msg in history if msg.get("role") == "user"]
+    is_first_question = len(user_messages) == 0
+    is_clarification_response = awaiting_clarification
+    
+    # Если это первый вопрос в сессии, сохраняем его как исходный
+    if is_first_question:
+        original_question = q
+        logger.info(f"[QA_MODE] Сохраняем исходный вопрос: '{q[:50]}...'")
+    # Если это ответ на уточнение, объединяем исходный вопрос с уточнением
+    elif is_clarification_response and original_question:
+        combined_question = f"{original_question}\n{q}"
+        logger.info(f"[QA_MODE] Объединяем исходный вопрос с уточнением: '{combined_question[:100]}...'")
+        q = combined_question  # Используем объединенный вопрос для поиска
+    
+    # Добавляем вопрос в историю (сохраняем оригинальный текст пользователя, не объединенный)
+    history.append({"role": "user", "text": message.text.strip()})
     
     await state.update_data(
         qa_questions_count=cnt,
         qa_last_question=q,
+        qa_original_question=original_question,
+        qa_awaiting_clarification=False,  # Сбрасываем флаг после обработки
         qa_history=history[-8:],  # Ограничиваем историю
     )
 
@@ -431,8 +474,14 @@ async def qa_handle_question(message: Message, state: FSMContext):
 
     try:
         # ШАГ 1: Поиск в Qdrant RAG
-        context_text = "\n".join([msg.get("text", "") for msg in history[-3:]])
-        query_text = f"{context_text}\n{q}" if context_text else q
+        # Если это ответ на уточнение, q уже содержит объединенный вопрос
+        # Иначе используем контекст из истории
+        if is_clarification_response:
+            query_text = q  # q уже содержит объединенный вопрос
+            logger.info(f"[QA_MODE] Используем объединенный вопрос для поиска: '{query_text[:100]}...'")
+        else:
+            context_text = "\n".join([msg.get("text", "") for msg in history[-3:]])
+            query_text = f"{context_text}\n{q}" if context_text else q
         
         embedding = await asyncio.to_thread(create_embedding, query_text)
         
@@ -476,7 +525,7 @@ async def qa_handle_question(message: Message, state: FSMContext):
                 # Если данных недостаточно, задаем уточняющий вопрос
                 if not sufficient and missing_info:
                     logger.info("[QA_MODE] Задаем уточняющий вопрос пользователю")
-                    await _ask_clarification_question_private(message, q, found_chunks, missing_info)
+                    await _ask_clarification_question_private(message, q, found_chunks, missing_info, state)
                     return
                 
                 # Генерируем ответ из Qdrant
@@ -545,9 +594,35 @@ async def qa_handle_question(message: Message, state: FSMContext):
             return
         
         # ШАГ 3: Если не нашли ни в Qdrant, ни в FAQ - эскалируем менеджеру
+        # Формируем полный контекст разговора для менеджера
+        data = await state.get_data()
+        history = data.get("qa_history", [])
+        original_question = data.get("qa_original_question", q)
+        
+        # Собираем полный контекст разговора
+        conversation_parts = []
+        conversation_parts.append(f"Исходный вопрос: {original_question}")
+        
+        # Добавляем все сообщения из истории (вопросы пользователя и уточнения бота)
+        for i, msg in enumerate(history):
+            role = msg.get("role", "")
+            text = msg.get("text", "")
+            if role == "user":
+                # Пропускаем исходный вопрос, так как он уже добавлен
+                if text != original_question:
+                    conversation_parts.append(f"Уточнение пользователя: {text}")
+            elif role == "assistant" and "уточнения" in text.lower():
+                # Извлекаем только сам вопрос из уточнения (без вводной фразы)
+                question_part = text.replace("Чтобы ответить на ваш вопрос, мне нужны некоторые уточнения.\n\n", "")
+                conversation_parts.append(f"Уточняющий вопрос бота: {question_part}")
+        
+        # Формируем полный вопрос для менеджера
+        full_question = "\n\n".join(conversation_parts)
+        
         logger.warning(
             f"[QA_MODE] Не найдено ответа ни в RAG, ни в FAQ. "
-            f"Вопрос: '{q[:100]}...'. Эскалируем менеджеру."
+            f"Исходный вопрос: '{original_question[:50]}...'. "
+            f"Полный контекст: '{full_question[:150]}...'. Эскалируем менеджеру."
         )
         await state.update_data(qa_last_answer_source="manager")
         
@@ -561,10 +636,10 @@ async def qa_handle_question(message: Message, state: FSMContext):
             user_id=message.from_user.id if message.from_user else None,
             username=message.from_user.username if message.from_user else None,
             event="kb_not_found_escalated",
-            meta={"question": q},
+            meta={"original_question": original_question, "full_context": full_question[:200]},
         )
         
-        await create_ticket_and_notify_managers(message, q)
+        await create_ticket_and_notify_managers(message, full_question)
         
     except Exception as e:
         logger.exception(f"[QA_MODE] Ошибка обработки вопроса: {e}")
