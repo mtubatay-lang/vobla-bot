@@ -132,6 +132,12 @@ async def _expand_query_for_search(original_query: str) -> str:
     if not original_query or not original_query.strip():
         return original_query
     
+    # Нормализация названий: Воблабир и Воблаbeer - это одно и то же
+    NORMALIZATION_MAP = {
+        "воблабир": ["Воблаbeer", "Воблабир"],
+        "воблаbeer": ["Воблаbeer", "Воблабир"],
+    }
+    
     # Определяем, нужно ли расширять запрос
     query_lower = original_query.lower().strip()
     is_short = len(original_query.strip()) < 20
@@ -140,27 +146,45 @@ async def _expand_query_for_search(original_query: str) -> str:
         "как работает", "что такое", "про что"
     ])
     
-    # Если запрос длинный и конкретный, не расширяем
-    if not is_short and not is_general:
+    # Проверяем, нужно ли добавить нормализацию названий
+    needs_normalization = any(keyword in query_lower for keyword in NORMALIZATION_MAP.keys())
+    if needs_normalization:
+        logger.info(f"[QA_MODE] Обнаружено название компании в запросе, применяем нормализацию")
+    
+    # Если запрос длинный и конкретный, не расширяем (но все равно применяем нормализацию)
+    if not is_short and not is_general and not needs_normalization:
         logger.debug(f"[QA_MODE] Запрос достаточно конкретный, расширение не требуется: '{original_query[:50]}...'")
         return original_query
     
     try:
         system_prompt = (
-            "Ты помощник для расширения поисковых запросов.\n"
+            "Ты помощник для расширения поисковых запросов корпоративного бота сети магазинов Воблабир.\n"
+            "ВАЖНО: Воблабир (также пишется как Воблаbeer) - это сеть магазинов, компания, бренд.\n"
+            "НЕ путай с другими значениями слов (например, 'воблер' - это рыболовная приманка).\n\n"
             "Твоя задача — расширить запрос пользователя, добавив связанные ключевые слова и темы,\n"
-            "которые помогут найти релевантную информацию в базе знаний.\n\n"
+            "которые помогут найти релевантную информацию в базе знаний о компании Воблабир.\n\n"
             "Правила:\n"
             "1. Сохрани оригинальный смысл запроса.\n"
-            "2. Добавь связанные ключевые слова и темы через запятую.\n"
-            "3. Используй синонимы и связанные понятия.\n"
-            "4. Не добавляй лишних деталей, только ключевые слова для поиска.\n"
-            "5. Ответ должен быть кратким (до 100 слов).\n"
-            "6. Не используй форматирование, только текст."
+            "2. Если в запросе упоминается 'Воблабир' или 'Воблаbeer', добавь оба варианта написания.\n"
+            "3. Добавь связанные ключевые слова: компания, сеть магазинов, бренд, бизнес, история, философия.\n"
+            "4. Используй синонимы и связанные понятия.\n"
+            "5. Не добавляй лишних деталей, только ключевые слова для поиска.\n"
+            "6. Ответ должен быть кратким (до 100 слов).\n"
+            "7. Не используй форматирование, только текст."
         )
         
+        # Добавляем информацию о нормализации в user_prompt
+        normalization_hint = ""
+        if needs_normalization:
+            normalization_hint = (
+                "\n\nВАЖНО: В запросе упоминается название компании. "
+                "Добавь в расширенный запрос оба варианта написания: 'Воблабир' и 'Воблаbeer'. "
+                "Это одно и то же - сеть магазинов."
+            )
+        
         user_prompt = (
-            f"Оригинальный запрос: {original_query}\n\n"
+            f"Оригинальный запрос: {original_query}\n"
+            f"{normalization_hint}\n\n"
             "Расширь этот запрос, добавив связанные ключевые слова и темы, "
             "которые помогут найти релевантную информацию. "
             "Используй формат: ключевое слово 1, ключевое слово 2, тема 1, тема 2..."
@@ -221,6 +245,7 @@ async def _check_sufficient_data_private(
     question: str,
     found_chunks: List[Dict[str, Any]],
     conversation_history: Optional[List[Dict[str, str]]] = None,
+    is_after_clarification: bool = False,
 ) -> tuple[bool, Optional[str]]:
     """Проверяет через AI, достаточно ли данных для ответа (для приватных чатов)."""
     if not found_chunks:
@@ -228,6 +253,15 @@ async def _check_sufficient_data_private(
     
     # Проверяем максимальный score
     max_score = max((chunk.get("score", 0) for chunk in found_chunks), default=0)
+    
+    # Если после уточнений и найдено достаточно чанков, используем более мягкие критерии
+    if is_after_clarification and len(found_chunks) >= 3:
+        if max_score >= 0.6:
+            logger.info(
+                f"[QA_MODE] После уточнений: найдено {len(found_chunks)} чанков с max_score={max_score:.3f}, "
+                f"считаем данные достаточными"
+            )
+            return (True, None)
     
     # Если score очень высокий, считаем данные достаточными
     if max_score >= 0.75:
@@ -253,13 +287,24 @@ async def _check_sufficient_data_private(
                 context_lines.append(f"{role}: {text[:200]}")
             context_text = "\n".join(context_lines)
         
+        # Адаптируем промпт в зависимости от того, после уточнений или нет
+        sufficiency_instruction = (
+            "Если фрагменты релевантны вопросу, даже если не полностью покрывают все аспекты, можно считать данные достаточными."
+        )
+        if is_after_clarification:
+            sufficiency_instruction = (
+                "Пользователь уже дал уточнения. Если фрагменты содержат релевантную информацию, "
+                "даже частичную, можно дать ответ на основе имеющихся данных. "
+                "Считай данные достаточными, если они позволяют дать полезный ответ."
+            )
+        
         prompt = (
             f"Вопрос пользователя: {question}\n\n"
             f"{'Контекст диалога:\n' + context_text + '\n\n' if context_text else ''}"
             f"Найденные фрагменты из базы знаний:\n{chunks_text}\n\n"
             "Оцени, достаточно ли этих фрагментов для ответа на вопрос пользователя.\n"
             "Учитывай контекст диалога - если пользователь уточняет предыдущий вопрос, используй этот контекст.\n"
-            "Если фрагменты релевантны вопросу, даже если не полностью покрывают все аспекты, можно считать данные достаточными.\n"
+            f"{sufficiency_instruction}\n"
             "Ответь 'yes' или 'no'.\n"
             "Если 'no', укажи кратко, какая информация отсутствует."
         )
@@ -375,13 +420,17 @@ async def _generate_answer_from_chunks_private(
             "Твоя задача — ответить на вопрос пользователя на основе предоставленных фрагментов базы знаний.\n\n"
             "ВАЖНО: Отвечай ТОЛЬКО на текущий вопрос пользователя. Не смешивай разные темы.\n"
             "Если фрагменты не относятся к текущему вопросу, честно скажи об этом.\n\n"
+            "Если предоставлено несколько фрагментов, объедини информацию из них для более полного ответа.\n"
+            "Фрагменты могут дополнять друг друга - используй всю релевантную информацию.\n"
+            "Если в разных фрагментах есть перекрывающаяся информация, объедини её в единый ответ.\n\n"
             "Правила:\n"
             "1. Используй ТОЛЬКО информацию из предоставленных фрагментов.\n"
             "2. НЕ придумывай факты, которых нет в фрагментах.\n"
             "3. Если информация в фрагментах не относится к текущему вопросу, скажи об этом честно.\n"
-            "4. Структурируй ответ: абзацы, списки, если уместно.\n"
-            "5. Будь дружелюбным и понятным.\n"
-            "6. Учитывай контекст предыдущих сообщений, но отвечай на текущий вопрос."
+            "4. Объединяй информацию из всех релевантных фрагментов для создания полного ответа.\n"
+            "5. Структурируй ответ: абзацы, списки, если уместно.\n"
+            "6. Будь дружелюбным и понятным.\n"
+            "7. Учитывай контекст предыдущих сообщений, но отвечай на текущий вопрос."
         )
         
         user_prompt = (
@@ -549,6 +598,7 @@ async def qa_handle_question(message: Message, state: FSMContext):
     history = data.get("qa_history", [])
     original_question = data.get("qa_original_question", "")
     awaiting_clarification = data.get("qa_awaiting_clarification", False)
+    previous_chunks = data.get("qa_found_chunks", [])  # Получаем предыдущие чанки
     
     # Определяем, является ли это первым вопросом или ответом на уточнение
     # Первый вопрос - когда история пустая или содержит только системные сообщения
@@ -588,6 +638,9 @@ async def qa_handle_question(message: Message, state: FSMContext):
     
     # Добавляем вопрос в историю (сохраняем оригинальный текст пользователя, не объединенный)
     history.append({"role": "user", "text": message.text.strip()})
+    
+    # Получаем предыдущие чанки из state (если есть)
+    previous_chunks = data.get("qa_found_chunks", [])
     
     await state.update_data(
         qa_questions_count=cnt,
@@ -659,33 +712,50 @@ async def qa_handle_question(message: Message, state: FSMContext):
         
         # Если нашли чанки в Qdrant
         if found_chunks:
-            # Проверка достаточности данных (передаем историю для контекста)
-            sufficient, missing_info = await _check_sufficient_data_private(q, found_chunks, history)
+            # Если это ответ на уточнение, объединяем с предыдущими чанками
+            all_chunks = found_chunks
+            if is_clarification_response and previous_chunks:
+                # Объединяем предыдущие и новые чанки, убирая дубликаты по тексту
+                seen_texts = {chunk.get("text", "") for chunk in previous_chunks}
+                new_chunks = [chunk for chunk in found_chunks if chunk.get("text", "") not in seen_texts]
+                all_chunks = previous_chunks + new_chunks
+                logger.info(
+                    f"[QA_MODE] Объединяем чанки: было {len(previous_chunks)}, новых {len(new_chunks)}, "
+                    f"всего {len(all_chunks)}"
+                )
+            
+            # Проверка достаточности данных (передаем историю для контекста и флаг после уточнений)
+            sufficient, missing_info = await _check_sufficient_data_private(
+                q, all_chunks, history, is_after_clarification=is_clarification_response
+            )
             logger.info(
                 f"[QA_MODE] Проверка достаточности данных: sufficient={sufficient}, "
                 f"missing_info={missing_info[:50] if missing_info else None}"
             )
             
-            # Проверяем, нужно ли эскалировать
-            should_escalate = await _should_escalate_to_manager_private(found_chunks, (sufficient, missing_info))
+            # Проверяем, нужно ли эскалировать (используем объединенные чанки)
+            should_escalate = await _should_escalate_to_manager_private(all_chunks, (sufficient, missing_info))
             logger.info(f"[QA_MODE] Решение об эскалации: should_escalate={should_escalate}")
             
             if not should_escalate:
                 # Если данных недостаточно, задаем уточняющий вопрос
                 if not sufficient and missing_info:
                     logger.info("[QA_MODE] Задаем уточняющий вопрос пользователю")
-                    await _ask_clarification_question_private(message, q, found_chunks, missing_info, state)
+                    # Сохраняем найденные чанки для повторного использования
+                    await state.update_data(qa_found_chunks=all_chunks)
+                    await _ask_clarification_question_private(message, q, all_chunks, missing_info, state)
                     return
                 
-                # Генерируем ответ из Qdrant
-                logger.info("[QA_MODE] Генерируем ответ из найденных чанков RAG")
-                answer = await _generate_answer_from_chunks_private(q, found_chunks, history)
+                # Генерируем ответ из Qdrant (используем объединенные чанки)
+                logger.info(f"[QA_MODE] Генерируем ответ из найденных чанков RAG (всего {len(all_chunks)} чанков)")
+                answer = await _generate_answer_from_chunks_private(q, all_chunks, history)
                 
-                # Обновляем историю
+                # Обновляем историю и очищаем сохраненные чанки (ответ дан)
                 history.append({"role": "assistant", "text": answer})
                 await state.update_data(
                     qa_history=history[-8:],
                     qa_last_answer_source="qdrant_rag",
+                    qa_found_chunks=[],  # Очищаем после успешного ответа
                 )
                 
                 await message.answer(
