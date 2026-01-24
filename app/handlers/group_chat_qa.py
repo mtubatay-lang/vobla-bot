@@ -412,6 +412,10 @@ async def handle_group_chat_message(message: Message):
         return
 async def handle_manager_reply_in_group_chat(message: Message):
     """Перехватывает ответы менеджеров на вопросы в групповых чатах."""
+    # Если указан тестовый чат, обрабатываем только его
+    if RAG_TEST_CHAT_ID is not None and message.chat.id != RAG_TEST_CHAT_ID:
+        return
+
     # Игнорируем сообщения от бота
     if message.from_user and message.from_user.is_bot:
         return
