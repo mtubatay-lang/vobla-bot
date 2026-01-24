@@ -19,7 +19,7 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # -----------------------------
 
 EMBEDDING_MODEL = "text-embedding-3-small"
-CHAT_MODEL = "gpt-4.1-mini"  # можно заменить на другой, если нужно
+CHAT_MODEL = "gpt-4o-mini"  # можно заменить на другой, если нужно
 
 
 def create_embedding(text: str) -> List[float]:
