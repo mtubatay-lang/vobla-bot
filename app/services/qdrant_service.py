@@ -6,7 +6,7 @@ from typing import List, Dict, Optional, Any
 from datetime import datetime
 
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
+from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue, Query, Vector
 
 from app.config import QDRANT_URL, QDRANT_API_KEY, QDRANT_COLLECTION_NAME
 
@@ -139,21 +139,36 @@ class QdrantService:
                     ]
                 )
             
-            results = self.client.search(
+            # Используем новый API query_points вместо устаревшего search
+            query = Query(
+                vector=Vector(
+                    vector=query_embedding,
+                ),
+            )
+            
+            results = self.client.query_points(
                 collection_name=self.collection_name,
-                query_vector=query_embedding,
+                query=query,
                 limit=top_k,
                 score_threshold=score_threshold,
                 query_filter=query_filter,
             )
             
             # Преобразуем результаты в удобный формат
+            # query_points возвращает объект QueryResult, нужно получить points
             formatted_results = []
-            for result in results:
+            for point in results.points:
+                # Получаем score из объекта ScoredPoint
+                score = getattr(point, 'score', None)
+                if score is None:
+                    # Если score не указан напрямую, пропускаем точку
+                    continue
+                
+                payload = getattr(point, 'payload', {}) or {}
                 formatted_results.append({
-                    "text": result.payload.get("text", ""),
-                    "metadata": {k: v for k, v in result.payload.items() if k != "text"},
-                    "score": result.score,
+                    "text": payload.get("text", ""),
+                    "metadata": {k: v for k, v in payload.items() if k != "text"},
+                    "score": score,
                 })
             
             return formatted_results
