@@ -445,15 +445,19 @@ async def _generate_answer_from_chunks_private(
         system_prompt = (
             "Ты помощник корпоративного бота сети магазинов Воблабир.\n"
             "Твоя задача — ответить на вопрос пользователя на основе предоставленных фрагментов базы знаний.\n\n"
-            "ВАЖНО: Отвечай ТОЛЬКО на текущий вопрос пользователя. Не смешивай разные темы.\n"
-            "Если фрагменты не относятся к текущему вопросу, честно скажи об этом.\n\n"
+            "КРИТИЧЕСКИ ВАЖНО:\n"
+            "1. Фрагменты были найдены системой поиска как релевантные к вопросу пользователя.\n"
+            "2. Твоя задача - найти и использовать релевантную информацию из этих фрагментов для ответа.\n"
+            "3. НЕ говори 'фрагменты не содержат информации' - вместо этого найди и используй любую релевантную информацию.\n"
+            "4. Если в фрагментах есть информация, связанная с вопросом (даже частично), используй её для ответа.\n"
+            "5. Если фрагменты действительно не содержат релевантной информации, только тогда скажи об этом.\n\n"
             "Если предоставлено несколько фрагментов, объедини информацию из них для более полного ответа.\n"
             "Фрагменты могут дополнять друг друга - используй всю релевантную информацию.\n"
             "Если в разных фрагментах есть перекрывающаяся информация, объедини её в единый ответ.\n\n"
             "Правила:\n"
             "1. Используй ТОЛЬКО информацию из предоставленных фрагментов.\n"
             "2. НЕ придумывай факты, которых нет в фрагментах.\n"
-            "3. Если информация в фрагментах не относится к текущему вопросу, скажи об этом честно.\n"
+            "3. Внимательно ищи релевантную информацию в каждом фрагменте - даже если она не очевидна с первого взгляда.\n"
             "4. Объединяй информацию из всех релевантных фрагментов для создания полного ответа.\n"
             "5. Структурируй ответ: абзацы, списки, если уместно.\n"
             "6. Будь дружелюбным и понятным.\n"
@@ -698,17 +702,79 @@ async def qa_handle_question(message: Message, state: FSMContext):
             f"Расширенный: '{expanded_query[:100]}...'"
         )
         
-        # ШАГ 3: Создаем эмбеддинг для расширенного запроса
-        embedding = await asyncio.to_thread(create_embedding, expanded_query)
-        
-        # ШАГ 4: Многоуровневый поиск в Qdrant
+        # ШАГ 3: Создаем эмбеддинги для разных вариантов запроса
+        # Делаем несколько поисков для лучшего покрытия
         qdrant_service = get_qdrant_service()
-        found_chunks = qdrant_service.search_multi_level(
-            query_embedding=embedding,
+        all_found_chunks = []
+        seen_texts = set()
+        chunks_expanded_count = 0
+        chunks_original_count = 0
+        chunks_keywords_count = 0
+        
+        # Поиск 1: Расширенный запрос
+        embedding_expanded = await asyncio.to_thread(create_embedding, expanded_query)
+        chunks_expanded = qdrant_service.search_multi_level(
+            query_embedding=embedding_expanded,
             top_k=5,
             initial_threshold=0.5,
             fallback_thresholds=[0.3, 0.1],
         )
+        chunks_expanded_count = len(chunks_expanded)
+        for chunk in chunks_expanded:
+            chunk_text = chunk.get("text", "")
+            if chunk_text and chunk_text not in seen_texts:
+                all_found_chunks.append(chunk)
+                seen_texts.add(chunk_text)
+        
+        # Поиск 2: Оригинальный запрос (если отличается от расширенного)
+        if query_text != expanded_query and len(query_text.strip()) > 5:
+            embedding_original = await asyncio.to_thread(create_embedding, query_text)
+            chunks_original = qdrant_service.search_multi_level(
+                query_embedding=embedding_original,
+                top_k=5,
+                initial_threshold=0.5,
+                fallback_thresholds=[0.3, 0.1],
+            )
+            chunks_original_count = len(chunks_original)
+            for chunk in chunks_original:
+                chunk_text = chunk.get("text", "")
+                if chunk_text and chunk_text not in seen_texts:
+                    all_found_chunks.append(chunk)
+                    seen_texts.add(chunk_text)
+        
+        # Поиск 3: Ключевые слова из вопроса (для конкретных вопросов)
+        # Извлекаем ключевые слова из оригинального вопроса
+        import re
+        keywords = re.findall(r'\b\w{4,}\b', q.lower())  # Слова длиннее 3 символов
+        if keywords and len(keywords) >= 2:
+            # Берем первые 3-5 ключевых слов
+            keywords_query = " ".join(keywords[:5])
+            if keywords_query != query_text.lower() and len(keywords_query) > 5:
+                embedding_keywords = await asyncio.to_thread(create_embedding, keywords_query)
+                chunks_keywords = qdrant_service.search_multi_level(
+                    query_embedding=embedding_keywords,
+                    top_k=3,
+                    initial_threshold=0.4,
+                    fallback_thresholds=[0.2, 0.1],
+                )
+                chunks_keywords_count = len(chunks_keywords)
+                for chunk in chunks_keywords:
+                    chunk_text = chunk.get("text", "")
+                    if chunk_text and chunk_text not in seen_texts:
+                        all_found_chunks.append(chunk)
+                        seen_texts.add(chunk_text)
+        
+        # Сортируем по score и берем топ-5
+        all_found_chunks.sort(key=lambda x: x.get("score", 0), reverse=True)
+        found_chunks = all_found_chunks[:5]
+        
+        if len(all_found_chunks) > chunks_expanded_count:
+            logger.info(
+                f"[QA_MODE] Множественный поиск: найдено {len(all_found_chunks)} уникальных чанков "
+                f"(из них {chunks_expanded_count} из расширенного запроса, "
+                f"{chunks_original_count} из оригинального, "
+                f"{chunks_keywords_count} из ключевых слов)"
+            )
         
         # Детальное логирование для диагностики
         logger.info(
@@ -777,27 +843,49 @@ async def qa_handle_question(message: Message, state: FSMContext):
                 logger.info(f"[QA_MODE] Генерируем ответ из найденных чанков RAG (всего {len(all_chunks)} чанков)")
                 answer = await _generate_answer_from_chunks_private(q, all_chunks, history)
                 
-                # Обновляем историю и очищаем сохраненные чанки (ответ дан)
-                history.append({"role": "assistant", "text": answer})
-                await state.update_data(
-                    qa_history=history[-8:],
-                    qa_last_answer_source="qdrant_rag",
-                    qa_found_chunks=[],  # Очищаем после успешного ответа
-                )
+                # Проверяем, не говорит ли ответ что данных нет (хотя чанки найдены)
+                answer_lower = answer.lower()
+                no_data_phrases = [
+                    "не содержат информации",
+                    "не содержат данных",
+                    "нет информации",
+                    "нет данных",
+                    "информация отсутствует",
+                    "данные отсутствуют",
+                ]
                 
-                await message.answer(
-                    answer + "\n\nЕсли есть ещё вопрос — просто напиши его 👇",
-                    reply_markup=qa_kb(),
-                    parse_mode="HTML",
-                )
-                
-                await alog_event(
-                    user_id=message.from_user.id if message.from_user else None,
-                    username=message.from_user.username if message.from_user else None,
-                    event="kb_answer_generated_private",
-                    meta={"question": q, "chunks_used": len(found_chunks)},
-                )
-                return
+                if any(phrase in answer_lower for phrase in no_data_phrases) and all_chunks:
+                    logger.warning(
+                        f"[QA_MODE] LLM говорит что данных нет, но чанки найдены ({len(all_chunks)}). "
+                        f"Эскалируем менеджеру."
+                    )
+                    # Эскалируем менеджеру - устанавливаем флаг и продолжаем выполнение
+                    should_escalate = True
+                else:
+                    # Обновляем историю и очищаем сохраненные чанки (ответ дан)
+                    history.append({"role": "assistant", "text": answer})
+                    await state.update_data(
+                        qa_history=history[-8:],
+                        qa_last_answer_source="qdrant_rag",
+                        qa_found_chunks=[],  # Очищаем после успешного ответа
+                    )
+                    
+                    await message.answer(
+                        answer + "\n\nЕсли есть ещё вопрос — просто напиши его 👇",
+                        reply_markup=qa_kb(),
+                        parse_mode="HTML",
+                    )
+                    
+                    await alog_event(
+                        user_id=message.from_user.id if message.from_user else None,
+                        username=message.from_user.username if message.from_user else None,
+                        event="kb_answer_generated_private",
+                        meta={"question": q, "chunks_used": len(all_chunks)},
+                    )
+                    return
+            
+            # Если нужно эскалировать (включая случай когда LLM сказал что данных нет)
+            # Продолжаем выполнение для поиска в FAQ и эскалации
         
         # ШАГ 2: Если не нашли в Qdrant или нужно эскалировать - ищем в FAQ
         if not found_chunks:
