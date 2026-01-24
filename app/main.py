@@ -53,9 +53,10 @@ async def main() -> None:
 
     # --- Middleware для логирования команд ---
     class CommandLoggingMiddleware(BaseMiddleware):
-        async def __call__(self, handler, event: Update, data):
-            if event.message and event.message.text and event.message.text.startswith('/'):
-                logger.info(f"[COMMAND] Получена команда: {event.message.text} от пользователя {event.message.from_user.id if event.message.from_user else 'unknown'}")
+        async def __call__(self, handler, event, data):
+            # В aiogram 3.x event уже является Message для message handlers
+            if hasattr(event, 'text') and event.text and event.text.startswith('/'):
+                logger.info(f"[COMMAND] Получена команда: {event.text} от пользователя {event.from_user.id if event.from_user else 'unknown'}")
             return await handler(event, data)
 
     dp.message.middleware(CommandLoggingMiddleware())
