@@ -88,6 +88,7 @@ _manager_usernames_raw = os.getenv("MANAGER_USERNAMES", "")
 MANAGER_USERNAMES = [u.strip() for u in _manager_usernames_raw.split(",") if u.strip()] if _manager_usernames_raw else []
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
+
 # --- RAG Test Chat Settings (для ограничения работы только в тестовом чате) ---
 # Опциональная переменная: если не указана, бот работает во всех чатах
 # Используем функцию-геттер, чтобы Railway не требовал переменную при статическом анализе
@@ -105,8 +106,3 @@ def get_rag_test_chat_id() -> int | None:
 
 # Для обратной совместимости создаем переменную через функцию
 RAG_TEST_CHAT_ID = get_rag_test_chat_id()
-if _test_chat_id_raw:
-    try:
-        RAG_TEST_CHAT_ID = int(_test_chat_id_raw)
-    except (ValueError, TypeError):
-        RAG_TEST_CHAT_ID = None
