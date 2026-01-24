@@ -140,21 +140,46 @@ async def _require_auth(obj) -> bool:
 async def _check_sufficient_data_private(
     question: str,
     found_chunks: List[Dict[str, Any]],
+    conversation_history: Optional[List[Dict[str, str]]] = None,
 ) -> tuple[bool, Optional[str]]:
     """Проверяет через AI, достаточно ли данных для ответа (для приватных чатов)."""
     if not found_chunks:
         return (False, "Не найдено релевантных фрагментов в базе знаний")
     
+    # Проверяем максимальный score
+    max_score = max((chunk.get("score", 0) for chunk in found_chunks), default=0)
+    
+    # Если score очень высокий, считаем данные достаточными
+    if max_score >= 0.75:
+        logger.info(f"[QA_MODE] Высокий score ({max_score:.3f}), считаем данные достаточными")
+        return (True, None)
+    
+    # Для средних scores используем AI проверку
     try:
         chunks_text = "\n\n".join([
-            f"Фрагмент {i+1}:\n{chunk.get('text', '')[:500]}"
+            f"Фрагмент {i+1} (релевантность: {chunk.get('score', 0):.3f}):\n{chunk.get('text', '')[:500]}"
             for i, chunk in enumerate(found_chunks[:3])
         ])
         
+        context_text = ""
+        if conversation_history:
+            context_lines = []
+            for msg in conversation_history[-3:]:
+                role = "Пользователь" if msg.get("role") == "user" else "Бот"
+                text = msg.get("text", "")
+                # Убираем вводную фразу из уточняющих вопросов для контекста
+                if "уточнения" in text.lower():
+                    text = text.replace("Чтобы ответить на ваш вопрос, мне нужны некоторые уточнения.\n\n", "")
+                context_lines.append(f"{role}: {text[:200]}")
+            context_text = "\n".join(context_lines)
+        
         prompt = (
             f"Вопрос пользователя: {question}\n\n"
+            f"{'Контекст диалога:\n' + context_text + '\n\n' if context_text else ''}"
             f"Найденные фрагменты из базы знаний:\n{chunks_text}\n\n"
-            "Достаточно ли этих фрагментов для полного ответа на вопрос?\n"
+            "Оцени, достаточно ли этих фрагментов для ответа на вопрос пользователя.\n"
+            "Учитывай контекст диалога - если пользователь уточняет предыдущий вопрос, используй этот контекст.\n"
+            "Если фрагменты релевантны вопросу, даже если не полностью покрывают все аспекты, можно считать данные достаточными.\n"
             "Ответь 'yes' или 'no'.\n"
             "Если 'no', укажи кратко, какая информация отсутствует."
         )
@@ -162,7 +187,7 @@ async def _check_sufficient_data_private(
         resp = client.chat.completions.create(
             model=CHAT_MODEL,
             messages=[
-                {"role": "system", "content": "Ты помощник для оценки достаточности данных для ответа."},
+                {"role": "system", "content": "Ты помощник для оценки достаточности данных для ответа. Учитывай контекст диалога и релевантность найденных фрагментов."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.0,
@@ -268,20 +293,23 @@ async def _generate_answer_from_chunks_private(
         system_prompt = (
             "Ты помощник корпоративного бота сети магазинов Воблабир.\n"
             "Твоя задача — ответить на вопрос пользователя на основе предоставленных фрагментов базы знаний.\n\n"
+            "ВАЖНО: Отвечай ТОЛЬКО на текущий вопрос пользователя. Не смешивай разные темы.\n"
+            "Если фрагменты не относятся к текущему вопросу, честно скажи об этом.\n\n"
             "Правила:\n"
             "1. Используй ТОЛЬКО информацию из предоставленных фрагментов.\n"
             "2. НЕ придумывай факты, которых нет в фрагментах.\n"
-            "3. Если информации недостаточно, скажи об этом честно.\n"
+            "3. Если информация в фрагментах не относится к текущему вопросу, скажи об этом честно.\n"
             "4. Структурируй ответ: абзацы, списки, если уместно.\n"
             "5. Будь дружелюбным и понятным.\n"
-            "6. Учитывай контекст предыдущих сообщений в диалоге."
+            "6. Учитывай контекст предыдущих сообщений, но отвечай на текущий вопрос."
         )
         
         user_prompt = (
-            f"Вопрос пользователя: {question}\n\n"
+            f"Текущий вопрос пользователя: {question}\n\n"
             f"{'Контекст диалога:\n' + history_text + '\n\n' if history_text else ''}"
             f"Фрагменты из базы знаний:\n{chunks_text}\n\n"
-            "Сформулируй ответ на основе этих фрагментов."
+            "Сформулируй ответ на основе этих фрагментов.\n"
+            "ВАЖНО: Отвечай ТОЛЬКО на текущий вопрос. Если фрагменты не относятся к текущему вопросу, скажи об этом."
         )
         
         resp = client.chat.completions.create(
@@ -448,13 +476,33 @@ async def qa_handle_question(message: Message, state: FSMContext):
     is_first_question = len(user_messages) == 0
     is_clarification_response = awaiting_clarification
     
-    # Если это первый вопрос в сессии, сохраняем его как исходный
-    if is_first_question:
+    # ДОПОЛНИТЕЛЬНО: Проверяем, был ли последний ответ бота уточняющим вопросом
+    last_assistant_msg = None
+    for msg in reversed(history):
+        if msg.get("role") == "assistant":
+            last_assistant_msg = msg.get("text", "")
+            break
+    
+    is_new_question = False
+    if last_assistant_msg and not is_first_question:
+        # Если последний ответ бота НЕ был уточняющим (не содержит ключевой фразы),
+        # значит текущее сообщение - это новый вопрос
+        if "уточнения" not in last_assistant_msg.lower():
+            is_new_question = True
+            logger.info("[QA_MODE] Определен новый вопрос (последний ответ был полным)")
+    
+    # Если это новый вопрос (не первый и не уточнение), обновляем исходный вопрос
+    if is_new_question and not is_first_question:
+        original_question = q
+        logger.info(f"[QA_MODE] Обновляем исходный вопрос на новый: '{q[:50]}...'")
+        awaiting_clarification = False  # Сбрасываем флаг
+    elif is_first_question:
         original_question = q
         logger.info(f"[QA_MODE] Сохраняем исходный вопрос: '{q[:50]}...'")
     # Если это ответ на уточнение, объединяем исходный вопрос с уточнением
     elif is_clarification_response and original_question:
-        combined_question = f"{original_question}\n{q}"
+        # Используем структурированный формат для объединения
+        combined_question = f"Исходный вопрос: {original_question}\nУточнение пользователя: {q}"
         logger.info(f"[QA_MODE] Объединяем исходный вопрос с уточнением: '{combined_question[:100]}...'")
         q = combined_question  # Используем объединенный вопрос для поиска
     
@@ -510,8 +558,8 @@ async def qa_handle_question(message: Message, state: FSMContext):
         
         # Если нашли чанки в Qdrant
         if found_chunks:
-            # Проверка достаточности данных
-            sufficient, missing_info = await _check_sufficient_data_private(q, found_chunks)
+            # Проверка достаточности данных (передаем историю для контекста)
+            sufficient, missing_info = await _check_sufficient_data_private(q, found_chunks, history)
             logger.info(
                 f"[QA_MODE] Проверка достаточности данных: sufficient={sufficient}, "
                 f"missing_info={missing_info[:50] if missing_info else None}"
