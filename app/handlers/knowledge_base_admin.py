@@ -68,8 +68,13 @@ async def kb_add_callback(cb: CallbackQuery, state: FSMContext):
 @router.message(Command("kb_migrate"))
 async def cmd_kb_migrate(message: Message):
     """Команда /kb_migrate для миграции FAQ из Google Sheets в Qdrant."""
+    logger.info(f"[KB_ADMIN] Получена команда /kb_migrate от пользователя {message.from_user.id if message.from_user else 'unknown'}")
+    
     if not await _require_admin(message):
+        logger.warning(f"[KB_ADMIN] Пользователь {message.from_user.id if message.from_user else 'unknown'} не имеет прав админа")
         return
+    
+    logger.info(f"[KB_ADMIN] Начинаю миграцию FAQ для админа {message.from_user.id}")
     
     # Отправляем сообщение о начале миграции
     status_msg = await message.answer("⏳ Начинаю миграцию FAQ из Google Sheets в Qdrant...")

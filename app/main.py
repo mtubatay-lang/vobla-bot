@@ -58,6 +58,7 @@ async def main() -> None:
             BotCommand(command="help", description="Помощь"),
             BotCommand(command="login", description="Авторизация"),
             BotCommand(command="ask", description="Задать вопрос"),
+            BotCommand(command="kb_migrate", description="Миграция FAQ в Qdrant (админ)"),
         ]
     )
 
@@ -70,6 +71,7 @@ async def main() -> None:
     dp.include_router(qa_router)  # роутер режима навыка
     dp.include_router(faq_router)   # FAQ-роутер
     dp.include_router(kb_admin_router)  # админ-панель для базы знаний
+    logger.info("Роутер knowledge_base_admin подключен")
     dp.include_router(echo_router)
 
     logger.info("Запускаем бота...")
