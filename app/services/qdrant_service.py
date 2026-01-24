@@ -211,6 +211,80 @@ class QdrantService:
             logger.exception(f"[QDRANT] Ошибка поиска: {e}")
             return []
     
+    def search_multi_level(
+        self,
+        query_embedding: List[float],
+        top_k: int = 5,
+        initial_threshold: float = 0.5,
+        fallback_thresholds: List[float] = None,
+        source_filter: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Многоуровневый поиск с постепенным снижением threshold.
+        
+        Если первый поиск не находит результатов, пробует с более низкими threshold.
+        Это помогает находить релевантные чанки даже при низкой изначальной семантической близости.
+        
+        Args:
+            query_embedding: Эмбеддинг запроса (список из 1536 float)
+            top_k: Количество результатов для возврата
+            initial_threshold: Начальный threshold для поиска
+            fallback_thresholds: Список threshold для попыток, если первый поиск не нашел результатов
+            source_filter: Опциональный фильтр по полю source в метаданных
+        
+        Returns:
+            Список словарей с результатами (формат как в search)
+        """
+        if fallback_thresholds is None:
+            fallback_thresholds = [0.3, 0.1]
+        
+        # Пробуем с начальным threshold
+        results = self.search(
+            query_embedding=query_embedding,
+            top_k=top_k,
+            score_threshold=initial_threshold,
+            source_filter=source_filter,
+        )
+        
+        if results:
+            logger.info(
+                f"[QDRANT] Многоуровневый поиск: найдено {len(results)} чанков "
+                f"с threshold={initial_threshold:.2f}"
+            )
+            return results
+        
+        # Если не нашли, пробуем с fallback thresholds
+        logger.info(
+            f"[QDRANT] Многоуровневый поиск: не найдено с threshold={initial_threshold:.2f}, "
+            f"пробуем fallback thresholds: {fallback_thresholds}"
+        )
+        
+        for threshold in fallback_thresholds:
+            results = self.search(
+                query_embedding=query_embedding,
+                top_k=top_k,
+                score_threshold=threshold,
+                source_filter=source_filter,
+            )
+            
+            if results:
+                logger.info(
+                    f"[QDRANT] Многоуровневый поиск: найдено {len(results)} чанков "
+                    f"с threshold={threshold:.2f}"
+                )
+                # Предупреждение, если threshold очень низкий
+                if threshold < 0.3:
+                    logger.warning(
+                        f"[QDRANT] ВНИМАНИЕ: Найдены чанки с низким threshold={threshold:.2f}. "
+                        f"Возможно, релевантность низкая."
+                    )
+                return results
+        
+        # Если ничего не нашли на всех уровнях
+        logger.warning(
+            f"[QDRANT] Многоуровневый поиск: не найдено чанков даже с минимальным threshold={fallback_thresholds[-1]:.2f}"
+        )
+        return []
+    
     def delete_by_source(self, source: str) -> None:
         """Удаляет все документы с указанным source из коллекции.
         

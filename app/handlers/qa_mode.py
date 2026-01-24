@@ -111,6 +111,86 @@ async def _send_media_from_json(bot, chat_id: int, media_json: str) -> None:
         logger.exception(f"[QA_MODE] Error sending media: {e}")
 
 
+async def _expand_query_for_search(original_query: str) -> str:
+    """Расширяет запрос пользователя для улучшения поиска в RAG.
+    
+    Преобразует общие запросы в более конкретные, добавляя ключевые слова
+    и контекст, которые помогут найти релевантные чанки.
+    
+    Примеры:
+    - "Расскажи про Воблабир" -> "история компании Воблабир, философия бренда, 
+      развитие сети магазинов, когда основана компания, количество магазинов"
+    - "Как работает доставка?" -> "доставка товаров, условия доставки, 
+      стоимость доставки, время доставки, зоны доставки"
+    
+    Args:
+        original_query: Оригинальный запрос пользователя
+        
+    Returns:
+        Расширенный запрос с дополнительными ключевыми словами
+    """
+    if not original_query or not original_query.strip():
+        return original_query
+    
+    # Определяем, нужно ли расширять запрос
+    query_lower = original_query.lower().strip()
+    is_short = len(original_query.strip()) < 20
+    is_general = any(phrase in query_lower for phrase in [
+        "расскажи про", "расскажи о", "что такое", "что это", 
+        "как работает", "что такое", "про что"
+    ])
+    
+    # Если запрос длинный и конкретный, не расширяем
+    if not is_short and not is_general:
+        logger.debug(f"[QA_MODE] Запрос достаточно конкретный, расширение не требуется: '{original_query[:50]}...'")
+        return original_query
+    
+    try:
+        system_prompt = (
+            "Ты помощник для расширения поисковых запросов.\n"
+            "Твоя задача — расширить запрос пользователя, добавив связанные ключевые слова и темы,\n"
+            "которые помогут найти релевантную информацию в базе знаний.\n\n"
+            "Правила:\n"
+            "1. Сохрани оригинальный смысл запроса.\n"
+            "2. Добавь связанные ключевые слова и темы через запятую.\n"
+            "3. Используй синонимы и связанные понятия.\n"
+            "4. Не добавляй лишних деталей, только ключевые слова для поиска.\n"
+            "5. Ответ должен быть кратким (до 100 слов).\n"
+            "6. Не используй форматирование, только текст."
+        )
+        
+        user_prompt = (
+            f"Оригинальный запрос: {original_query}\n\n"
+            "Расширь этот запрос, добавив связанные ключевые слова и темы, "
+            "которые помогут найти релевантную информацию. "
+            "Используй формат: ключевое слово 1, ключевое слово 2, тема 1, тема 2..."
+        )
+        
+        resp = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.3,
+            max_tokens=150,
+        )
+        
+        expanded = (resp.choices[0].message.content or "").strip()
+        
+        # Если расширение не удалось или вернуло пустой результат, используем оригинал
+        if not expanded or len(expanded) < len(original_query):
+            logger.warning(f"[QA_MODE] Расширение запроса не удалось, используем оригинал")
+            return original_query
+        
+        logger.info(f"[QA_MODE] Расширен запрос: '{original_query[:50]}...' -> '{expanded[:100]}...'")
+        return expanded
+    except Exception as e:
+        logger.exception(f"[QA_MODE] Ошибка расширения запроса: {e}")
+        # При ошибке возвращаем оригинальный запрос
+        return original_query
+
+
 async def _require_auth(obj) -> bool:
     """
     Возвращает True если авторизован, иначе отправляет сообщение и False.
@@ -521,7 +601,7 @@ async def qa_handle_question(message: Message, state: FSMContext):
     await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
 
     try:
-        # ШАГ 1: Поиск в Qdrant RAG
+        # ШАГ 1: Подготовка запроса для поиска
         # Если это ответ на уточнение, q уже содержит объединенный вопрос
         # Иначе используем контекст из истории
         if is_clarification_response:
@@ -531,23 +611,44 @@ async def qa_handle_question(message: Message, state: FSMContext):
             context_text = "\n".join([msg.get("text", "") for msg in history[-3:]])
             query_text = f"{context_text}\n{q}" if context_text else q
         
-        embedding = await asyncio.to_thread(create_embedding, query_text)
+        # ШАГ 2: Расширяем запрос для улучшения поиска
+        expanded_query = await _expand_query_for_search(query_text)
+        logger.info(
+            f"[QA_MODE] Оригинальный запрос: '{query_text[:80]}...' -> "
+            f"Расширенный: '{expanded_query[:100]}...'"
+        )
         
+        # ШАГ 3: Создаем эмбеддинг для расширенного запроса
+        embedding = await asyncio.to_thread(create_embedding, expanded_query)
+        
+        # ШАГ 4: Многоуровневый поиск в Qdrant
         qdrant_service = get_qdrant_service()
-        found_chunks = qdrant_service.search(
+        found_chunks = qdrant_service.search_multi_level(
             query_embedding=embedding,
             top_k=5,
-            score_threshold=0.5,  # Понижен с 0.7 для более гибкого поиска
+            initial_threshold=0.5,
+            fallback_thresholds=[0.3, 0.1],
         )
         
         # Детальное логирование для диагностики
         logger.info(
-            f"[QA_MODE] Поиск в RAG: вопрос='{q[:50]}...', "
+            f"[QA_MODE] Поиск в RAG: оригинальный вопрос='{q[:50]}...', "
+            f"расширенный запрос='{expanded_query[:80]}...', "
             f"найдено чанков={len(found_chunks)}"
         )
         if found_chunks:
             scores = [chunk.get("score", 0) for chunk in found_chunks]
-            logger.info(f"[QA_MODE] Scores найденных чанков: {[f'{s:.3f}' for s in scores]}")
+            max_score = max(scores) if scores else 0
+            min_score = min(scores) if scores else 0
+            logger.info(
+                f"[QA_MODE] Scores найденных чанков: min={min_score:.3f}, "
+                f"max={max_score:.3f}, все={[f'{s:.3f}' for s in scores]}"
+            )
+        else:
+            logger.warning(
+                f"[QA_MODE] Не найдено чанков в RAG для запроса: '{q[:50]}...' "
+                f"(расширенный: '{expanded_query[:80]}...')"
+            )
         
         await alog_event(
             user_id=message.from_user.id if message.from_user else None,
