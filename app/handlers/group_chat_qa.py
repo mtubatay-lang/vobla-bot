@@ -13,7 +13,7 @@ from app.services.auth_service import find_user_by_telegram_id
 from app.services.qdrant_service import get_qdrant_service
 from app.services.openai_client import create_embedding, client, CHAT_MODEL
 from app.services.metrics_service import alog_event
-from app.config import MANAGER_USERNAMES
+from app.config import MANAGER_USERNAMES, RAG_TEST_CHAT_ID
 
 logger = logging.getLogger(__name__)
 
@@ -381,6 +381,9 @@ async def process_question_in_group_chat(message: Message) -> None:
 @router.message(F.chat.type.in_(["group", "supergroup"]))
 async def handle_group_chat_message(message: Message):
     """Обрабатывает сообщения в групповых чатах."""
+    # Если указан тестовый чат, обрабатываем только его
+    if RAG_TEST_CHAT_ID is not None and message.chat.id != RAG_TEST_CHAT_ID:
+        return
     # Игнорируем сообщения от бота
     if message.from_user and message.from_user.is_bot:
         return
@@ -404,6 +407,9 @@ async def handle_group_chat_message(message: Message):
 
 
 @router.message(F.chat.type.in_(["group", "supergroup"]), F.reply_to_message)
+    # Если указан тестовый чат, обрабатываем только его
+    if RAG_TEST_CHAT_ID is not None and message.chat.id != RAG_TEST_CHAT_ID:
+        return
 async def handle_manager_reply_in_group_chat(message: Message):
     """Перехватывает ответы менеджеров на вопросы в групповых чатах."""
     # Игнорируем сообщения от бота
