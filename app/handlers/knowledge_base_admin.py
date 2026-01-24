@@ -65,6 +65,90 @@ async def kb_add_callback(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 
+@router.message(Command("kb_migrate"))
+async def cmd_kb_migrate(message: Message):
+    """Команда /kb_migrate для миграции FAQ из Google Sheets в Qdrant."""
+    if not await _require_admin(message):
+        return
+    
+    # Отправляем сообщение о начале миграции
+    status_msg = await message.answer("⏳ Начинаю миграцию FAQ из Google Sheets в Qdrant...")
+    
+    # Запускаем асинхронную миграцию
+    asyncio.create_task(
+        migrate_faq_async(
+            message.bot,
+            message.chat.id,
+            status_msg.message_id,
+            message.from_user.id if message.from_user else None,
+        )
+    )
+
+
+async def migrate_faq_async(
+    bot,
+    chat_id: int,
+    status_msg_id: int,
+    user_id: Optional[int],
+):
+    """Асинхронная миграция FAQ из Google Sheets в Qdrant."""
+    try:
+        # Обновляем статус
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=status_msg_id,
+            text="⏳ Читаю FAQ из Google Sheets...",
+        )
+        
+        # Выполняем миграцию
+        result = await migrate_faq_to_qdrant()
+        
+        if result["success"]:
+            # Успешная миграция
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=status_msg_id,
+                text=(
+                    f"✅ <b>Миграция завершена успешно</b>\n\n"
+                    f"📊 Обработано FAQ: {result['total_faqs']}\n"
+                    f"📦 Создано чанков: {result['total_chunks']}"
+                ),
+                parse_mode="HTML",
+            )
+            
+            # Логируем событие
+            await alog_event(
+                user_id=user_id,
+                username=None,
+                event="kb_migrate_completed",
+                meta={
+                    "total_faqs": result["total_faqs"],
+                    "total_chunks": result["total_chunks"],
+                },
+            )
+        else:
+            # Ошибка миграции
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=status_msg_id,
+                text=(
+                    f"❌ <b>Ошибка миграции</b>\n\n"
+                    f"Ошибка: {result.get('error', 'Неизвестная ошибка')}"
+                ),
+                parse_mode="HTML",
+            )
+    except Exception as e:
+        logger.exception(f"[KB_ADMIN] Ошибка миграции FAQ: {e}")
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=status_msg_id,
+                text=f"❌ Произошла ошибка при миграции: {str(e)}",
+            )
+        except:
+            pass
+
+
 @router.message(Command("cancel"))
 async def cmd_cancel(message: Message, state: FSMContext):
     """Отмена текущей операции."""
