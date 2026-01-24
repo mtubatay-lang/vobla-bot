@@ -6,7 +6,7 @@ from typing import List, Dict, Optional, Any
 from datetime import datetime
 
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue, Query, Vector
+from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue, Query
 
 from app.config import QDRANT_URL, QDRANT_API_KEY, QDRANT_COLLECTION_NAME
 
@@ -140,15 +140,10 @@ class QdrantService:
                 )
             
             # Используем новый API query_points вместо устаревшего search
-            query = Query(
-                vector=Vector(
-                    vector=query_embedding,
-                ),
-            )
-            
+            # Передаем query_embedding напрямую как список чисел
             results = self.client.query_points(
                 collection_name=self.collection_name,
-                query=query,
+                query=query_embedding,  # Передаем список напрямую
                 limit=top_k,
                 score_threshold=score_threshold,
                 query_filter=query_filter,
