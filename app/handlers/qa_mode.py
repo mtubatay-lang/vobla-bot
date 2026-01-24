@@ -2,19 +2,20 @@ import asyncio
 import json
 import logging
 import uuid
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
-from aiogram.enums import ParseMode
+from aiogram.enums import ParseMode, ChatAction
 
 from app.services.auth_service import find_user_by_telegram_id
 from app.services.faq_service import find_similar_question
 from app.services.metrics_service import alog_event  # async-логгер
-from app.services.openai_client import polish_faq_answer
+from app.services.openai_client import polish_faq_answer, create_embedding, client, CHAT_MODEL
+from app.services.qdrant_service import get_qdrant_service
 from app.services.pending_questions_service import create_ticket_and_notify_managers
 from app.services.qa_feedback_service import save_qa_feedback
 from app.ui.keyboards import qa_kb, main_menu_kb
@@ -136,6 +137,174 @@ async def _require_auth(obj) -> bool:
     return False
 
 
+async def _check_sufficient_data_private(
+    question: str,
+    found_chunks: List[Dict[str, Any]],
+) -> tuple[bool, Optional[str]]:
+    """Проверяет через AI, достаточно ли данных для ответа (для приватных чатов)."""
+    if not found_chunks:
+        return (False, "Не найдено релевантных фрагментов в базе знаний")
+    
+    try:
+        chunks_text = "\n\n".join([
+            f"Фрагмент {i+1}:\n{chunk.get('text', '')[:500]}"
+            for i, chunk in enumerate(found_chunks[:3])
+        ])
+        
+        prompt = (
+            f"Вопрос пользователя: {question}\n\n"
+            f"Найденные фрагменты из базы знаний:\n{chunks_text}\n\n"
+            "Достаточно ли этих фрагментов для полного ответа на вопрос?\n"
+            "Ответь 'yes' или 'no'.\n"
+            "Если 'no', укажи кратко, какая информация отсутствует."
+        )
+        
+        resp = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": "Ты помощник для оценки достаточности данных для ответа."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.0,
+        )
+        
+        answer = (resp.choices[0].message.content or "").strip().lower()
+        
+        if answer.startswith("yes"):
+            return (True, None)
+        else:
+            missing_info = answer.replace("no", "").strip()
+            if not missing_info:
+                missing_info = "Недостаточно информации для полного ответа"
+            return (False, missing_info)
+    except Exception as e:
+        logger.exception(f"[QA_MODE] Ошибка проверки достаточности данных: {e}")
+        return (True, None)
+
+
+async def _ask_clarification_question_private(
+    message: Message,
+    question: str,
+    found_chunks: List[Dict[str, Any]],
+    missing_info: str,
+) -> None:
+    """Задает уточняющий вопрос пользователю (для приватных чатов)."""
+    try:
+        chunks_summary = "\n".join([
+            f"- {chunk.get('text', '')[:200]}..."
+            for chunk in found_chunks[:2]
+        ])
+        
+        prompt = (
+            f"Пользователь спросил: {question}\n\n"
+            f"Найденные фрагменты:\n{chunks_summary}\n\n"
+            f"Недостающая информация: {missing_info}\n\n"
+            "Сформулируй один уточняющий вопрос, который поможет найти нужный ответ.\n"
+            "Вопрос должен быть конкретным и понятным."
+        )
+        
+        resp = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": "Ты помощник, который формулирует уточняющие вопросы."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+        )
+        
+        clarification = resp.choices[0].message.content or "Можете уточнить ваш вопрос?"
+        await message.answer(clarification, reply_markup=qa_kb())
+        
+        await alog_event(
+            user_id=message.from_user.id if message.from_user else None,
+            username=message.from_user.username if message.from_user else None,
+            event="kb_clarification_asked_private",
+            meta={"original_question": question, "missing_info": missing_info},
+        )
+    except Exception as e:
+        logger.exception(f"[QA_MODE] Ошибка формулировки уточняющего вопроса: {e}")
+        await message.answer("Можете уточнить ваш вопрос?", reply_markup=qa_kb())
+
+
+async def _generate_answer_from_chunks_private(
+    question: str,
+    chunks: List[Dict[str, Any]],
+    conversation_history: List[Dict[str, str]],
+) -> str:
+    """Генерирует ответ на основе найденных чанков (для приватных чатов)."""
+    try:
+        history_text = ""
+        if conversation_history:
+            history_lines = []
+            for msg in conversation_history[-5:]:
+                role = "Пользователь" if msg.get("role") == "user" else "Бот"
+                text = msg.get("text", "")
+                if text:
+                    history_lines.append(f"{role}: {text}")
+            history_text = "\n".join(history_lines)
+        
+        chunks_text = "\n\n---\n\n".join([
+            f"Фрагмент {i+1}:\n{chunk.get('text', '')}"
+            for i, chunk in enumerate(chunks)
+        ])
+        
+        system_prompt = (
+            "Ты помощник корпоративного бота сети магазинов Воблабир.\n"
+            "Твоя задача — ответить на вопрос пользователя на основе предоставленных фрагментов базы знаний.\n\n"
+            "Правила:\n"
+            "1. Используй ТОЛЬКО информацию из предоставленных фрагментов.\n"
+            "2. НЕ придумывай факты, которых нет в фрагментах.\n"
+            "3. Если информации недостаточно, скажи об этом честно.\n"
+            "4. Структурируй ответ: абзацы, списки, если уместно.\n"
+            "5. Будь дружелюбным и понятным.\n"
+            "6. Учитывай контекст предыдущих сообщений в диалоге."
+        )
+        
+        user_prompt = (
+            f"Вопрос пользователя: {question}\n\n"
+            f"{'Контекст диалога:\n' + history_text + '\n\n' if history_text else ''}"
+            f"Фрагменты из базы знаний:\n{chunks_text}\n\n"
+            "Сформулируй ответ на основе этих фрагментов."
+        )
+        
+        resp = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.3,
+        )
+        
+        answer = resp.choices[0].message.content or "Извините, не могу сформировать ответ."
+        return answer.strip()
+    except Exception as e:
+        logger.exception(f"[QA_MODE] Ошибка генерации ответа: {e}")
+        return "Извините, произошла ошибка при формировании ответа."
+
+
+async def _should_escalate_to_manager_private(
+    found_chunks: List[Dict[str, Any]],
+    ai_decision: tuple[bool, Optional[str]],
+) -> bool:
+    """Определяет, нужно ли эскалировать вопрос менеджеру (для приватных чатов)."""
+    sufficient, missing_info = ai_decision
+    
+    if not found_chunks:
+        return True
+    
+    if not sufficient:
+        if missing_info and any(word in missing_info.lower() for word in ["конкретн", "детал", "уточн"]):
+            return False
+        return True
+    
+    max_score = max((chunk.get("score", 0) for chunk in found_chunks), default=0)
+    if max_score < 0.5:
+        return True
+    
+    return False
+
+
 @router.callback_query(F.data == "qa_start")
 async def qa_start(cb: CallbackQuery, state: FSMContext):
     if not await _require_auth(cb):
@@ -233,85 +402,139 @@ async def qa_handle_question(message: Message, state: FSMContext):
         await message.answer("Напиши вопрос текстом 🙂", reply_markup=qa_kb())
         return
 
-    # Увеличиваем счётчик вопросов и сохраняем последний вопрос
+    # Увеличиваем счётчик вопросов
     data = await state.get_data()
     cnt = int(data.get("qa_questions_count", 0)) + 1
+    history = data.get("qa_history", [])
+    
+    # Добавляем вопрос в историю
+    history.append({"role": "user", "text": q})
+    
     await state.update_data(
         qa_questions_count=cnt,
         qa_last_question=q,
+        qa_history=history[-8:],  # Ограничиваем историю
     )
 
-    # 1) Пытаемся найти ответ в FAQ
-    best = await find_similar_question(q)
+    # Показываем индикатор обработки
+    await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
 
-    if best:
-        # Достаём историю из FSM state
-        data = await state.get_data()
-        history = data.get("qa_history", [])
-
-        raw_answer = best["answer"]
-
-        # Обновим историю: пользовательский вопрос
-        history.append({"role": "user", "text": q})
-
-        # Полировка в отдельном потоке, чтобы не блокировать loop
-        try:
-            pretty = await asyncio.to_thread(polish_faq_answer, q, raw_answer, history)
-        except Exception:
-            pretty = raw_answer
-
-        # Обновим историю: ответ бота (уже красивый)
-        history.append({"role": "assistant", "text": pretty})
-
-        # Обрежем историю до последних 8 сообщений и сохраним
-        await state.update_data(
-            qa_history=history[-8:],
-            qa_last_answer_source="faq",
+    try:
+        # ШАГ 1: Поиск в Qdrant RAG
+        context_text = "\n".join([msg.get("text", "") for msg in history[-3:]])
+        query_text = f"{context_text}\n{q}" if context_text else q
+        
+        embedding = await asyncio.to_thread(create_embedding, query_text)
+        
+        qdrant_service = get_qdrant_service()
+        found_chunks = qdrant_service.search(
+            query_embedding=embedding,
+            top_k=5,
+            score_threshold=0.7,
         )
-
-        # ✅ автоответ из FAQ (полированный)
-        await message.answer(
-            pretty + "\n\nЕсли есть ещё вопрос — просто напиши его 👇",
-            reply_markup=qa_kb(),
-            parse_mode="HTML",
-        )
-
-        # Отправляем медиа-вложения, если есть
-        media_json = best.get("media_json", "")
-        if media_json:
-            await _send_media_from_json(message.bot, message.chat.id, media_json)
-            await alog_event(
-                user_id=message.from_user.id if message.from_user else None,
-                username=message.from_user.username if message.from_user else None,
-                event="faq_media_sent",
-                meta={"score": best.get("score"), "matched_q": best.get("question")},
-            )
-
+        
         await alog_event(
             user_id=message.from_user.id if message.from_user else None,
             username=message.from_user.username if message.from_user else None,
-            event="faq_answer_shown",
-            meta={"score": best.get("score"), "matched_q": best.get("question")},
+            event="kb_search_performed_private",
+            meta={"question": q, "chunks_found": len(found_chunks)},
         )
-        return
-
-    # 2) Если не нашли — эскалируем менеджеру
-    await state.update_data(qa_last_answer_source="manager")
-    
-    await message.answer(
-        "Не нашёл точного ответа в базе 😕\n"
-        "Я передал вопрос менеджеру. Можешь задать следующий вопрос — просто напиши его 👇",
-        reply_markup=qa_kb(),
-    )
-
-    await alog_event(
-        user_id=message.from_user.id if message.from_user else None,
-        username=message.from_user.username if message.from_user else None,
-        event="faq_not_helpful_escalated",
-        meta={"question": q},
-    )
-
-    await create_ticket_and_notify_managers(message, q)
+        
+        # Если нашли чанки в Qdrant
+        if found_chunks:
+            # Проверка достаточности данных
+            sufficient, missing_info = await _check_sufficient_data_private(q, found_chunks)
+            
+            # Проверяем, нужно ли эскалировать
+            if not await _should_escalate_to_manager_private(found_chunks, (sufficient, missing_info)):
+                # Если данных недостаточно, задаем уточняющий вопрос
+                if not sufficient and missing_info:
+                    await _ask_clarification_question_private(message, q, found_chunks, missing_info)
+                    return
+                
+                # Генерируем ответ из Qdrant
+                answer = await _generate_answer_from_chunks_private(q, found_chunks, history)
+                
+                # Обновляем историю
+                history.append({"role": "assistant", "text": answer})
+                await state.update_data(
+                    qa_history=history[-8:],
+                    qa_last_answer_source="qdrant_rag",
+                )
+                
+                await message.answer(
+                    answer + "\n\nЕсли есть ещё вопрос — просто напиши его 👇",
+                    reply_markup=qa_kb(),
+                    parse_mode="HTML",
+                )
+                
+                await alog_event(
+                    user_id=message.from_user.id if message.from_user else None,
+                    username=message.from_user.username if message.from_user else None,
+                    event="kb_answer_generated_private",
+                    meta={"question": q, "chunks_used": len(found_chunks)},
+                )
+                return
+        
+        # ШАГ 2: Если не нашли в Qdrant или нужно эскалировать - ищем в FAQ
+        best = await find_similar_question(q)
+        
+        if best:
+            raw_answer = best["answer"]
+            
+            try:
+                pretty = await asyncio.to_thread(polish_faq_answer, q, raw_answer, history)
+            except Exception:
+                pretty = raw_answer
+            
+            history.append({"role": "assistant", "text": pretty})
+            await state.update_data(
+                qa_history=history[-8:],
+                qa_last_answer_source="faq",
+            )
+            
+            await message.answer(
+                pretty + "\n\nЕсли есть ещё вопрос — просто напиши его 👇",
+                reply_markup=qa_kb(),
+                parse_mode="HTML",
+            )
+            
+            media_json = best.get("media_json", "")
+            if media_json:
+                await _send_media_from_json(message.bot, message.chat.id, media_json)
+            
+            await alog_event(
+                user_id=message.from_user.id if message.from_user else None,
+                username=message.from_user.username if message.from_user else None,
+                event="faq_answer_shown_private",
+                meta={"score": best.get("score"), "matched_q": best.get("question")},
+            )
+            return
+        
+        # ШАГ 3: Если не нашли ни в Qdrant, ни в FAQ - эскалируем менеджеру
+        await state.update_data(qa_last_answer_source="manager")
+        
+        await message.answer(
+            "Не нашёл ответа в базе знаний 😕\n"
+            "Я передал вопрос менеджеру. Можешь задать следующий вопрос — просто напиши его 👇",
+            reply_markup=qa_kb(),
+        )
+        
+        await alog_event(
+            user_id=message.from_user.id if message.from_user else None,
+            username=message.from_user.username if message.from_user else None,
+            event="kb_not_found_escalated",
+            meta={"question": q},
+        )
+        
+        await create_ticket_and_notify_managers(message, q)
+        
+    except Exception as e:
+        logger.exception(f"[QA_MODE] Ошибка обработки вопроса: {e}")
+        await message.answer(
+            "Извините, произошла ошибка при обработке вопроса. Попробуйте переформулировать.",
+            reply_markup=qa_kb(),
+        )
 
 
 # -----------------------------
