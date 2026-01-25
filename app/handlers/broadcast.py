@@ -588,6 +588,10 @@ async def handle_test_self(callback: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(F.data.startswith("broadcast:send:"))
 async def handle_send_broadcast(callback: CallbackQuery, state: FSMContext) -> None:
     """Обработка финальной отправки рассылки по выбранной аудитории."""
+    # Исключаем selected_chats - для него есть отдельный обработчик
+    if callback.data == "broadcast:send:selected_chats":
+        return
+    
     if not callback.message:
         await callback.answer()
         return
