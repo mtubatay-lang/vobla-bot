@@ -14,7 +14,7 @@ from aiogram.types import Message, CallbackQuery
 from app.services.auth_service import find_user_by_telegram_id
 from app.services.qdrant_service import get_qdrant_service
 from app.services.document_processor import extract_text
-from app.services.chunking_service import chunk_text
+from app.services.chunking_service import semantic_chunk_text, extract_metadata_from_text
 from app.services.context_enrichment import enrich_chunks_batch
 from app.services.openai_client import create_embedding
 from app.services.metrics_service import alog_event
