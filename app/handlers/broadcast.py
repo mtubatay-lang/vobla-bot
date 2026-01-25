@@ -1061,23 +1061,31 @@ async def handle_chats_page(callback: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(F.data == "broadcast:send:selected_chats")
 async def handle_send_selected_chats(callback: CallbackQuery, state: FSMContext) -> None:
     """Отправка рассылки в выбранные чаты."""
+    logger.info("[BROADCAST] handle_send_selected_chats called")
+    
     if not callback.message:
+        logger.warning("[BROADCAST] handle_send_selected_chats: no callback.message")
         await callback.answer()
         return
     
     if not await _require_admin(callback):
+        logger.warning("[BROADCAST] handle_send_selected_chats: admin check failed")
         await callback.answer()
         return
     
     if not await _check_user_owns_broadcast(callback, state):
+        logger.warning("[BROADCAST] handle_send_selected_chats: user ownership check failed")
         return
     
     data = await state.get_data()
+    logger.info(f"[BROADCAST] handle_send_selected_chats: state data keys: {list(data.keys())}")
     
     # Получаем выбранные чаты
     selected_chat_ids: List[int] = data.get("selected_chat_ids", [])
+    logger.info(f"[BROADCAST] handle_send_selected_chats: selected_chat_ids={selected_chat_ids}")
     
     if not selected_chat_ids:
+        logger.warning("[BROADCAST] handle_send_selected_chats: no selected chats")
         await callback.answer("❌ Выберите хотя бы один чат", show_alert=True)
         return
     
@@ -1085,12 +1093,15 @@ async def handle_send_selected_chats(callback: CallbackQuery, state: FSMContext)
     broadcast_id = data.get("broadcast_id")
     text_final = data.get("text_final", "")
     media_json = data.get("media_json", "")
+    logger.info(f"[BROADCAST] handle_send_selected_chats: text_final={bool(text_final)}, media_json={bool(media_json)}")
     
     if not text_final and not media_json:
+        logger.warning("[BROADCAST] handle_send_selected_chats: no broadcast data")
         await callback.answer("❌ Нет данных рассылки, начните заново /broadcast", show_alert=True)
         await state.clear()
         return
     
+    logger.info("[BROADCAST] handle_send_selected_chats: starting broadcast")
     await callback.answer("📤 Рассылка начата...")
     
     # Получаем данные
@@ -1175,10 +1186,12 @@ async def handle_send_selected_chats(callback: CallbackQuery, state: FSMContext)
         tasks.append(send_to_chat(chat_id))
     
     # Ждём завершения всех задач
+    logger.info(f"[BROADCAST] handle_send_selected_chats: sending to {len(tasks)} chats")
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
     
     total = sent_ok + sent_fail
+    logger.info(f"[BROADCAST] handle_send_selected_chats: completed. sent_ok={sent_ok}, sent_fail={sent_fail}")
     
     # Обновляем статус рассылки
     await asyncio.to_thread(
