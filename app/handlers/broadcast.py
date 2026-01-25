@@ -263,6 +263,68 @@ async def handle_broadcast_text(message: Message, state: FSMContext) -> None:
     )
 
 
+@router.callback_query(F.data == "broadcast:edit_text")
+async def handle_edit_text(callback: CallbackQuery, state: FSMContext) -> None:
+    """Обработка кнопки 'Изменить текст'."""
+    if not callback.message:
+        await callback.answer()
+        return
+    
+    if not await _require_admin(callback):
+        await callback.answer()
+        return
+    
+    if not await _check_user_owns_broadcast(callback, state):
+        return
+    
+    await callback.answer()
+    
+    # Переход в состояние ожидания текста
+    await state.set_state(BroadcastState.waiting_text)
+    
+    if callback.message:
+        await callback.message.answer(
+            "✏️ <b>Изменение текста рассылки</b>\n\n"
+            "Введите новый текст рассылки (можно написать \"-\" если без текста):",
+            parse_mode=ParseMode.HTML
+        )
+
+
+@router.callback_query(F.data == "broadcast:edit_media")
+async def handle_edit_media(callback: CallbackQuery, state: FSMContext) -> None:
+    """Обработка кнопки 'Изменить медиа'."""
+    if not callback.message:
+        await callback.answer()
+        return
+    
+    if not await _require_admin(callback):
+        await callback.answer()
+        return
+    
+    if not await _check_user_owns_broadcast(callback, state):
+        return
+    
+    await callback.answer()
+    
+    # Очищаем медиа из state
+    await state.update_data(media_json="")
+    
+    # Переход в состояние ожидания медиа
+    await state.set_state(BroadcastState.waiting_media)
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="⏭ Пропустить медиа", callback_data="broadcast:skip_media")
+    ]])
+    
+    if callback.message:
+        await callback.message.answer(
+            "📎 <b>Изменение медиа рассылки</b>\n\n"
+            "Прикрепите новое медиа (фото/видео/документ, можно альбом) или нажмите «Пропустить медиа»:",
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML
+        )
+
+
 @router.callback_query(F.data == "broadcast:skip_media")
 async def skip_media(callback: CallbackQuery, state: FSMContext) -> None:
     """Пропустить прикрепление медиа."""
@@ -320,33 +382,53 @@ async def _process_broadcast_text(message: Message, state: FSMContext, text_orig
     else:
         improved_text = ""
     
+    # АВТОМАТИЧЕСКИ выбираем улучшенную версию
+    text_final = improved_text if improved_text else text_original
+    
     # Сохраняем в state
     await state.update_data(
         improved_text=improved_text,
-        media_json=media_json
+        media_json=media_json,
+        text_final=text_final,  # Сохраняем сразу финальный текст
+        selected_variant="improved"  # Автоматически выбираем улучшенный
     )
-    await state.set_state(BroadcastState.choosing_variant)
+    await state.set_state(BroadcastState.choosing_audience)  # Переходим сразу к выбору аудитории
     
-    # Показываем превью
+    # Если есть медиа, отправляем его вместе с текстом
+    if media_json:
+        try:
+            attachments = json.loads(media_json)
+            if attachments:
+                # Отправляем медиа с текстом
+                await _send_media_to_recipient(message.bot, message.chat.id, attachments, text_final)
+        except Exception as e:
+            logger.exception(f"[BROADCAST] Error sending media preview: {e}")
+    
+    # Формируем превью с улучшенным текстом
     preview_text = "📋 <b>Превью рассылки</b>\n\n"
     
-    if text_original:
-        preview_text += "📝 <b>Оригинал:</b>\n"
-        preview_text += f"{text_original}\n\n"
-        
-        if improved_text and improved_text != text_original:
-            preview_text += "✨ <b>Улучшенный:</b>\n"
-            preview_text += f"{improved_text}\n\n"
+    if text_final:
+        preview_text += f"{text_final}\n\n"
     else:
         preview_text += "📝 Текст отсутствует (только медиа)\n\n"
     
+    if media_json:
+        preview_text += "📎 Медиа прикреплено\n\n"
+    
+    # Новые кнопки
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📝 Выбрать оригинал", callback_data="broadcast:choose:original")],
-        [InlineKeyboardButton(text="✨ Выбрать улучшенный", callback_data="broadcast:choose:improved")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast:cancel")],
+        [InlineKeyboardButton(text="🧪 Отправить тестовую рассылку себе", callback_data="broadcast:aud:test_self")],
+        [InlineKeyboardButton(text="✏️ Изменить текст", callback_data="broadcast:edit_text")],
+        [InlineKeyboardButton(text="📎 Изменить медиа", callback_data="broadcast:edit_media")],
+        [InlineKeyboardButton(text="❌ Отменить рассылку", callback_data="broadcast:cancel")],
     ])
     
-    await message.answer(preview_text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+    # Если медиа уже отправлено, отправляем только текст с кнопками или только кнопки
+    if media_json and text_final:
+        # Если медиа уже отправлено, отправляем только кнопки
+        await message.answer("✅ Превью отправлено выше. Выберите действие:", reply_markup=keyboard)
+    else:
+        await message.answer(preview_text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
 
 
 @router.message(BroadcastState.waiting_media)
@@ -413,54 +495,6 @@ async def _process_album_with_debounce(group_key: tuple[str, int], message: Mess
     await _process_broadcast_text(message, state, text_original, media_json)
 
 
-@router.callback_query(F.data.startswith("broadcast:choose:"))
-async def handle_choose_variant(callback: CallbackQuery, state: FSMContext) -> None:
-    """Обработка выбора варианта текста (оригинал/улучшенный)."""
-    if not callback.message:
-        await callback.answer()
-        return
-    
-    if not await _require_admin(callback):
-        await callback.answer()
-        return
-    
-    if not await _check_user_owns_broadcast(callback, state):
-        return
-    
-    data = await state.get_data()
-    
-    # Определяем выбранный вариант
-    if callback.data == "broadcast:choose:original":
-        selected_variant = "original"
-        text_final = data.get("text_original", "")
-    elif callback.data == "broadcast:choose:improved":
-        selected_variant = "improved"
-        text_final = data.get("improved_text", "") or data.get("text_original", "")
-    else:
-        await callback.answer("❌ Неизвестная команда")
-        return
-    
-    await callback.answer()
-    
-    # Обновляем state
-    await state.update_data(
-        selected_variant=selected_variant,
-        text_final=text_final
-    )
-    await state.set_state(BroadcastState.choosing_audience)
-    
-    # Показываем первичный выбор аудитории (с "тест себе")
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🧪 Тестовая рассылка себе", callback_data="broadcast:aud:test_self")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast:cancel")],
-    ])
-    
-    await callback.message.answer(
-        "👥 <b>Кому отправить?</b>\n\n"
-        "Сначала отправьте тестовую рассылку себе или отмените:",
-        reply_markup=keyboard,
-        parse_mode=ParseMode.HTML
-    )
 
 
 @router.callback_query(F.data == "broadcast:cancel")
@@ -859,8 +893,19 @@ async def _show_chats_selection(
     end_idx = min(start_idx + chats_per_page, total_chats)
     page_chats = chats[start_idx:end_idx]
     
+    # Получить текст рассылки из state
+    data = await state.get_data()
+    text_final = data.get("text_final", "")
+    
     # Формируем текст сообщения
     text = f"📋 <b>Выберите чаты для рассылки</b>\n\n"
+    
+    # Добавить текст рассылки, если есть
+    if text_final:
+        # Обрезаем длинный текст для превью (максимум 200 символов)
+        preview_text = text_final[:200] + "..." if len(text_final) > 200 else text_final
+        text += f"<b>Текст рассылки:</b>\n{preview_text}\n\n"
+    
     text += f"Выбрано: {len(selected_chat_ids)} из {total_chats}\n\n"
     
     if not page_chats:
@@ -1023,13 +1068,13 @@ async def handle_send_selected_chats(callback: CallbackQuery, state: FSMContext)
     if not await _check_user_owns_broadcast(callback, state):
         return
     
-    # Проверка, что мы в состоянии выбора чатов
-    current_state = await state.get_state()
-    if current_state != BroadcastState.selecting_chats:
-        await callback.answer("❌ Сначала выберите чаты", show_alert=True)
-        return
-    
     data = await state.get_data()
+    
+    # Проверка, что тест был отправлен (есть text_final)
+    text_final = data.get("text_final", "")
+    if not text_final:
+        await callback.answer("❌ Сначала отправьте тестовую рассылку", show_alert=True)
+        return
     
     # Получаем выбранные чаты
     selected_chat_ids: List[int] = data.get("selected_chat_ids", [])
@@ -1040,7 +1085,6 @@ async def handle_send_selected_chats(callback: CallbackQuery, state: FSMContext)
     
     # Проверка наличия данных рассылки
     broadcast_id = data.get("broadcast_id")
-    text_final = data.get("text_final", "")
     media_json = data.get("media_json", "")
     
     if not text_final and not media_json:
