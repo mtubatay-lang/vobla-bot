@@ -217,6 +217,27 @@ async def cmd_broadcast(message: Message, state: FSMContext) -> None:
     )
 
 
+@router.callback_query(F.data == "broadcast_start")
+async def broadcast_start_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    """Обработка нажатия на кнопку 'Запуск рассылки' в меню."""
+    if not await _require_admin(callback):
+        await callback.answer()
+        return
+    
+    await callback.answer()
+    
+    owner_id = callback.from_user.id if callback.from_user else 0
+    await state.update_data(owner_id=owner_id)
+    await state.set_state(BroadcastState.waiting_text)
+    
+    if callback.message:
+        await callback.message.answer(
+            "📢 <b>Создание рассылки</b>\n\n"
+            "Введите текст рассылки (можно написать \"-\" если без текста):",
+            parse_mode=ParseMode.HTML
+        )
+
+
 @router.message(BroadcastState.waiting_text)
 async def handle_broadcast_text(message: Message, state: FSMContext) -> None:
     """Обработка текста рассылки."""

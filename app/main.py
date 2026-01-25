@@ -68,7 +68,8 @@ async def main() -> None:
             BotCommand(command="help", description="Помощь"),
             BotCommand(command="login", description="Авторизация"),
             BotCommand(command="ask", description="Задать вопрос"),
-            BotCommand(command="kb_migrate", description="Миграция FAQ в Qdrant (админ)"),
+            BotCommand(command="kb_add", description="Пополнение базы знаний (админ)"),
+            BotCommand(command="broadcast", description="Запуск рассылки (админ)"),
         ]
     )
 

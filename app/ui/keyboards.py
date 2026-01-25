@@ -14,7 +14,7 @@ def main_menu_kb(user_id: int = None) -> InlineKeyboardMarkup:
         user = find_user_by_telegram_id(user_id)
         if user and _check_admin(user):
             buttons.append(
-                [InlineKeyboardButton(text="📚 Пополнение базы знаний", callback_data="kb_add")]
+                [InlineKeyboardButton(text="📢 Запуск рассылки", callback_data="broadcast_start")]
             )
     
     return InlineKeyboardMarkup(inline_keyboard=buttons)
