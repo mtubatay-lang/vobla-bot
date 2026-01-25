@@ -299,14 +299,14 @@ async def process_document_async(
             await state.clear()
             return
         
-        # 2. Разбивка на чанки
+        # 2. Разбивка на чанки (семантически)
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=status_msg_id,
-            text="⏳ Разбиваю документ на чанки...",
+            text="⏳ Разбиваю документ на семантические чанки...",
         )
         
-        chunks = chunk_text(text)
+        chunks = semantic_chunk_text(text)
         if not chunks:
             await bot.edit_message_text(
                 chat_id=chat_id,
@@ -350,7 +350,10 @@ async def process_document_async(
                 # Создаем нулевой эмбеддинг как fallback
                 embeddings.append([0.0] * 1536)
         
-        # 5. Подготовка метаданных
+        # 5. Извлечение метаданных из текста
+        extracted_metadata = extract_metadata_from_text(text, source="manual_upload")
+        
+        # 6. Подготовка метаданных с расширенными полями
         timestamp = datetime.now().isoformat()
         chunks_with_metadata = []
         for chunk in enriched_chunks:
@@ -358,6 +361,10 @@ async def process_document_async(
                 "text": chunk.get("text", ""),
                 "metadata": {
                     "source": "manual_upload",
+                    "document_type": extracted_metadata.get("document_type", "reference"),
+                    "category": extracted_metadata.get("category", "общее"),
+                    "tags": extracted_metadata.get("tags", []),
+                    "keywords": extracted_metadata.get("keywords", []),
                     "document_title": document_title,
                     "filename": filename,
                     "chunk_index": chunk.get("chunk_index", 0),
@@ -367,7 +374,7 @@ async def process_document_async(
                 },
             })
         
-        # 6. Загрузка в Qdrant
+        # 7. Загрузка в Qdrant
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=status_msg_id,
@@ -443,7 +450,7 @@ async def save_manager_answer_to_qdrant(
         media_json: JSON строка с медиа-вложениями (опционально)
     """
     try:
-        from app.services.chunking_service import chunk_text
+        from app.services.chunking_service import semantic_chunk_text, extract_metadata_from_text
         from app.services.context_enrichment import enrich_chunks_batch
         from app.services.openai_client import create_embedding
         from app.services.qdrant_service import get_qdrant_service
@@ -452,8 +459,8 @@ async def save_manager_answer_to_qdrant(
         # 1. Создаем текст: вопрос + ответ
         full_text = f"Вопрос: {question}\nОтвет: {answer}"
         
-        # 2. Разбиваем на чанки (если длинный)
-        chunks = chunk_text(full_text)
+        # 2. Разбиваем на чанки семантически
+        chunks = semantic_chunk_text(full_text)
         if not chunks:
             chunks = [{
                 "text": full_text,
@@ -467,7 +474,10 @@ async def save_manager_answer_to_qdrant(
         document_title = f"Ответ менеджера на вопрос"
         enriched_chunks = await enrich_chunks_batch(chunks, document_title)
         
-        # 4. Создаем эмбеддинги
+        # 4. Извлекаем метаданные из текста
+        extracted_metadata = extract_metadata_from_text(full_text, source="manager_answer")
+        
+        # 5. Создаем эмбеддинги
         embeddings = []
         for chunk in enriched_chunks:
             embedding = await asyncio.to_thread(
@@ -476,7 +486,7 @@ async def save_manager_answer_to_qdrant(
             )
             embeddings.append(embedding)
         
-        # 5. Подготавливаем метаданные
+        # 6. Подготавливаем метаданные с расширенными полями
         timestamp = datetime.now().isoformat()
         chunks_with_metadata = []
         for chunk in enriched_chunks:
@@ -484,6 +494,10 @@ async def save_manager_answer_to_qdrant(
                 "text": chunk.get("text", ""),
                 "metadata": {
                     "source": "manager_answer",
+                    "document_type": extracted_metadata.get("document_type", "faq"),
+                    "category": extracted_metadata.get("category", "общее"),
+                    "tags": extracted_metadata.get("tags", []),
+                    "keywords": extracted_metadata.get("keywords", []),
                     "question": question,
                     "answer": answer,
                     "manager_id": manager_user_id,

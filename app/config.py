@@ -89,6 +89,19 @@ MANAGER_USERNAMES = [u.strip() for u in _manager_usernames_raw.split(",") if u.s
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
 
+# Semantic Chunking Settings
+SEMANTIC_CHUNK_MIN_SIZE = int(os.getenv("SEMANTIC_CHUNK_MIN_SIZE", "200"))
+SEMANTIC_CHUNK_MAX_SIZE = int(os.getenv("SEMANTIC_CHUNK_MAX_SIZE", "1500"))
+SEMANTIC_CHUNK_OVERLAP = int(os.getenv("SEMANTIC_CHUNK_OVERLAP", "150"))
+
+# Re-ranking Settings
+RERANK_TOP_K = int(os.getenv("RERANK_TOP_K", "10"))
+RERANK_USE_LLM = os.getenv("RERANK_USE_LLM", "true").lower() == "true"
+
+# Chunk Analysis Settings
+CHUNK_ANALYSIS_ENABLED = os.getenv("CHUNK_ANALYSIS_ENABLED", "true").lower() == "true"
+MAX_CHUNKS_TO_ANALYZE = int(os.getenv("MAX_CHUNKS_TO_ANALYZE", "10"))
+
 # --- RAG Test Chat Settings (для ограничения работы только в тестовом чате) ---
 # Опциональная переменная: если не указана, бот работает во всех чатах
 # Используем функцию-геттер, чтобы Railway не требовал переменную при статическом анализе

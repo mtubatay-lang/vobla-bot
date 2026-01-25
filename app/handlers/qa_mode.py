@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import uuid
+from datetime import datetime
 from typing import List, Dict, Any, Optional
 
 from aiogram import Router, F
@@ -18,6 +19,12 @@ from app.services.openai_client import polish_faq_answer, create_embedding, clie
 from app.services.qdrant_service import get_qdrant_service
 from app.services.pending_questions_service import create_ticket_and_notify_managers
 from app.services.qa_feedback_service import save_qa_feedback
+from app.services.reranking_service import rerank_chunks_with_llm, select_best_chunks
+from app.services.chunk_analyzer_service import (
+    analyze_chunks_relevance,
+    select_and_combine_chunks,
+    extract_key_information,
+)
 from app.ui.keyboards import qa_kb, main_menu_kb
 
 logger = logging.getLogger(__name__)
@@ -60,6 +67,148 @@ def _kb_skip_comment() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="Пропустить", callback_data="fb_skip_comment"),
     ]])
+
+
+async def detect_question_type(
+    question: str,
+    conversation_history: List[Dict[str, Any]],
+) -> str:
+    """Определяет тип вопроса: новый, уточнение, follow-up.
+    
+    Args:
+        question: Текущий вопрос
+        conversation_history: История диалога
+    
+    Returns:
+        "new" | "clarification" | "follow_up"
+    """
+    if not conversation_history:
+        return "new"
+    
+    # Проверяем, был ли последний ответ уточняющим вопросом
+    last_assistant = None
+    for msg in reversed(conversation_history):
+        if msg.get("role") == "assistant":
+            last_assistant = msg
+            break
+    
+    if last_assistant and "уточнения" in last_assistant.get("text", "").lower():
+        return "clarification"
+    
+    # Проверяем, является ли вопрос follow-up (ссылается на предыдущий ответ)
+    if last_assistant:
+        # Используем LLM для определения связи
+        try:
+            last_answer = last_assistant.get("text", "")
+            prompt = (
+                f"Предыдущий ответ бота: {last_answer[:300]}\n\n"
+                f"Новый вопрос пользователя: {question}\n\n"
+                "Определи, является ли новый вопрос уточнением или продолжением предыдущего ответа, "
+                "или это совершенно новый вопрос.\n"
+                "Ответь одним словом: 'follow_up' если вопрос связан с предыдущим ответом, "
+                "'new' если это новый вопрос."
+            )
+            
+            resp = await asyncio.to_thread(
+                client.chat.completions.create,
+                model=CHAT_MODEL,
+                messages=[
+                    {"role": "system", "content": "Ты помощник для определения типа вопроса."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.0,
+                max_tokens=10,
+            )
+            
+            answer = (resp.choices[0].message.content or "").strip().lower()
+            if "follow_up" in answer:
+                return "follow_up"
+        except Exception as e:
+            logger.exception(f"[QA_MODE] Ошибка определения типа вопроса: {e}")
+    
+    return "new"
+
+
+async def is_follow_up_question(
+    question: str,
+    last_answer: str,
+) -> bool:
+    """Определяет, является ли вопрос уточнением предыдущего ответа.
+    
+    Args:
+        question: Текущий вопрос
+        last_answer: Последний ответ бота
+    
+    Returns:
+        True если вопрос связан с предыдущим ответом
+    """
+    if not last_answer:
+        return False
+    
+    try:
+        prompt = (
+            f"Предыдущий ответ: {last_answer[:400]}\n\n"
+            f"Новый вопрос: {question}\n\n"
+            "Является ли новый вопрос уточнением или продолжением предыдущего ответа? "
+            "Ответь 'да' или 'нет'."
+        )
+        
+        resp = await asyncio.to_thread(
+            client.chat.completions.create,
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": "Ты помощник для определения связи между вопросами."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.0,
+            max_tokens=5,
+        )
+        
+        answer = (resp.choices[0].message.content or "").strip().lower()
+        return "да" in answer or "yes" in answer
+    except Exception as e:
+        logger.exception(f"[QA_MODE] Ошибка определения follow-up вопроса: {e}")
+        return False
+
+
+def build_conversation_context(
+    conversation_history: List[Dict[str, Any]],
+    max_messages: int = 5,
+) -> str:
+    """Строит структурированный контекст диалога.
+    
+    Args:
+        conversation_history: История диалога
+        max_messages: Максимальное количество сообщений для включения
+    
+    Returns:
+        Структурированный текст контекста
+    """
+    if not conversation_history:
+        return ""
+    
+    context_parts = []
+    recent_messages = conversation_history[-max_messages:]
+    
+    for msg in recent_messages:
+        role = msg.get("role", "")
+        text = msg.get("text", "")
+        question_type = msg.get("question_type", "")
+        source = msg.get("source", "")
+        
+        if role == "user":
+            prefix = "Пользователь"
+            if question_type:
+                prefix += f" ({question_type})"
+            context_parts.append(f"{prefix}: {text[:200]}")
+        elif role == "assistant":
+            prefix = "Бот"
+            if source:
+                prefix += f" [{source}]"
+            answer_summary = msg.get("answer_summary", text[:150])
+            context_parts.append(f"{prefix}: {answer_summary}")
+    
+    return "\n".join(context_parts)
 
 
 async def _send_media_from_json(bot, chat_id: int, media_json: str) -> None:
@@ -423,19 +572,24 @@ async def _ask_clarification_question_private(
 async def _generate_answer_from_chunks_private(
     question: str,
     chunks: List[Dict[str, Any]],
-    conversation_history: List[Dict[str, str]],
+    conversation_history: List[Dict[str, Any]],
+    user_name: str = "друг",
 ) -> str:
     """Генерирует ответ на основе найденных чанков (для приватных чатов)."""
     try:
-        history_text = ""
-        if conversation_history:
-            history_lines = []
-            for msg in conversation_history[-5:]:
-                role = "Пользователь" if msg.get("role") == "user" else "Бот"
-                text = msg.get("text", "")
-                if text:
-                    history_lines.append(f"{role}: {text}")
-            history_text = "\n".join(history_lines)
+        # Строим структурированный контекст
+        history_text = build_conversation_context(conversation_history, max_messages=5)
+        
+        # Определяем, является ли это follow-up вопросом
+        is_follow_up = False
+        last_answer = None
+        for msg in reversed(conversation_history):
+            if msg.get("role") == "assistant":
+                last_answer = msg.get("text", "")
+                break
+        
+        if last_answer:
+            is_follow_up = await is_follow_up_question(question, last_answer)
         
         chunks_text = "\n\n---\n\n".join([
             f"Фрагмент {i+1}:\n{chunk.get('text', '')}"
@@ -443,30 +597,42 @@ async def _generate_answer_from_chunks_private(
         ])
         
         system_prompt = (
-            "Ты помощник корпоративного бота сети магазинов Воблабир.\n"
+            f"Ты помощник корпоративного бота сети магазинов Воблабир. "
+            f"Ты общаешься с {user_name}.\n\n"
             "Твоя задача — ответить на вопрос пользователя на основе предоставленных фрагментов базы знаний.\n\n"
+            "СТИЛЬ ОБЩЕНИЯ:\n"
+            f"1. Обращайся к пользователю по имени ({user_name})\n"
+            "2. Общайся как живой менеджер - дружелюбно, понятно, с простыми фразами\n"
+            "3. Объясняй, что ты делаешь: 'Нашёл в базе знаний...', 'Согласно информации...'\n"
+            "4. Давай больше контекста и понимания процесса\n"
+            "5. Используй простые слова, избегай технического жаргона\n"
+            "6. Будь естественным и человечным в общении\n\n"
             "КРИТИЧЕСКИ ВАЖНО:\n"
             "1. Фрагменты были найдены системой поиска как релевантные к вопросу пользователя.\n"
             "2. Твоя задача - найти и использовать релевантную информацию из этих фрагментов для ответа.\n"
             "3. НЕ говори 'фрагменты не содержат информации' - вместо этого найди и используй любую релевантную информацию.\n"
             "4. Если в фрагментах есть информация, связанная с вопросом (даже частично), используй её для ответа.\n"
             "5. Если фрагменты действительно не содержат релевантной информации, только тогда скажи об этом.\n\n"
-            "Если предоставлено несколько фрагментов, объедини информацию из них для более полного ответа.\n"
-            "Фрагменты могут дополнять друг друга - используй всю релевантную информацию.\n"
-            "Если в разных фрагментах есть перекрывающаяся информация, объедини её в единый ответ.\n\n"
-            "Правила:\n"
-            "1. Используй ТОЛЬКО информацию из предоставленных фрагментов.\n"
-            "2. НЕ придумывай факты, которых нет в фрагментах.\n"
-            "3. Внимательно ищи релевантную информацию в каждом фрагменте - даже если она не очевидна с первого взгляда.\n"
-            "4. Объединяй информацию из всех релевантных фрагментов для создания полного ответа.\n"
-            "5. Структурируй ответ: абзацы, списки, если уместно.\n"
-            "6. Будь дружелюбным и понятным.\n"
-            "7. Учитывай контекст предыдущих сообщений, но отвечай на текущий вопрос."
+            "ПРАВИЛА ОТВЕТА:\n"
+            "1. Используй ТОЛЬКО информацию из предоставленных фрагментов\n"
+            "2. НЕ придумывай факты, которых нет в фрагментах\n"
+            "3. Внимательно ищи релевантную информацию в каждом фрагменте\n"
+            "4. Объединяй информацию из всех релевантных фрагментов для создания полного ответа\n"
+            "5. Структурируй ответ: абзацы, списки, если уместно\n"
+            "6. Будь дружелюбным и понятным\n"
+            "7. Учитывай контекст предыдущих сообщений, но отвечай на текущий вопрос\n"
+            "8. Начинай ответ с обращения по имени и краткого упоминания, что нашёл информацию"
         )
+        
+        # Добавляем контекст предыдущего ответа для follow-up вопросов
+        follow_up_context = ""
+        if is_follow_up and last_answer:
+            follow_up_context = f"\n\nВАЖНО: Это уточняющий вопрос к предыдущему ответу. Предыдущий ответ был:\n{last_answer[:300]}\n\n"
         
         user_prompt = (
             f"Текущий вопрос пользователя: {question}\n\n"
             f"{'Контекст диалога:\n' + history_text + '\n\n' if history_text else ''}"
+            f"{follow_up_context}"
             f"Фрагменты из базы знаний:\n{chunks_text}\n\n"
             "Сформулируй ответ на основе этих фрагментов.\n"
             "ВАЖНО: Отвечай ТОЛЬКО на текущий вопрос. Если фрагменты не относятся к текущему вопросу, скажи об этом."
@@ -625,6 +791,11 @@ async def qa_handle_question(message: Message, state: FSMContext):
         await message.answer("Напиши вопрос текстом 🙂", reply_markup=qa_kb())
         return
 
+    # Получаем имя пользователя
+    user_id = message.from_user.id if message.from_user else 0
+    user = find_user_by_telegram_id(user_id)
+    user_name = user.name if user else (message.from_user.first_name if message.from_user else "друг")
+
     # Увеличиваем счётчик вопросов
     data = await state.get_data()
     cnt = int(data.get("qa_questions_count", 0)) + 1
@@ -669,8 +840,30 @@ async def qa_handle_question(message: Message, state: FSMContext):
         logger.info(f"[QA_MODE] Объединяем исходный вопрос с уточнением: '{combined_question[:100]}...'")
         q = combined_question  # Используем объединенный вопрос для поиска
     
-    # Добавляем вопрос в историю (сохраняем оригинальный текст пользователя, не объединенный)
-    history.append({"role": "user", "text": message.text.strip()})
+    # Определяем тип вопроса
+    question_type = await detect_question_type(q, history)
+    
+    # Проверяем, является ли это follow-up вопросом
+    last_answer_text = None
+    for msg in reversed(history):
+        if msg.get("role") == "assistant":
+            last_answer_text = msg.get("text", "")
+            break
+    
+    is_follow_up = False
+    if last_answer_text and question_type == "new":
+        is_follow_up = await is_follow_up_question(q, last_answer_text)
+        if is_follow_up:
+            question_type = "follow_up"
+            logger.info(f"[QA_MODE] Определен follow-up вопрос: '{q[:50]}...'")
+    
+    # Добавляем вопрос в историю с расширенными метаданными
+    history.append({
+        "role": "user",
+        "text": message.text.strip(),
+        "timestamp": datetime.now().isoformat(),
+        "question_type": question_type,
+    })
     
     # Получаем предыдущие чанки из state (если есть)
     previous_chunks = data.get("qa_found_chunks", [])
@@ -685,6 +878,9 @@ async def qa_handle_question(message: Message, state: FSMContext):
 
     # Показываем индикатор обработки
     await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+    
+    # Отправляем промежуточное сообщение
+    searching_msg = await message.answer(f"🔍 Ищу информацию в базе знаний, {user_name}...")
 
     try:
         # ШАГ 1: Подготовка запроса для поиска
@@ -766,9 +962,23 @@ async def qa_handle_question(message: Message, state: FSMContext):
                         all_found_chunks.append(chunk)
                         seen_texts.add(chunk_text)
         
-        # Сортируем по score и берем топ-5
+        # Сортируем по score и берем топ-10 для re-ranking
         all_found_chunks.sort(key=lambda x: x.get("score", 0), reverse=True)
-        found_chunks = all_found_chunks[:5]
+        initial_chunks = all_found_chunks[:10]
+        
+        # Re-ranking через LLM
+        if initial_chunks:
+            try:
+                await searching_msg.edit_text(f"🔍 Нашёл {len(initial_chunks)} фрагментов, анализирую релевантность...")
+                reranked_chunks = await rerank_chunks_with_llm(q, initial_chunks, top_k=8)
+                # Выбираем лучшие уникальные чанки
+                found_chunks = select_best_chunks(reranked_chunks, max_chunks=5, min_score=0.1)
+                logger.info(f"[QA_MODE] После re-ranking выбрано {len(found_chunks)} чанков")
+            except Exception as e:
+                logger.exception(f"[QA_MODE] Ошибка re-ranking: {e}")
+                found_chunks = initial_chunks[:5]
+        else:
+            found_chunks = []
         
         if len(all_found_chunks) > chunks_expanded_count:
             logger.info(
@@ -843,7 +1053,11 @@ async def qa_handle_question(message: Message, state: FSMContext):
                 
                 # Генерируем ответ из Qdrant (используем объединенные чанки)
                 logger.info(f"[QA_MODE] Генерируем ответ из найденных чанков RAG (всего {len(all_chunks)} чанков)")
-                answer = await _generate_answer_from_chunks_private(q, all_chunks, history)
+                try:
+                    await searching_msg.edit_text(f"✍️ Формирую ответ на основе найденной информации...")
+                except:
+                    pass  # Игнорируем ошибки редактирования сообщения
+                answer = await _generate_answer_from_chunks_private(q, all_chunks, history, user_name)
                 
                 # Проверяем, не говорит ли ответ что данных нет (хотя чанки найдены)
                 answer_lower = answer.lower()
@@ -864,13 +1078,28 @@ async def qa_handle_question(message: Message, state: FSMContext):
                     # Эскалируем менеджеру - устанавливаем флаг и продолжаем выполнение
                     should_escalate = True
                 else:
-                    # Обновляем историю и очищаем сохраненные чанки (ответ дан)
-                    history.append({"role": "assistant", "text": answer})
+                    # Обновляем историю с расширенными метаданными
+                    # Сохраняем чанки для возможных follow-up вопросов
+                    answer_summary = answer[:200] + "..." if len(answer) > 200 else answer
+                    history.append({
+                        "role": "assistant",
+                        "text": answer,
+                        "timestamp": datetime.now().isoformat(),
+                        "source": "rag",
+                        "chunks_used": len(all_chunks),
+                        "answer_summary": answer_summary,
+                    })
                     await state.update_data(
                         qa_history=history[-8:],
                         qa_last_answer_source="qdrant_rag",
-                        qa_found_chunks=[],  # Очищаем после успешного ответа
+                        qa_found_chunks=all_chunks,  # Сохраняем для follow-up вопросов
                     )
+                    
+                    # Удаляем промежуточное сообщение
+                    try:
+                        await searching_msg.delete()
+                    except:
+                        pass
                     
                     await message.answer(
                         answer + "\n\nЕсли есть ещё вопрос — просто напиши его 👇",
@@ -910,6 +1139,13 @@ async def qa_handle_question(message: Message, state: FSMContext):
                 qa_history=history[-8:],
                 qa_last_answer_source="faq",
             )
+            
+            # Удаляем промежуточное сообщение, если оно есть
+            try:
+                if 'searching_msg' in locals():
+                    await searching_msg.delete()
+            except:
+                pass
             
             await message.answer(
                 pretty + "\n\nЕсли есть ещё вопрос — просто напиши его 👇",
@@ -962,8 +1198,15 @@ async def qa_handle_question(message: Message, state: FSMContext):
         )
         await state.update_data(qa_last_answer_source="manager")
         
+        # Удаляем промежуточное сообщение
+        try:
+            if 'searching_msg' in locals():
+                await searching_msg.delete()
+        except:
+            pass
+        
         await message.answer(
-            "Не нашёл ответа в базе знаний 😕\n"
+            f"Не нашёл ответа в базе знаний, {user_name} 😕\n"
             "Я передал вопрос менеджеру. Можешь задать следующий вопрос — просто напиши его 👇",
             reply_markup=qa_kb(),
         )

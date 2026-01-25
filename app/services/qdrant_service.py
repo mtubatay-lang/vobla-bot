@@ -60,22 +60,30 @@ class QdrantService:
             raise
     
     def _ensure_payload_index(self) -> None:
-        """Создает индекс для поля source в payload, если его нет."""
-        try:
-            self.client.create_payload_index(
-                collection_name=self.collection_name,
-                field_name="source",
-                field_schema="keyword",
-            )
-            logger.info(f"[QDRANT] Создан индекс для поля 'source' в коллекции {self.collection_name}")
-        except Exception as e:
-            # Индекс уже существует или другая ошибка
-            # Проверяем, что это не критичная ошибка
-            error_msg = str(e).lower()
-            if "already exists" in error_msg or "index" in error_msg:
-                logger.debug(f"[QDRANT] Индекс для 'source' уже существует или не требуется: {e}")
-            else:
-                logger.warning(f"[QDRANT] Не удалось создать индекс для 'source': {e}")
+        """Создает индексы для полей в payload, если их нет."""
+        # Список полей для индексации
+        fields_to_index = [
+            ("source", "keyword"),
+            ("document_type", "keyword"),
+            ("category", "keyword"),
+            ("tags", "keyword"),  # Для массивов тоже keyword
+        ]
+        
+        for field_name, field_schema in fields_to_index:
+            try:
+                self.client.create_payload_index(
+                    collection_name=self.collection_name,
+                    field_name=field_name,
+                    field_schema=field_schema,
+                )
+                logger.info(f"[QDRANT] Создан индекс для поля '{field_name}' в коллекции {self.collection_name}")
+            except Exception as e:
+                # Индекс уже существует или другая ошибка
+                error_msg = str(e).lower()
+                if "already exists" in error_msg or "index" in error_msg:
+                    logger.debug(f"[QDRANT] Индекс для '{field_name}' уже существует или не требуется: {e}")
+                else:
+                    logger.warning(f"[QDRANT] Не удалось создать индекс для '{field_name}': {e}")
     
     def add_documents(
         self,

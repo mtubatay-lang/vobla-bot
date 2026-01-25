@@ -42,7 +42,11 @@ async def add_faq_entry_to_cache(question: str, answer: str, media_json: str = "
 
     # Сохраняем в Qdrant
     try:
-        from app.services.chunking_service import chunk_text
+        from app.services.chunking_service import (
+            semantic_chunk_text,
+            extract_metadata_from_text,
+            chunk_text,  # Для обратной совместимости
+        )
         from app.services.context_enrichment import enrich_chunks_batch
         from app.services.qdrant_service import get_qdrant_service
         from datetime import datetime
@@ -50,8 +54,8 @@ async def add_faq_entry_to_cache(question: str, answer: str, media_json: str = "
         # Создаем единый текст
         full_text = f"Вопрос: {question}\nОтвет: {answer}"
         
-        # Разбиваем на чанки
-        chunks = chunk_text(full_text)
+        # Разбиваем на чанки семантически
+        chunks = semantic_chunk_text(full_text)
         if not chunks:
             chunks = [{
                 "text": full_text,
@@ -65,13 +69,16 @@ async def add_faq_entry_to_cache(question: str, answer: str, media_json: str = "
         document_title = f"FAQ: {question[:50]}..." if len(question) > 50 else f"FAQ: {question}"
         enriched_chunks = await enrich_chunks_batch(chunks, document_title)
         
+        # Извлекаем метаданные из текста
+        extracted_metadata = extract_metadata_from_text(full_text, source="faq_manual_add")
+        
         # Создаем эмбеддинги
         embeddings = []
         for chunk in enriched_chunks:
             embedding = await asyncio.to_thread(create_embedding, chunk.get("text", ""))
             embeddings.append(embedding)
         
-        # Подготавливаем метаданные
+        # Подготавливаем метаданные с расширенными полями
         timestamp = datetime.now().isoformat()
         chunks_with_metadata = []
         for chunk in enriched_chunks:
@@ -79,10 +86,15 @@ async def add_faq_entry_to_cache(question: str, answer: str, media_json: str = "
                 "text": chunk.get("text", ""),
                 "metadata": {
                     "source": "faq_manual_add",
+                    "document_type": extracted_metadata.get("document_type", "faq"),
+                    "category": extracted_metadata.get("category", "общее"),
+                    "tags": extracted_metadata.get("tags", []),
+                    "keywords": extracted_metadata.get("keywords", []),
                     "original_question": question,
                     "original_answer": answer,
                     "media_json": media_json,
                     "added_at": timestamp,
+                    "document_title": document_title,
                 },
             })
         

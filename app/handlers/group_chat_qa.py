@@ -469,7 +469,7 @@ async def handle_manager_reply_in_group_chat(message: Message):
     # Сохраняем в Qdrant
     try:
         # Импортируем функцию напрямую, чтобы избежать циклических зависимостей
-        from app.services.chunking_service import chunk_text
+        from app.services.chunking_service import semantic_chunk_text, extract_metadata_from_text
         from app.services.context_enrichment import enrich_chunks_batch
         from app.services.openai_client import create_embedding
         from app.services.qdrant_service import get_qdrant_service
@@ -478,8 +478,8 @@ async def handle_manager_reply_in_group_chat(message: Message):
         # Создаем текст: вопрос + ответ
         full_text = f"Вопрос: {question}\nОтвет: {answer}"
         
-        # Разбиваем на чанки
-        chunks = chunk_text(full_text)
+        # Разбиваем на чанки семантически
+        chunks = semantic_chunk_text(full_text)
         if not chunks:
             chunks = [{
                 "text": full_text,
@@ -493,13 +493,16 @@ async def handle_manager_reply_in_group_chat(message: Message):
         document_title = f"Ответ менеджера на вопрос"
         enriched_chunks = await enrich_chunks_batch(chunks, document_title)
         
+        # Извлекаем метаданные из текста
+        extracted_metadata = extract_metadata_from_text(full_text, source="manager_answer")
+        
         # Создаем эмбеддинги
         embeddings = []
         for chunk in enriched_chunks:
             embedding = await asyncio.to_thread(create_embedding, chunk.get("text", ""))
             embeddings.append(embedding)
         
-        # Подготавливаем метаданные
+        # Подготавливаем метаданные с расширенными полями
         timestamp = datetime.now().isoformat()
         chunks_with_metadata = []
         for chunk in enriched_chunks:
@@ -507,12 +510,17 @@ async def handle_manager_reply_in_group_chat(message: Message):
                 "text": chunk.get("text", ""),
                 "metadata": {
                     "source": "manager_answer",
+                    "document_type": extracted_metadata.get("document_type", "faq"),
+                    "category": extracted_metadata.get("category", "общее"),
+                    "tags": extracted_metadata.get("tags", []),
+                    "keywords": extracted_metadata.get("keywords", []),
                     "question": question,
                     "answer": answer,
                     "manager_id": user_id,
                     "chat_id": message.chat.id,
                     "answered_at": timestamp,
                     "media_json": media_json,
+                    "document_title": document_title,
                 },
             })
         

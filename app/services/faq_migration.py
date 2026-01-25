@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import List, Dict, Any
 
 from app.services.sheets_client import load_faq_rows
-from app.services.chunking_service import chunk_text
+from app.services.chunking_service import semantic_chunk_text, extract_metadata_from_text
 from app.services.context_enrichment import enrich_chunks_batch
 from app.services.openai_client import create_embedding
 from app.services.qdrant_service import get_qdrant_service
@@ -58,8 +58,8 @@ async def migrate_faq_to_qdrant() -> Dict[str, Any]:
             # Создаем единый текст: вопрос + ответ
             full_text = f"Вопрос: {question}\nОтвет: {answer}"
             
-            # Разбиваем на чанки (если длинный)
-            chunks = chunk_text(full_text)
+            # Разбиваем на чанки семантически
+            chunks = semantic_chunk_text(full_text)
             
             if not chunks:
                 # Если чанкинг не сработал, создаем один чанк
@@ -79,6 +79,9 @@ async def migrate_faq_to_qdrant() -> Dict[str, Any]:
                 logger.exception(f"[FAQ_MIGRATION] Ошибка обогащения FAQ {idx}: {e}")
                 enriched_chunks = chunks
             
+            # Извлекаем метаданные из текста
+            extracted_metadata = extract_metadata_from_text(full_text, source="faq_migration")
+            
             # Создаем эмбеддинги для каждого чанка
             for chunk in enriched_chunks:
                 try:
@@ -88,17 +91,22 @@ async def migrate_faq_to_qdrant() -> Dict[str, Any]:
                     )
                     all_embeddings.append(embedding)
                     
-                    # Подготавливаем метаданные
+                    # Подготавливаем метаданные с расширенными полями
                     chunk_with_metadata = {
                         "text": chunk.get("text", ""),
                         "metadata": {
                             "source": "faq_migration",
+                            "document_type": extracted_metadata.get("document_type", "faq"),
+                            "category": extracted_metadata.get("category", "общее"),
+                            "tags": extracted_metadata.get("tags", []),
+                            "keywords": extracted_metadata.get("keywords", []),
                             "original_question": question,
                             "original_answer": answer,
                             "media_json": media_json,
                             "chunk_index": chunk.get("chunk_index", 0),
                             "total_chunks": chunk.get("total_chunks", len(enriched_chunks)),
                             "migrated_at": timestamp,
+                            "document_title": document_title,
                         },
                     }
                     all_chunks.append(chunk_with_metadata)
