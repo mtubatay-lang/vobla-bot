@@ -20,6 +20,7 @@ from app.handlers.faq import router as faq_router
 from app.handlers.manager_reply import router as manager_router
 from app.handlers.qa_mode import router as qa_router
 from app.handlers.knowledge_base_admin import router as kb_admin_router
+from app.handlers.broadcast import router as broadcast_router
 
 
 async def main() -> None:
@@ -80,6 +81,7 @@ async def main() -> None:
     dp.include_router(auth_router)  # роутер авторизации
     dp.include_router(kb_admin_router)  # админ-панель для базы знаний (перемещен выше)
     dp.include_router(manager_router)  # роутер для менеджеров
+    dp.include_router(broadcast_router)  # роутер рассылок
     dp.include_router(qa_router)  # роутер режима навыка
     dp.include_router(faq_router)   # FAQ-роутер
     dp.include_router(echo_router)
