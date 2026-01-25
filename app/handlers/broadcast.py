@@ -31,6 +31,8 @@ from app.services.broadcast_service import (
     read_active_recipients_chats,
     read_active_recipients_chats_with_names,
     read_active_recipients_users,
+    read_active_regions,
+    read_chats_by_regions,
 )
 from app.services.metrics_service import log_event
 from app.services.openai_client import improve_broadcast_text
@@ -52,6 +54,8 @@ class BroadcastState(StatesGroup):
     choosing_audience = State()  # Первичный выбор аудитории (с "тест себе")
     choosing_audience_final = State()  # Финальный выбор аудитории (после теста)
     selecting_chats = State()  # Выбор конкретных чатов
+    choosing_segmentation_type = State()  # Выбор типа сегментации (По Регионам / По ИП)
+    selecting_regions = State()  # Выбор регионов
 
 
 def _check_admin(user) -> bool:
@@ -762,11 +766,294 @@ async def handle_send_selected_chats(callback: CallbackQuery, state: FSMContext)
     await state.clear()
 
 
+async def _show_regions_selection(
+    message: Message,
+    state: FSMContext,
+    regions: List[str],
+    selected_regions: List[str],
+    page: int = 0,
+    regions_per_page: int = 20
+) -> None:
+    """Показывает список регионов для выбора с пагинацией."""
+    total_regions = len(regions)
+    start_idx = page * regions_per_page
+    end_idx = min(start_idx + regions_per_page, total_regions)
+    page_regions = regions[start_idx:end_idx]
+    
+    # Получить текст рассылки из state
+    data = await state.get_data()
+    text_final = data.get("text_final", "")
+    
+    # Формируем текст сообщения
+    text = f"🌍 <b>Выберите регионы для рассылки</b>\n\n"
+    
+    # Добавить текст рассылки, если есть
+    if text_final:
+        # Обрезаем длинный текст для превью (максимум 200 символов)
+        preview_text = text_final[:200] + "..." if len(text_final) > 200 else text_final
+        text += f"<b>Текст рассылки:</b>\n{preview_text}\n\n"
+    
+    text += f"Выбрано: {len(selected_regions)} из {total_regions}\n\n"
+    
+    if not page_regions:
+        text += "Нет регионов для отображения."
+    else:
+        text += "Доступные регионы:\n\n"
+    
+    # Формируем кнопки для регионов
+    buttons = []
+    for region in page_regions:
+        is_selected = region in selected_regions
+        
+        checkbox = "☑" if is_selected else "☐"
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{checkbox} {region}",
+                callback_data=f"broadcast:region_toggle:{region}"
+            )
+        ])
+    
+    # Кнопки навигации (если нужно)
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(
+            InlineKeyboardButton(text="◀ Назад", callback_data=f"broadcast:regions_page:{page - 1}")
+        )
+    if end_idx < total_regions:
+        nav_buttons.append(
+            InlineKeyboardButton(text="Вперед ▶", callback_data=f"broadcast:regions_page:{page + 1}")
+        )
+    if nav_buttons:
+        buttons.append(nav_buttons)
+    
+    # Кнопки действий
+    action_buttons = []
+    if selected_regions:
+        action_buttons.append(
+            InlineKeyboardButton(text="✅ Отправить в выбранные регионы", callback_data="broadcast:send:selected_regions")
+        )
+    action_buttons.append(
+        InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast:cancel_send")
+    )
+    buttons.append(action_buttons)
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    
+    # Отправляем или обновляем сообщение
+    data = await state.get_data()
+    selection_message_id = data.get("regions_selection_message_id")
+    
+    if selection_message_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=selection_message_id,
+                text=text,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML
+            )
+        except Exception:
+            # Если не удалось обновить, отправляем новое
+            sent_msg = await message.answer(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+            await state.update_data(regions_selection_message_id=sent_msg.message_id)
+    else:
+        sent_msg = await message.answer(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+        await state.update_data(regions_selection_message_id=sent_msg.message_id)
+
+
+@router.callback_query(F.data == "broadcast:send:selected_regions")
+async def handle_send_selected_regions(callback: CallbackQuery, state: FSMContext) -> None:
+    """Отправка рассылки в выбранные регионы."""
+    logger.info("[BROADCAST] handle_send_selected_regions called")
+    
+    if not callback.message:
+        logger.warning("[BROADCAST] handle_send_selected_regions: no callback.message")
+        await callback.answer()
+        return
+    
+    if not await _require_admin(callback):
+        logger.warning("[BROADCAST] handle_send_selected_regions: admin check failed")
+        await callback.answer()
+        return
+    
+    if not await _check_user_owns_broadcast(callback, state):
+        logger.warning("[BROADCAST] handle_send_selected_regions: user ownership check failed")
+        return
+    
+    data = await state.get_data()
+    logger.info(f"[BROADCAST] handle_send_selected_regions: state data keys: {list(data.keys())}")
+    
+    # Получаем выбранные регионы
+    selected_regions: List[str] = data.get("selected_regions", [])
+    logger.info(f"[BROADCAST] handle_send_selected_regions: selected_regions={selected_regions}")
+    
+    if not selected_regions:
+        logger.warning("[BROADCAST] handle_send_selected_regions: no selected regions")
+        await callback.answer("❌ Выберите хотя бы один регион", show_alert=True)
+        return
+    
+    # Получаем chat_id чатов из выбранных регионов
+    chat_ids = await asyncio.to_thread(read_chats_by_regions, selected_regions)
+    logger.info(f"[BROADCAST] handle_send_selected_regions: found {len(chat_ids)} chats in selected regions")
+    
+    if not chat_ids:
+        await callback.answer("❌ В выбранных регионах нет активных чатов", show_alert=True)
+        return
+    
+    # Проверка наличия данных рассылки
+    broadcast_id = data.get("broadcast_id")
+    text_final = data.get("text_final", "")
+    media_json = data.get("media_json", "")
+    logger.info(f"[BROADCAST] handle_send_selected_regions: text_final={bool(text_final)}, media_json={bool(media_json)}")
+    
+    if not text_final and not media_json:
+        logger.warning("[BROADCAST] handle_send_selected_regions: no broadcast data")
+        await callback.answer("❌ Нет данных рассылки, начните заново /broadcast", show_alert=True)
+        await state.clear()
+        return
+    
+    logger.info("[BROADCAST] handle_send_selected_regions: starting broadcast")
+    await callback.answer("📤 Рассылка начата...")
+    
+    # Получаем данные
+    created_by_user_id = callback.from_user.id if callback.from_user else 0
+    created_by_username = callback.from_user.username if callback.from_user else None
+    text_original = data.get("text_original", "")
+    selected_variant = data.get("selected_variant", "original")
+    
+    # Используем чаты из выбранных регионов
+    users = []
+    chats = chat_ids
+    
+    users_count = len(users)
+    chats_count = len(chats)
+    
+    # Создаём черновик рассылки (если ещё не создан)
+    if not broadcast_id:
+        broadcast_id = await asyncio.to_thread(
+            create_broadcast_draft,
+            created_by_user_id=created_by_user_id,
+            created_by_username=created_by_username,
+            text_original=text_original,
+            media_json=media_json,
+            users_count=users_count,
+            chats_count=chats_count,
+        )
+        await state.update_data(broadcast_id=broadcast_id)
+        
+        # Логируем событие создания
+        await asyncio.to_thread(
+            log_event,
+            user_id=created_by_user_id,
+            username=created_by_username,
+            event="broadcast_created",
+            meta={"broadcast_id": broadcast_id, "mode": "selected_regions", "regions": selected_regions},
+        )
+    
+    # Парсим медиа
+    attachments = []
+    if media_json:
+        try:
+            attachments = json.loads(media_json)
+        except Exception:
+            pass
+    
+    # Отправляем всем получателям
+    sent_ok = 0
+    sent_fail = 0
+    
+    # Семафор на 10 одновременных отправок
+    semaphore = asyncio.Semaphore(10)
+    
+    async def send_to_chat(chat_id: int) -> None:
+        nonlocal sent_ok, sent_fail
+        async with semaphore:
+            try:
+                if text_final or attachments:
+                    if attachments:
+                        await _send_media_to_recipient(callback.message.bot, chat_id, attachments, text_final)
+                    else:
+                        await callback.message.bot.send_message(chat_id=chat_id, text=text_final, parse_mode=ParseMode.HTML)
+                    
+                    await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "ok")
+                    sent_ok += 1
+                else:
+                    await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "fail", "empty message")
+                    sent_fail += 1
+            except TelegramForbiddenError as e:
+                error_text = "blocked"
+                await asyncio.to_thread(mark_chat_failed, chat_id, error_text)
+                await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "fail", error_text)
+                sent_fail += 1
+            except Exception as e:
+                error_text = str(e)[:500]
+                await asyncio.to_thread(mark_chat_failed, chat_id, error_text)
+                await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "fail", error_text)
+                sent_fail += 1
+    
+    # Создаём задачи для всех получателей
+    tasks = []
+    for chat_id in chats:
+        tasks.append(send_to_chat(chat_id))
+    
+    # Ждём завершения всех задач
+    logger.info(f"[BROADCAST] handle_send_selected_regions: sending to {len(tasks)} chats")
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    
+    total = sent_ok + sent_fail
+    logger.info(f"[BROADCAST] handle_send_selected_regions: completed. sent_ok={sent_ok}, sent_fail={sent_fail}")
+    
+    # Обновляем статус рассылки
+    await asyncio.to_thread(
+        finalize_broadcast,
+        broadcast_id=broadcast_id,
+        text_final=text_final,
+        status="sent",
+        sent_ok=sent_ok,
+        sent_fail=sent_fail,
+        selected_variant=selected_variant,
+        mode="selected_regions",
+    )
+    
+    # Логируем событие отправки
+    await asyncio.to_thread(
+        log_event,
+        user_id=created_by_user_id,
+        username=created_by_username,
+        event="broadcast_sent",
+        meta={
+            "broadcast_id": broadcast_id,
+            "mode": "selected_regions",
+            "regions": selected_regions,
+            "variant": selected_variant,
+            "total": total,
+            "ok": sent_ok,
+            "fail": sent_fail,
+        },
+    )
+    
+    # Отвечаем админу
+    regions_str = ", ".join(selected_regions)
+    result_text = (
+        f"✅ <b>Рассылка отправлена</b>\n\n"
+        f"📊 Статистика:\n"
+        f"• Регионы: {regions_str}\n"
+        f"• Всего получателей: {total}\n"
+        f"• Успешно: {sent_ok}\n"
+        f"• Ошибок: {sent_fail}\n\n"
+        f"ID рассылки: <code>{broadcast_id}</code>"
+    )
+    
+    await callback.message.answer(result_text, parse_mode=ParseMode.HTML)
+    await state.clear()
+
+
 @router.callback_query(F.data.startswith("broadcast:send:"))
 async def handle_send_broadcast(callback: CallbackQuery, state: FSMContext) -> None:
     """Обработка финальной отправки рассылки по выбранной аудитории."""
-    # Исключаем selected_chats - для него есть отдельный обработчик
-    if callback.data == "broadcast:send:selected_chats":
+    # Исключаем selected_chats и selected_regions - для них есть отдельные обработчики
+    if callback.data == "broadcast:send:selected_chats" or callback.data == "broadcast:send:selected_regions":
         return
     
     if not callback.message:
@@ -1035,10 +1322,43 @@ async def handle_select_chats(callback: CallbackQuery, state: FSMContext) -> Non
     
     await callback.answer()
     
-    # Переход в состояние выбора чатов
+    # Переход в состояние выбора типа сегментации
+    await state.set_state(BroadcastState.choosing_segmentation_type)
+    
+    # Показываем выбор типа сегментации
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🌍 По Регионам", callback_data="broadcast:segmentation:regions")],
+        [InlineKeyboardButton(text="🏢 По ИП", callback_data="broadcast:segmentation:ip")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast:cancel_send")],
+    ])
+    
+    await callback.message.answer(
+        "📋 <b>Выберите тип сегментации</b>\n\n"
+        "Как вы хотите выбрать получателей?",
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
+    )
+
+
+@router.callback_query(F.data == "broadcast:segmentation:ip")
+async def handle_segmentation_ip(callback: CallbackQuery, state: FSMContext) -> None:
+    """Обработка выбора сегментации 'По ИП' - показывает список всех чатов."""
+    if not callback.message:
+        await callback.answer()
+        return
+    
+    if not await _require_admin(callback):
+        await callback.answer()
+        return
+    
+    if not await _check_user_owns_broadcast(callback, state):
+        return
+    
+    await callback.answer()
+    
     await state.set_state(BroadcastState.selecting_chats)
     
-    # Инициализируем список выбранных чатов, если его еще нет
+    # Инициализируем список выбранных чатов
     data = await state.get_data()
     if "selected_chat_ids" not in data:
         await state.update_data(selected_chat_ids=[])
@@ -1047,17 +1367,51 @@ async def handle_select_chats(callback: CallbackQuery, state: FSMContext) -> Non
     chats = await asyncio.to_thread(read_active_recipients_chats_with_names)
     
     if not chats:
-        await callback.message.answer(
-            "❌ Нет доступных чатов для выбора.\n\n"
-            "Проверьте таблицу recipients_chats."
-        )
+        await callback.message.answer("❌ Нет доступных чатов для выбора.")
         return
     
-    # Сохраняем список чатов в state для последующего использования
+    # Сохраняем список чатов в state
     await state.update_data(available_chats=chats)
     
-    # Формируем сообщение со списком чатов
+    # Показываем список чатов
     await _show_chats_selection(callback.message, state, chats, [])
+
+
+@router.callback_query(F.data == "broadcast:segmentation:regions")
+async def handle_segmentation_regions(callback: CallbackQuery, state: FSMContext) -> None:
+    """Обработка выбора сегментации 'По Регионам' - показывает список регионов."""
+    if not callback.message:
+        await callback.answer()
+        return
+    
+    if not await _require_admin(callback):
+        await callback.answer()
+        return
+    
+    if not await _check_user_owns_broadcast(callback, state):
+        return
+    
+    await callback.answer()
+    
+    await state.set_state(BroadcastState.selecting_regions)
+    
+    # Инициализируем список выбранных регионов
+    data = await state.get_data()
+    if "selected_regions" not in data:
+        await state.update_data(selected_regions=[])
+    
+    # Читаем список доступных регионов
+    regions = await asyncio.to_thread(read_active_regions)
+    
+    if not regions:
+        await callback.message.answer("❌ Нет доступных регионов для выбора.")
+        return
+    
+    # Сохраняем список регионов в state
+    await state.update_data(available_regions=regions)
+    
+    # Показываем список регионов
+    await _show_regions_selection(callback.message, state, regions, [])
 
 
 async def _show_chats_selection(
@@ -1232,4 +1586,79 @@ async def handle_chats_page(callback: CallbackQuery, state: FSMContext) -> None:
     
     # Обновляем сообщение
     await _show_chats_selection(callback.message, state, available_chats, selected_chat_ids, page)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("broadcast:region_toggle:"))
+async def handle_region_toggle(callback: CallbackQuery, state: FSMContext) -> None:
+    """Переключение выбора региона (добавить/убрать из списка)."""
+    if not callback.message:
+        await callback.answer()
+        return
+    
+    if not await _require_admin(callback):
+        await callback.answer()
+        return
+    
+    if not await _check_user_owns_broadcast(callback, state):
+        return
+    
+    # Извлекаем название региона из callback.data
+    try:
+        region = callback.data.split(":", 2)[-1]  # Берем все после последнего ":"
+    except (ValueError, IndexError):
+        await callback.answer("❌ Ошибка обработки", show_alert=True)
+        return
+    
+    data = await state.get_data()
+    selected_regions: List[str] = data.get("selected_regions", [])
+    available_regions: List[str] = data.get("available_regions", [])
+    
+    # Переключаем выбор
+    if region in selected_regions:
+        selected_regions.remove(region)
+    else:
+        selected_regions.append(region)
+    
+    # Обновляем state
+    await state.update_data(selected_regions=selected_regions)
+    
+    # Определяем текущую страницу (по умолчанию 0)
+    current_page = data.get("regions_page", 0)
+    
+    # Обновляем сообщение
+    await _show_regions_selection(callback.message, state, available_regions, selected_regions, current_page)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("broadcast:regions_page:"))
+async def handle_regions_page(callback: CallbackQuery, state: FSMContext) -> None:
+    """Обработка переключения страницы списка регионов."""
+    if not callback.message:
+        await callback.answer()
+        return
+    
+    if not await _require_admin(callback):
+        await callback.answer()
+        return
+    
+    if not await _check_user_owns_broadcast(callback, state):
+        return
+    
+    # Извлекаем номер страницы
+    try:
+        page = int(callback.data.split(":")[-1])
+    except (ValueError, IndexError):
+        await callback.answer("❌ Ошибка обработки", show_alert=True)
+        return
+    
+    data = await state.get_data()
+    selected_regions: List[str] = data.get("selected_regions", [])
+    available_regions: List[str] = data.get("available_regions", [])
+    
+    # Сохраняем текущую страницу
+    await state.update_data(regions_page=page)
+    
+    # Обновляем сообщение
+    await _show_regions_selection(callback.message, state, available_regions, selected_regions, page)
     await callback.answer()

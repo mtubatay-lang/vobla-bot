@@ -387,6 +387,134 @@ def read_active_recipients_chats_with_names() -> List[Dict[str, Any]]:
         return []
 
 
+def read_active_regions() -> List[str]:
+    """Читает список уникальных активных регионов из recipients_chats.
+    
+    Возвращает отсортированный список уникальных регионов: ["Башкирия", "Москва", ...]
+    """
+    if not STATS_SHEET_ID:
+        return []
+    
+    try:
+        ws = _get_ws(RECIPIENTS_CHATS_TAB)
+        header_map = _get_headers(ws)
+        
+        chat_id_col = header_map.get("chat_id")
+        is_active_col = header_map.get("is_active")
+        region_col = header_map.get("region")
+        
+        if not chat_id_col or not region_col:
+            return []
+        
+        values = ws.get_all_values()
+        if len(values) < 2:
+            return []
+        
+        headers = [h.strip() for h in values[0]]
+        chat_id_idx = headers.index("chat_id") if "chat_id" in headers else -1
+        is_active_idx = headers.index("is_active") if "is_active" in headers else -1
+        region_idx = headers.index("region") if "region" in headers else -1
+        
+        if chat_id_idx < 0 or region_idx < 0:
+            return []
+        
+        regions_set = set()
+        for row in values[1:]:
+            if len(row) <= chat_id_idx or len(row) <= region_idx:
+                continue
+            
+            chat_id_str = row[chat_id_idx].strip()
+            if not chat_id_str:
+                continue
+            
+            # Проверяем is_active
+            is_active = ""
+            if is_active_idx >= 0 and len(row) > is_active_idx:
+                is_active = row[is_active_idx].strip().lower()
+            
+            # Активен, если is_active пусто, "1", "true"
+            if is_active and is_active not in ("1", "true"):
+                continue
+            
+            # Получаем регион
+            region = row[region_idx].strip()
+            if region:
+                regions_set.add(region)
+        
+        return sorted(list(regions_set))
+    except Exception:
+        return []
+
+
+def read_chats_by_regions(regions: List[str]) -> List[int]:
+    """Читает chat_id активных чатов из указанных регионов.
+    
+    Args:
+        regions: Список названий регионов
+    
+    Returns:
+        Список chat_id чатов из указанных регионов
+    """
+    if not STATS_SHEET_ID:
+        return []
+    
+    try:
+        ws = _get_ws(RECIPIENTS_CHATS_TAB)
+        header_map = _get_headers(ws)
+        
+        chat_id_col = header_map.get("chat_id")
+        is_active_col = header_map.get("is_active")
+        region_col = header_map.get("region")
+        
+        if not chat_id_col or not region_col:
+            return []
+        
+        values = ws.get_all_values()
+        if len(values) < 2:
+            return []
+        
+        headers = [h.strip() for h in values[0]]
+        chat_id_idx = headers.index("chat_id") if "chat_id" in headers else -1
+        is_active_idx = headers.index("is_active") if "is_active" in headers else -1
+        region_idx = headers.index("region") if "region" in headers else -1
+        
+        if chat_id_idx < 0 or region_idx < 0:
+            return []
+        
+        regions_set = set(regions)  # Для быстрого поиска
+        result = []
+        
+        for row in values[1:]:
+            if len(row) <= chat_id_idx or len(row) <= region_idx:
+                continue
+            
+            chat_id_str = row[chat_id_idx].strip()
+            if not chat_id_str:
+                continue
+            
+            # Проверяем is_active
+            is_active = ""
+            if is_active_idx >= 0 and len(row) > is_active_idx:
+                is_active = row[is_active_idx].strip().lower()
+            
+            # Активен, если is_active пусто, "1", "true"
+            if is_active and is_active not in ("1", "true"):
+                continue
+            
+            # Проверяем регион
+            region = row[region_idx].strip()
+            if region in regions_set:
+                try:
+                    chat_id = int(chat_id_str)
+                    result.append(chat_id)
+                except ValueError:
+                    continue
+        
+        return result
+    except Exception:
+        return []
+
+
 def mark_user_failed(user_id: int, error_text: str) -> None:
     """Помечает пользователя как неактивного при ошибке отправки."""
     if not STATS_SHEET_ID:
