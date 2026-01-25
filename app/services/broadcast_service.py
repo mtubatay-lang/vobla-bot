@@ -3,7 +3,7 @@
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from app.config import STATS_SHEET_ID, BROADCASTS_TAB, BROADCAST_LOGS_TAB, RECIPIENTS_USERS_TAB, RECIPIENTS_CHATS_TAB
 from app.services.sheets_client import get_sheets_client
@@ -309,6 +309,76 @@ def read_active_recipients_chats() -> List[int]:
             try:
                 chat_id = int(chat_id_str)
                 result.append(chat_id)
+            except ValueError:
+                continue
+        
+        return result
+    except Exception:
+        return []
+
+
+def read_active_recipients_chats_with_names() -> List[Dict[str, Any]]:
+    """Читает активных получателей-чатов с названиями из recipients_chats.
+    
+    Возвращает список dict: [{"chat_id": int, "name": str}, ...]
+    """
+    if not STATS_SHEET_ID:
+        return []
+    
+    try:
+        ws = _get_ws(RECIPIENTS_CHATS_TAB)
+        header_map = _get_headers(ws)
+        
+        chat_id_col = header_map.get("chat_id")
+        is_active_col = header_map.get("is_active")
+        title_col = header_map.get("title")
+        
+        if not chat_id_col:
+            return []
+        
+        values = ws.get_all_values()
+        if len(values) < 2:
+            return []
+        
+        headers = [h.strip() for h in values[0]]
+        chat_id_idx = headers.index("chat_id") if "chat_id" in headers else -1
+        is_active_idx = headers.index("is_active") if "is_active" in headers else -1
+        title_idx = headers.index("title") if "title" in headers else -1
+        
+        result = []
+        for row in values[1:]:
+            if len(row) <= chat_id_idx:
+                continue
+            
+            chat_id_str = row[chat_id_idx].strip()
+            if not chat_id_str:
+                continue
+            
+            # Проверяем is_active
+            is_active = ""
+            if is_active_idx >= 0 and len(row) > is_active_idx:
+                is_active = row[is_active_idx].strip().lower()
+            
+            # Активен, если is_active пусто, "1", "true"
+            if is_active and is_active not in ("1", "true"):
+                continue
+            
+            try:
+                chat_id = int(chat_id_str)
+                
+                # Получаем название чата
+                chat_name = ""
+                if title_idx >= 0 and len(row) > title_idx:
+                    chat_name = row[title_idx].strip()
+                
+                # Если название пустое, используем fallback
+                if not chat_name:
+                    chat_name = f"Чат {chat_id}"
+                
+                result.append({
+                    "chat_id": chat_id,
+                    "name": chat_name
+                })
             except ValueError:
                 continue
         

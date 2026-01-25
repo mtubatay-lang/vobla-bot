@@ -29,6 +29,7 @@ from app.services.broadcast_service import (
     mark_chat_failed,
     mark_user_failed,
     read_active_recipients_chats,
+    read_active_recipients_chats_with_names,
     read_active_recipients_users,
 )
 from app.services.metrics_service import log_event
@@ -50,6 +51,7 @@ class BroadcastState(StatesGroup):
     choosing_variant = State()  # Выбор варианта текста (оригинал/улучшенный)
     choosing_audience = State()  # Первичный выбор аудитории (с "тест себе")
     choosing_audience_final = State()  # Финальный выбор аудитории (после теста)
+    selecting_chats = State()  # Выбор конкретных чатов
 
 
 def _check_admin(user) -> bool:
@@ -533,6 +535,7 @@ async def handle_test_self(callback: CallbackQuery, state: FSMContext) -> None:
             [InlineKeyboardButton(text="👥 Пользователям бота", callback_data="broadcast:send:users")],
             [InlineKeyboardButton(text="💬 Во все чаты", callback_data="broadcast:send:chats")],
             [InlineKeyboardButton(text="👥💬 В бот и чаты", callback_data="broadcast:send:users_chats")],
+            [InlineKeyboardButton(text="📋 Выбрать определенные чаты", callback_data="broadcast:select_chats")],
             [InlineKeyboardButton(text="❌ Отмена рассылки", callback_data="broadcast:cancel_send")],
         ])
         
@@ -799,3 +802,378 @@ async def handle_cancel_send(callback: CallbackQuery, state: FSMContext) -> None
     
     await state.clear()
     await callback.message.answer("❌ Рассылка отменена")
+
+
+@router.callback_query(F.data == "broadcast:select_chats")
+async def handle_select_chats(callback: CallbackQuery, state: FSMContext) -> None:
+    """Обработка нажатия на кнопку 'Выбрать определенные чаты'."""
+    if not callback.message:
+        await callback.answer()
+        return
+    
+    if not await _require_admin(callback):
+        await callback.answer()
+        return
+    
+    if not await _check_user_owns_broadcast(callback, state):
+        return
+    
+    await callback.answer()
+    
+    # Переход в состояние выбора чатов
+    await state.set_state(BroadcastState.selecting_chats)
+    
+    # Инициализируем список выбранных чатов, если его еще нет
+    data = await state.get_data()
+    if "selected_chat_ids" not in data:
+        await state.update_data(selected_chat_ids=[])
+    
+    # Читаем список доступных чатов
+    chats = await asyncio.to_thread(read_active_recipients_chats_with_names)
+    
+    if not chats:
+        await callback.message.answer(
+            "❌ Нет доступных чатов для выбора.\n\n"
+            "Проверьте таблицу recipients_chats."
+        )
+        return
+    
+    # Сохраняем список чатов в state для последующего использования
+    await state.update_data(available_chats=chats)
+    
+    # Формируем сообщение со списком чатов
+    await _show_chats_selection(callback.message, state, chats, [])
+
+
+async def _show_chats_selection(
+    message: Message,
+    state: FSMContext,
+    chats: List[Dict[str, Any]],
+    selected_chat_ids: List[int],
+    page: int = 0,
+    chats_per_page: int = 20
+) -> None:
+    """Показывает список чатов для выбора с пагинацией."""
+    total_chats = len(chats)
+    start_idx = page * chats_per_page
+    end_idx = min(start_idx + chats_per_page, total_chats)
+    page_chats = chats[start_idx:end_idx]
+    
+    # Формируем текст сообщения
+    text = f"📋 <b>Выберите чаты для рассылки</b>\n\n"
+    text += f"Выбрано: {len(selected_chat_ids)} из {total_chats}\n\n"
+    
+    if not page_chats:
+        text += "Нет чатов для отображения."
+    else:
+        text += "Доступные чаты:\n\n"
+    
+    # Формируем кнопки для чатов
+    buttons = []
+    for chat in page_chats:
+        chat_id = chat["chat_id"]
+        chat_name = chat["name"]
+        is_selected = chat_id in selected_chat_ids
+        
+        # Обрезаем длинное название
+        display_name = chat_name[:40] + "..." if len(chat_name) > 40 else chat_name
+        
+        checkbox = "☑" if is_selected else "☐"
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{checkbox} {display_name}",
+                callback_data=f"broadcast:chat_toggle:{chat_id}"
+            )
+        ])
+    
+    # Кнопки навигации (если нужно)
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(
+            InlineKeyboardButton(text="◀ Назад", callback_data=f"broadcast:chats_page:{page - 1}")
+        )
+    if end_idx < total_chats:
+        nav_buttons.append(
+            InlineKeyboardButton(text="Вперед ▶", callback_data=f"broadcast:chats_page:{page + 1}")
+        )
+    if nav_buttons:
+        buttons.append(nav_buttons)
+    
+    # Кнопки действий
+    action_buttons = []
+    if selected_chat_ids:
+        action_buttons.append(
+            InlineKeyboardButton(text="✅ Отправить в выбранные", callback_data="broadcast:send:selected_chats")
+        )
+    action_buttons.append(
+        InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast:cancel_send")
+    )
+    buttons.append(action_buttons)
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    
+    # Отправляем или обновляем сообщение
+    data = await state.get_data()
+    selection_message_id = data.get("selection_message_id")
+    
+    if selection_message_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=selection_message_id,
+                text=text,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML
+            )
+        except Exception:
+            # Если не удалось обновить, отправляем новое
+            sent_msg = await message.answer(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+            await state.update_data(selection_message_id=sent_msg.message_id)
+    else:
+        sent_msg = await message.answer(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+        await state.update_data(selection_message_id=sent_msg.message_id)
+
+
+@router.callback_query(F.data.startswith("broadcast:chat_toggle:"))
+async def handle_chat_toggle(callback: CallbackQuery, state: FSMContext) -> None:
+    """Переключение выбора чата (добавить/убрать из списка)."""
+    if not callback.message:
+        await callback.answer()
+        return
+    
+    if not await _require_admin(callback):
+        await callback.answer()
+        return
+    
+    if not await _check_user_owns_broadcast(callback, state):
+        return
+    
+    # Извлекаем chat_id из callback.data
+    try:
+        chat_id = int(callback.data.split(":")[-1])
+    except (ValueError, IndexError):
+        await callback.answer("❌ Ошибка обработки", show_alert=True)
+        return
+    
+    data = await state.get_data()
+    selected_chat_ids: List[int] = data.get("selected_chat_ids", [])
+    available_chats: List[Dict[str, Any]] = data.get("available_chats", [])
+    
+    # Переключаем выбор
+    if chat_id in selected_chat_ids:
+        selected_chat_ids.remove(chat_id)
+    else:
+        selected_chat_ids.append(chat_id)
+    
+    # Обновляем state
+    await state.update_data(selected_chat_ids=selected_chat_ids)
+    
+    # Определяем текущую страницу (по умолчанию 0)
+    current_page = data.get("chats_page", 0)
+    
+    # Обновляем сообщение
+    await _show_chats_selection(callback.message, state, available_chats, selected_chat_ids, current_page)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("broadcast:chats_page:"))
+async def handle_chats_page(callback: CallbackQuery, state: FSMContext) -> None:
+    """Обработка переключения страницы списка чатов."""
+    if not callback.message:
+        await callback.answer()
+        return
+    
+    if not await _require_admin(callback):
+        await callback.answer()
+        return
+    
+    if not await _check_user_owns_broadcast(callback, state):
+        return
+    
+    # Извлекаем номер страницы
+    try:
+        page = int(callback.data.split(":")[-1])
+    except (ValueError, IndexError):
+        await callback.answer("❌ Ошибка обработки", show_alert=True)
+        return
+    
+    data = await state.get_data()
+    selected_chat_ids: List[int] = data.get("selected_chat_ids", [])
+    available_chats: List[Dict[str, Any]] = data.get("available_chats", [])
+    
+    # Сохраняем текущую страницу
+    await state.update_data(chats_page=page)
+    
+    # Обновляем сообщение
+    await _show_chats_selection(callback.message, state, available_chats, selected_chat_ids, page)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "broadcast:send:selected_chats")
+async def handle_send_selected_chats(callback: CallbackQuery, state: FSMContext) -> None:
+    """Отправка рассылки в выбранные чаты."""
+    if not callback.message:
+        await callback.answer()
+        return
+    
+    if not await _require_admin(callback):
+        await callback.answer()
+        return
+    
+    if not await _check_user_owns_broadcast(callback, state):
+        return
+    
+    # Проверка, что мы в состоянии выбора чатов
+    current_state = await state.get_state()
+    if current_state != BroadcastState.selecting_chats:
+        await callback.answer("❌ Сначала выберите чаты", show_alert=True)
+        return
+    
+    data = await state.get_data()
+    
+    # Получаем выбранные чаты
+    selected_chat_ids: List[int] = data.get("selected_chat_ids", [])
+    
+    if not selected_chat_ids:
+        await callback.answer("❌ Выберите хотя бы один чат", show_alert=True)
+        return
+    
+    # Проверка наличия данных рассылки
+    broadcast_id = data.get("broadcast_id")
+    text_final = data.get("text_final", "")
+    media_json = data.get("media_json", "")
+    
+    if not text_final and not media_json:
+        await callback.answer("❌ Нет данных рассылки, начните заново /broadcast", show_alert=True)
+        await state.clear()
+        return
+    
+    await callback.answer("📤 Рассылка начата...")
+    
+    # Получаем данные
+    created_by_user_id = callback.from_user.id if callback.from_user else 0
+    created_by_username = callback.from_user.username if callback.from_user else None
+    text_original = data.get("text_original", "")
+    selected_variant = data.get("selected_variant", "original")
+    
+    # Используем только выбранные чаты
+    users = []
+    chats = selected_chat_ids
+    
+    users_count = len(users)
+    chats_count = len(chats)
+    
+    # Создаём черновик рассылки (если ещё не создан)
+    if not broadcast_id:
+        broadcast_id = await asyncio.to_thread(
+            create_broadcast_draft,
+            created_by_user_id=created_by_user_id,
+            created_by_username=created_by_username,
+            text_original=text_original,
+            media_json=media_json,
+            users_count=users_count,
+            chats_count=chats_count,
+        )
+        await state.update_data(broadcast_id=broadcast_id)
+        
+        # Логируем событие создания
+        await asyncio.to_thread(
+            log_event,
+            user_id=created_by_user_id,
+            username=created_by_username,
+            event="broadcast_created",
+            meta={"broadcast_id": broadcast_id, "mode": "selected_chats"},
+        )
+    
+    # Парсим медиа
+    attachments = []
+    if media_json:
+        try:
+            attachments = json.loads(media_json)
+        except Exception:
+            pass
+    
+    # Отправляем всем получателям
+    sent_ok = 0
+    sent_fail = 0
+    
+    # Семафор на 10 одновременных отправок
+    semaphore = asyncio.Semaphore(10)
+    
+    async def send_to_chat(chat_id: int) -> None:
+        nonlocal sent_ok, sent_fail
+        async with semaphore:
+            try:
+                if text_final or attachments:
+                    if attachments:
+                        await _send_media_to_recipient(callback.message.bot, chat_id, attachments, text_final)
+                    else:
+                        await callback.message.bot.send_message(chat_id=chat_id, text=text_final, parse_mode=ParseMode.HTML)
+                    
+                    await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "ok")
+                    sent_ok += 1
+                else:
+                    await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "fail", "empty message")
+                    sent_fail += 1
+            except TelegramForbiddenError as e:
+                error_text = "blocked"
+                await asyncio.to_thread(mark_chat_failed, chat_id, error_text)
+                await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "fail", error_text)
+                sent_fail += 1
+            except Exception as e:
+                error_text = str(e)[:500]
+                await asyncio.to_thread(mark_chat_failed, chat_id, error_text)
+                await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "fail", error_text)
+                sent_fail += 1
+    
+    # Создаём задачи для всех получателей
+    tasks = []
+    for chat_id in chats:
+        tasks.append(send_to_chat(chat_id))
+    
+    # Ждём завершения всех задач
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    
+    total = sent_ok + sent_fail
+    
+    # Обновляем статус рассылки
+    await asyncio.to_thread(
+        finalize_broadcast,
+        broadcast_id=broadcast_id,
+        text_final=text_final,
+        status="sent",
+        sent_ok=sent_ok,
+        sent_fail=sent_fail,
+        selected_variant=selected_variant,
+        mode="selected_chats",
+    )
+    
+    # Логируем событие отправки
+    await asyncio.to_thread(
+        log_event,
+        user_id=created_by_user_id,
+        username=created_by_username,
+        event="broadcast_sent",
+        meta={
+            "broadcast_id": broadcast_id,
+            "mode": "selected_chats",
+            "variant": selected_variant,
+            "total": total,
+            "ok": sent_ok,
+            "fail": sent_fail,
+        },
+    )
+    
+    # Отвечаем админу
+    result_text = (
+        f"✅ <b>Рассылка отправлена</b>\n\n"
+        f"📊 Статистика:\n"
+        f"• Всего получателей: {total}\n"
+        f"• Успешно: {sent_ok}\n"
+        f"• Ошибок: {sent_fail}\n\n"
+        f"ID рассылки: <code>{broadcast_id}</code>"
+    )
+    
+    await callback.message.answer(result_text, parse_mode=ParseMode.HTML)
+    await state.clear()
