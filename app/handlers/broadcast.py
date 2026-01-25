@@ -801,15 +801,18 @@ async def _show_regions_selection(
         text += "Доступные регионы:\n\n"
     
     # Формируем кнопки для регионов
+    # Используем индексы вместо полных названий для callback_data (лимит Telegram 64 байта)
     buttons = []
-    for region in page_regions:
+    for idx, region in enumerate(page_regions):
+        # Вычисляем глобальный индекс региона в полном списке
+        global_idx = start_idx + idx
         is_selected = region in selected_regions
         
         checkbox = "☑" if is_selected else "☐"
         buttons.append([
             InlineKeyboardButton(
                 text=f"{checkbox} {region}",
-                callback_data=f"broadcast:region_toggle:{region}"
+                callback_data=f"broadcast:region_toggle:{global_idx}"
             )
         ])
     
@@ -1603,9 +1606,9 @@ async def handle_region_toggle(callback: CallbackQuery, state: FSMContext) -> No
     if not await _check_user_owns_broadcast(callback, state):
         return
     
-    # Извлекаем название региона из callback.data
+    # Извлекаем индекс региона из callback.data
     try:
-        region = callback.data.split(":", 2)[-1]  # Берем все после последнего ":"
+        region_idx = int(callback.data.split(":")[-1])
     except (ValueError, IndexError):
         await callback.answer("❌ Ошибка обработки", show_alert=True)
         return
@@ -1613,6 +1616,14 @@ async def handle_region_toggle(callback: CallbackQuery, state: FSMContext) -> No
     data = await state.get_data()
     selected_regions: List[str] = data.get("selected_regions", [])
     available_regions: List[str] = data.get("available_regions", [])
+    
+    # Проверяем валидность индекса
+    if region_idx < 0 or region_idx >= len(available_regions):
+        await callback.answer("❌ Ошибка: неверный индекс региона", show_alert=True)
+        return
+    
+    # Получаем название региона по индексу
+    region = available_regions[region_idx]
     
     # Переключаем выбор
     if region in selected_regions:
