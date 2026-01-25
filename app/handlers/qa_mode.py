@@ -25,6 +25,7 @@ from app.services.chunk_analyzer_service import (
     select_and_combine_chunks,
     extract_key_information,
 )
+from app.services.conversation_phrases import get_phrases_examples
 from app.ui.keyboards import qa_kb, main_menu_kb
 
 logger = logging.getLogger(__name__)
@@ -171,15 +172,94 @@ async def is_follow_up_question(
         return False
 
 
+async def extract_topics_from_conversation(
+    conversation_history: List[Dict[str, Any]],
+) -> List[str]:
+    """Извлекает основные темы из истории диалога.
+    
+    Args:
+        conversation_history: История диалога
+    
+    Returns:
+        Список тем (например, ["алкоголь", "договор", "магазин"])
+    """
+    if not conversation_history or len(conversation_history) < 2:
+        return []
+    
+    try:
+        # Собираем все сообщения пользователя
+        user_messages = [msg.get("text", "") for msg in conversation_history if msg.get("role") == "user"]
+        if not user_messages:
+            return []
+        
+        conversation_text = "\n".join(user_messages[-5:])  # Последние 5 вопросов
+        
+        prompt = (
+            f"История вопросов пользователя:\n{conversation_text}\n\n"
+            "Определи основные темы, которые обсуждались в этих вопросах. "
+            "Верни список тем через запятую (максимум 5 тем). "
+            "Темы должны быть краткими (1-3 слова), например: 'алкоголь', 'договор', 'магазин'."
+        )
+        
+        resp = await asyncio.to_thread(
+            client.chat.completions.create,
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": "Ты помощник для извлечения тем из диалога."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.0,
+            max_tokens=100,
+        )
+        
+        answer = (resp.choices[0].message.content or "").strip()
+        # Парсим список тем
+        topics = [t.strip() for t in answer.split(",") if t.strip()]
+        return topics[:5]  # Максимум 5 тем
+        
+    except Exception as e:
+        logger.exception(f"[QA_MODE] Ошибка извлечения тем: {e}")
+        return []
+
+
+async def build_topic_summary(
+    conversation_history: List[Dict[str, Any]],
+) -> str:
+    """Создает краткое резюме обсужденных тем для отсылок.
+    
+    Args:
+        conversation_history: История диалога
+    
+    Returns:
+        Краткое резюме тем (например, "Ранее обсуждались: алкоголь, договоры, магазины")
+    """
+    if not conversation_history:
+        return ""
+    
+    topics = await extract_topics_from_conversation(conversation_history)
+    if not topics:
+        return ""
+    
+    # Создаем краткое резюме
+    if len(topics) == 1:
+        return f"Ранее обсуждалась тема: {topics[0]}"
+    elif len(topics) == 2:
+        return f"Ранее обсуждались темы: {topics[0]} и {topics[1]}"
+    else:
+        return f"Ранее обсуждались темы: {', '.join(topics[:-1])} и {topics[-1]}"
+
+
 def build_conversation_context(
     conversation_history: List[Dict[str, Any]],
     max_messages: int = 5,
+    include_topics: bool = True,
 ) -> str:
     """Строит структурированный контекст диалога.
     
     Args:
         conversation_history: История диалога
         max_messages: Максимальное количество сообщений для включения
+        include_topics: Включать ли информацию о темах
     
     Returns:
         Структурированный текст контекста
@@ -188,6 +268,21 @@ def build_conversation_context(
         return ""
     
     context_parts = []
+    
+    # Добавляем информацию о темах, если есть
+    if include_topics:
+        topics_list = []
+        for msg in conversation_history:
+            topics = msg.get("topics", [])
+            if topics:
+                topics_list.extend(topics)
+        
+        if topics_list:
+            unique_topics = list(set(topics_list))[:5]
+            if unique_topics:
+                context_parts.append(f"Обсуждаемые темы: {', '.join(unique_topics)}")
+    
+    # Добавляем сообщения
     recent_messages = conversation_history[-max_messages:]
     
     for msg in recent_messages:
@@ -195,18 +290,25 @@ def build_conversation_context(
         text = msg.get("text", "")
         question_type = msg.get("question_type", "")
         source = msg.get("source", "")
+        key_points = msg.get("key_points", [])
         
         if role == "user":
             prefix = "Пользователь"
             if question_type:
                 prefix += f" ({question_type})"
-            context_parts.append(f"{prefix}: {text[:200]}")
+            context_line = f"{prefix}: {text[:200]}"
+            if key_points:
+                context_line += f" [Ключевые моменты: {', '.join(key_points[:2])}]"
+            context_parts.append(context_line)
         elif role == "assistant":
             prefix = "Бот"
             if source:
                 prefix += f" [{source}]"
             answer_summary = msg.get("answer_summary", text[:150])
-            context_parts.append(f"{prefix}: {answer_summary}")
+            context_line = f"{prefix}: {answer_summary}"
+            if key_points:
+                context_line += f" [Ключевые моменты: {', '.join(key_points[:2])}]"
+            context_parts.append(context_line)
     
     return "\n".join(context_parts)
 
@@ -574,11 +676,17 @@ async def _generate_answer_from_chunks_private(
     chunks: List[Dict[str, Any]],
     conversation_history: List[Dict[str, Any]],
     user_name: str = "друг",
+    is_first_question: bool = False,
+    topics_summary: str = "",
 ) -> str:
     """Генерирует ответ на основе найденных чанков (для приватных чатов)."""
     try:
-        # Строим структурированный контекст
-        history_text = build_conversation_context(conversation_history, max_messages=5)
+        # Строим структурированный контекст с темами
+        history_text = build_conversation_context(conversation_history, max_messages=5, include_topics=True)
+        
+        # Используем переданное резюме тем или извлекаем, если не передано
+        if not topics_summary:
+            topics_summary = await build_topic_summary(conversation_history)
         
         # Определяем, является ли это follow-up вопросом
         is_follow_up = False
@@ -596,17 +704,40 @@ async def _generate_answer_from_chunks_private(
             for i, chunk in enumerate(chunks)
         ])
         
+        # Получаем примеры фраз для разнообразия
+        phrases_examples = get_phrases_examples()
+        
+        # Формируем инструкции по приветствию
+        greeting_instruction = ""
+        if is_first_question:
+            greeting_instruction = (
+                f"ВАЖНО: Это первый вопрос пользователя в этой сессии. "
+                f"Приветствуй его по имени ({user_name}) в начале ответа, например: 'Привет, {user_name}!' или 'Здравствуй, {user_name}!'"
+            )
+        else:
+            greeting_instruction = (
+                "ВАЖНО: Это НЕ первый вопрос в сессии. НЕ приветствуй пользователя, не используй 'Привет' или 'Здравствуй'. "
+                "Используй имя только если это естественно для контекста, но не в начале каждого ответа."
+            )
+        
         system_prompt = (
             f"Ты помощник корпоративного бота сети магазинов Воблабир. "
             f"Ты общаешься с {user_name}.\n\n"
             "Твоя задача — ответить на вопрос пользователя на основе предоставленных фрагментов базы знаний.\n\n"
             "СТИЛЬ ОБЩЕНИЯ:\n"
-            f"1. Обращайся к пользователю по имени ({user_name})\n"
-            "2. Общайся как живой менеджер - дружелюбно, понятно, с простыми фразами\n"
-            "3. Объясняй, что ты делаешь: 'Нашёл в базе знаний...', 'Согласно информации...'\n"
-            "4. Давай больше контекста и понимания процесса\n"
-            "5. Используй простые слова, избегай технического жаргона\n"
-            "6. Будь естественным и человечным в общении\n\n"
+            "1. Общайся как опытный менеджер, который хочет помочь клиенту\n"
+            "2. Будь дружелюбным, но не навязчивым\n"
+            "3. Используй простые слова, избегай технического жаргона\n"
+            "4. Используй естественные переходы между мыслями\n"
+            "5. Вариативность важна - не повторяй одни и те же фразы\n"
+            "6. Используй разнообразные вводные и завершающие фразы\n"
+            f"{greeting_instruction}\n\n"
+            f"{phrases_examples}\n\n"
+            "ИСПОЛЬЗОВАНИЕ КОНТЕКСТА:\n"
+            "1. Используй информацию из прошлых сообщений для контекста\n"
+            "2. Делай естественные отсылки к прошлым темам, если это уместно\n"
+            "3. Можешь ссылаться на то, что обсуждалось ранее, но не обязательно явно\n"
+            "4. Если пользователь задает вопрос, связанный с предыдущей темой, используй этот контекст\n\n"
             "КРИТИЧЕСКИ ВАЖНО:\n"
             "1. Фрагменты были найдены системой поиска как релевантные к вопросу пользователя.\n"
             "2. Твоя задача - найти и использовать релевантную информацию из этих фрагментов для ответа.\n"
@@ -620,8 +751,7 @@ async def _generate_answer_from_chunks_private(
             "4. Объединяй информацию из всех релевантных фрагментов для создания полного ответа\n"
             "5. Структурируй ответ: абзацы, списки, если уместно\n"
             "6. Будь дружелюбным и понятным\n"
-            "7. Учитывай контекст предыдущих сообщений, но отвечай на текущий вопрос\n"
-            "8. Начинай ответ с обращения по имени и краткого упоминания, что нашёл информацию"
+            "7. Учитывай контекст предыдущих сообщений, но отвечай на текущий вопрос"
         )
         
         # Добавляем контекст предыдущего ответа для follow-up вопросов
@@ -629,9 +759,15 @@ async def _generate_answer_from_chunks_private(
         if is_follow_up and last_answer:
             follow_up_context = f"\n\nВАЖНО: Это уточняющий вопрос к предыдущему ответу. Предыдущий ответ был:\n{last_answer[:300]}\n\n"
         
+        # Добавляем информацию о темах в промпт
+        topics_context = ""
+        if topics_summary and not is_first_question:
+            topics_context = f"\n\nКонтекст прошлых тем: {topics_summary}. Можешь делать естественные отсылки к этим темам, если это уместно.\n"
+        
         user_prompt = (
             f"Текущий вопрос пользователя: {question}\n\n"
             f"{'Контекст диалога:\n' + history_text + '\n\n' if history_text else ''}"
+            f"{topics_context}"
             f"{follow_up_context}"
             f"Фрагменты из базы знаний:\n{chunks_text}\n\n"
             "Сформулируй ответ на основе этих фрагментов.\n"
@@ -857,12 +993,21 @@ async def qa_handle_question(message: Message, state: FSMContext):
             question_type = "follow_up"
             logger.info(f"[QA_MODE] Определен follow-up вопрос: '{q[:50]}...'")
     
+    # Извлекаем темы из текущего вопроса (простая версия - можно улучшить через LLM)
+    # Пока используем ключевые слова из вопроса
+    import re
+    question_words = re.findall(r'\b[а-яё]{4,}\b', q.lower())
+    stop_words = {"это", "как", "что", "для", "когда", "где", "который", "можно", "нужно"}
+    question_topics = [w for w in question_words if w not in stop_words][:3]
+    
     # Добавляем вопрос в историю с расширенными метаданными
     history.append({
         "role": "user",
         "text": message.text.strip(),
         "timestamp": datetime.now().isoformat(),
         "question_type": question_type,
+        "topics": question_topics,  # НОВОЕ: темы из вопроса
+        "key_points": [],  # Будет заполнено после ответа
     })
     
     # Получаем предыдущие чанки из state (если есть)
@@ -1051,13 +1196,20 @@ async def qa_handle_question(message: Message, state: FSMContext):
                     await _ask_clarification_question_private(message, q, all_chunks, missing_info, state)
                     return
                 
+                # Извлекаем темы из истории для контекста
+                topics_summary = await build_topic_summary(history)
+                
                 # Генерируем ответ из Qdrant (используем объединенные чанки)
                 logger.info(f"[QA_MODE] Генерируем ответ из найденных чанков RAG (всего {len(all_chunks)} чанков)")
                 try:
                     await searching_msg.edit_text(f"✍️ Формирую ответ на основе найденной информации...")
                 except:
                     pass  # Игнорируем ошибки редактирования сообщения
-                answer = await _generate_answer_from_chunks_private(q, all_chunks, history, user_name)
+                answer = await _generate_answer_from_chunks_private(
+                    q, all_chunks, history, user_name, 
+                    is_first_question=is_first_question,
+                    topics_summary=topics_summary
+                )
                 
                 # Проверяем, не говорит ли ответ что данных нет (хотя чанки найдены)
                 answer_lower = answer.lower()
@@ -1078,9 +1230,26 @@ async def qa_handle_question(message: Message, state: FSMContext):
                     # Эскалируем менеджеру - устанавливаем флаг и продолжаем выполнение
                     should_escalate = True
                 else:
+                    # Извлекаем ключевые моменты из ответа (простая версия)
+                    # Можно улучшить через LLM для более точного извлечения
+                    answer_sentences = re.split(r'[.!?]\s+', answer)
+                    key_points = [s.strip()[:50] for s in answer_sentences[:3] if len(s.strip()) > 20]
+                    
                     # Обновляем историю с расширенными метаданными
                     # Сохраняем чанки для возможных follow-up вопросов
                     answer_summary = answer[:200] + "..." if len(answer) > 200 else answer
+                    
+                    # Извлекаем темы из ответа (из последнего вопроса пользователя)
+                    answer_topics = []
+                    if history:
+                        last_user_msg = None
+                        for msg in reversed(history):
+                            if msg.get("role") == "user":
+                                last_user_msg = msg
+                                break
+                        if last_user_msg:
+                            answer_topics = last_user_msg.get("topics", [])
+                    
                     history.append({
                         "role": "assistant",
                         "text": answer,
@@ -1088,6 +1257,8 @@ async def qa_handle_question(message: Message, state: FSMContext):
                         "source": "rag",
                         "chunks_used": len(all_chunks),
                         "answer_summary": answer_summary,
+                        "topics": answer_topics,  # НОВОЕ: темы из вопроса
+                        "key_points": key_points,  # НОВОЕ: ключевые моменты ответа
                     })
                     await state.update_data(
                         qa_history=history[-8:],
