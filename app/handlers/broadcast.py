@@ -1070,12 +1070,6 @@ async def handle_send_selected_chats(callback: CallbackQuery, state: FSMContext)
     
     data = await state.get_data()
     
-    # Проверка, что тест был отправлен (есть text_final)
-    text_final = data.get("text_final", "")
-    if not text_final:
-        await callback.answer("❌ Сначала отправьте тестовую рассылку", show_alert=True)
-        return
-    
     # Получаем выбранные чаты
     selected_chat_ids: List[int] = data.get("selected_chat_ids", [])
     
@@ -1085,6 +1079,7 @@ async def handle_send_selected_chats(callback: CallbackQuery, state: FSMContext)
     
     # Проверка наличия данных рассылки
     broadcast_id = data.get("broadcast_id")
+    text_final = data.get("text_final", "")
     media_json = data.get("media_json", "")
     
     if not text_final and not media_json:
