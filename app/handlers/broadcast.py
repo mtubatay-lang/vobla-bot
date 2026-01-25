@@ -585,6 +585,183 @@ async def handle_test_self(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.message.answer(f"❌ Ошибка при отправке теста: {str(e)[:200]}")
 
 
+@router.callback_query(F.data == "broadcast:send:selected_chats")
+async def handle_send_selected_chats(callback: CallbackQuery, state: FSMContext) -> None:
+    """Отправка рассылки в выбранные чаты."""
+    logger.info("[BROADCAST] handle_send_selected_chats called")
+    
+    if not callback.message:
+        logger.warning("[BROADCAST] handle_send_selected_chats: no callback.message")
+        await callback.answer()
+        return
+    
+    if not await _require_admin(callback):
+        logger.warning("[BROADCAST] handle_send_selected_chats: admin check failed")
+        await callback.answer()
+        return
+    
+    if not await _check_user_owns_broadcast(callback, state):
+        logger.warning("[BROADCAST] handle_send_selected_chats: user ownership check failed")
+        return
+    
+    data = await state.get_data()
+    logger.info(f"[BROADCAST] handle_send_selected_chats: state data keys: {list(data.keys())}")
+    
+    # Получаем выбранные чаты
+    selected_chat_ids: List[int] = data.get("selected_chat_ids", [])
+    logger.info(f"[BROADCAST] handle_send_selected_chats: selected_chat_ids={selected_chat_ids}")
+    
+    if not selected_chat_ids:
+        logger.warning("[BROADCAST] handle_send_selected_chats: no selected chats")
+        await callback.answer("❌ Выберите хотя бы один чат", show_alert=True)
+        return
+    
+    # Проверка наличия данных рассылки
+    broadcast_id = data.get("broadcast_id")
+    text_final = data.get("text_final", "")
+    media_json = data.get("media_json", "")
+    logger.info(f"[BROADCAST] handle_send_selected_chats: text_final={bool(text_final)}, media_json={bool(media_json)}")
+    
+    if not text_final and not media_json:
+        logger.warning("[BROADCAST] handle_send_selected_chats: no broadcast data")
+        await callback.answer("❌ Нет данных рассылки, начните заново /broadcast", show_alert=True)
+        await state.clear()
+        return
+    
+    logger.info("[BROADCAST] handle_send_selected_chats: starting broadcast")
+    await callback.answer("📤 Рассылка начата...")
+    
+    # Получаем данные
+    created_by_user_id = callback.from_user.id if callback.from_user else 0
+    created_by_username = callback.from_user.username if callback.from_user else None
+    text_original = data.get("text_original", "")
+    selected_variant = data.get("selected_variant", "original")
+    
+    # Используем только выбранные чаты
+    users = []
+    chats = selected_chat_ids
+    
+    users_count = len(users)
+    chats_count = len(chats)
+    
+    # Создаём черновик рассылки (если ещё не создан)
+    if not broadcast_id:
+        broadcast_id = await asyncio.to_thread(
+            create_broadcast_draft,
+            created_by_user_id=created_by_user_id,
+            created_by_username=created_by_username,
+            text_original=text_original,
+            media_json=media_json,
+            users_count=users_count,
+            chats_count=chats_count,
+        )
+        await state.update_data(broadcast_id=broadcast_id)
+        
+        # Логируем событие создания
+        await asyncio.to_thread(
+            log_event,
+            user_id=created_by_user_id,
+            username=created_by_username,
+            event="broadcast_created",
+            meta={"broadcast_id": broadcast_id, "mode": "selected_chats"},
+        )
+    
+    # Парсим медиа
+    attachments = []
+    if media_json:
+        try:
+            attachments = json.loads(media_json)
+        except Exception:
+            pass
+    
+    # Отправляем всем получателям
+    sent_ok = 0
+    sent_fail = 0
+    
+    # Семафор на 10 одновременных отправок
+    semaphore = asyncio.Semaphore(10)
+    
+    async def send_to_chat(chat_id: int) -> None:
+        nonlocal sent_ok, sent_fail
+        async with semaphore:
+            try:
+                if text_final or attachments:
+                    if attachments:
+                        await _send_media_to_recipient(callback.message.bot, chat_id, attachments, text_final)
+                    else:
+                        await callback.message.bot.send_message(chat_id=chat_id, text=text_final, parse_mode=ParseMode.HTML)
+                    
+                    await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "ok")
+                    sent_ok += 1
+                else:
+                    await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "fail", "empty message")
+                    sent_fail += 1
+            except TelegramForbiddenError as e:
+                error_text = "blocked"
+                await asyncio.to_thread(mark_chat_failed, chat_id, error_text)
+                await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "fail", error_text)
+                sent_fail += 1
+            except Exception as e:
+                error_text = str(e)[:500]
+                await asyncio.to_thread(mark_chat_failed, chat_id, error_text)
+                await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "fail", error_text)
+                sent_fail += 1
+    
+    # Создаём задачи для всех получателей
+    tasks = []
+    for chat_id in chats:
+        tasks.append(send_to_chat(chat_id))
+    
+    # Ждём завершения всех задач
+    logger.info(f"[BROADCAST] handle_send_selected_chats: sending to {len(tasks)} chats")
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    
+    total = sent_ok + sent_fail
+    logger.info(f"[BROADCAST] handle_send_selected_chats: completed. sent_ok={sent_ok}, sent_fail={sent_fail}")
+    
+    # Обновляем статус рассылки
+    await asyncio.to_thread(
+        finalize_broadcast,
+        broadcast_id=broadcast_id,
+        text_final=text_final,
+        status="sent",
+        sent_ok=sent_ok,
+        sent_fail=sent_fail,
+        selected_variant=selected_variant,
+        mode="selected_chats",
+    )
+    
+    # Логируем событие отправки
+    await asyncio.to_thread(
+        log_event,
+        user_id=created_by_user_id,
+        username=created_by_username,
+        event="broadcast_sent",
+        meta={
+            "broadcast_id": broadcast_id,
+            "mode": "selected_chats",
+            "variant": selected_variant,
+            "total": total,
+            "ok": sent_ok,
+            "fail": sent_fail,
+        },
+    )
+    
+    # Отвечаем админу
+    result_text = (
+        f"✅ <b>Рассылка отправлена</b>\n\n"
+        f"📊 Статистика:\n"
+        f"• Всего получателей: {total}\n"
+        f"• Успешно: {sent_ok}\n"
+        f"• Ошибок: {sent_fail}\n\n"
+        f"ID рассылки: <code>{broadcast_id}</code>"
+    )
+    
+    await callback.message.answer(result_text, parse_mode=ParseMode.HTML)
+    await state.clear()
+
+
 @router.callback_query(F.data.startswith("broadcast:send:"))
 async def handle_send_broadcast(callback: CallbackQuery, state: FSMContext) -> None:
     """Обработка финальной отправки рассылки по выбранной аудитории."""
@@ -1056,180 +1233,3 @@ async def handle_chats_page(callback: CallbackQuery, state: FSMContext) -> None:
     # Обновляем сообщение
     await _show_chats_selection(callback.message, state, available_chats, selected_chat_ids, page)
     await callback.answer()
-
-
-@router.callback_query(F.data == "broadcast:send:selected_chats")
-async def handle_send_selected_chats(callback: CallbackQuery, state: FSMContext) -> None:
-    """Отправка рассылки в выбранные чаты."""
-    logger.info("[BROADCAST] handle_send_selected_chats called")
-    
-    if not callback.message:
-        logger.warning("[BROADCAST] handle_send_selected_chats: no callback.message")
-        await callback.answer()
-        return
-    
-    if not await _require_admin(callback):
-        logger.warning("[BROADCAST] handle_send_selected_chats: admin check failed")
-        await callback.answer()
-        return
-    
-    if not await _check_user_owns_broadcast(callback, state):
-        logger.warning("[BROADCAST] handle_send_selected_chats: user ownership check failed")
-        return
-    
-    data = await state.get_data()
-    logger.info(f"[BROADCAST] handle_send_selected_chats: state data keys: {list(data.keys())}")
-    
-    # Получаем выбранные чаты
-    selected_chat_ids: List[int] = data.get("selected_chat_ids", [])
-    logger.info(f"[BROADCAST] handle_send_selected_chats: selected_chat_ids={selected_chat_ids}")
-    
-    if not selected_chat_ids:
-        logger.warning("[BROADCAST] handle_send_selected_chats: no selected chats")
-        await callback.answer("❌ Выберите хотя бы один чат", show_alert=True)
-        return
-    
-    # Проверка наличия данных рассылки
-    broadcast_id = data.get("broadcast_id")
-    text_final = data.get("text_final", "")
-    media_json = data.get("media_json", "")
-    logger.info(f"[BROADCAST] handle_send_selected_chats: text_final={bool(text_final)}, media_json={bool(media_json)}")
-    
-    if not text_final and not media_json:
-        logger.warning("[BROADCAST] handle_send_selected_chats: no broadcast data")
-        await callback.answer("❌ Нет данных рассылки, начните заново /broadcast", show_alert=True)
-        await state.clear()
-        return
-    
-    logger.info("[BROADCAST] handle_send_selected_chats: starting broadcast")
-    await callback.answer("📤 Рассылка начата...")
-    
-    # Получаем данные
-    created_by_user_id = callback.from_user.id if callback.from_user else 0
-    created_by_username = callback.from_user.username if callback.from_user else None
-    text_original = data.get("text_original", "")
-    selected_variant = data.get("selected_variant", "original")
-    
-    # Используем только выбранные чаты
-    users = []
-    chats = selected_chat_ids
-    
-    users_count = len(users)
-    chats_count = len(chats)
-    
-    # Создаём черновик рассылки (если ещё не создан)
-    if not broadcast_id:
-        broadcast_id = await asyncio.to_thread(
-            create_broadcast_draft,
-            created_by_user_id=created_by_user_id,
-            created_by_username=created_by_username,
-            text_original=text_original,
-            media_json=media_json,
-            users_count=users_count,
-            chats_count=chats_count,
-        )
-        await state.update_data(broadcast_id=broadcast_id)
-        
-        # Логируем событие создания
-        await asyncio.to_thread(
-            log_event,
-            user_id=created_by_user_id,
-            username=created_by_username,
-            event="broadcast_created",
-            meta={"broadcast_id": broadcast_id, "mode": "selected_chats"},
-        )
-    
-    # Парсим медиа
-    attachments = []
-    if media_json:
-        try:
-            attachments = json.loads(media_json)
-        except Exception:
-            pass
-    
-    # Отправляем всем получателям
-    sent_ok = 0
-    sent_fail = 0
-    
-    # Семафор на 10 одновременных отправок
-    semaphore = asyncio.Semaphore(10)
-    
-    async def send_to_chat(chat_id: int) -> None:
-        nonlocal sent_ok, sent_fail
-        async with semaphore:
-            try:
-                if text_final or attachments:
-                    if attachments:
-                        await _send_media_to_recipient(callback.message.bot, chat_id, attachments, text_final)
-                    else:
-                        await callback.message.bot.send_message(chat_id=chat_id, text=text_final, parse_mode=ParseMode.HTML)
-                    
-                    await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "ok")
-                    sent_ok += 1
-                else:
-                    await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "fail", "empty message")
-                    sent_fail += 1
-            except TelegramForbiddenError as e:
-                error_text = "blocked"
-                await asyncio.to_thread(mark_chat_failed, chat_id, error_text)
-                await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "fail", error_text)
-                sent_fail += 1
-            except Exception as e:
-                error_text = str(e)[:500]
-                await asyncio.to_thread(mark_chat_failed, chat_id, error_text)
-                await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "fail", error_text)
-                sent_fail += 1
-    
-    # Создаём задачи для всех получателей
-    tasks = []
-    for chat_id in chats:
-        tasks.append(send_to_chat(chat_id))
-    
-    # Ждём завершения всех задач
-    logger.info(f"[BROADCAST] handle_send_selected_chats: sending to {len(tasks)} chats")
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
-    
-    total = sent_ok + sent_fail
-    logger.info(f"[BROADCAST] handle_send_selected_chats: completed. sent_ok={sent_ok}, sent_fail={sent_fail}")
-    
-    # Обновляем статус рассылки
-    await asyncio.to_thread(
-        finalize_broadcast,
-        broadcast_id=broadcast_id,
-        text_final=text_final,
-        status="sent",
-        sent_ok=sent_ok,
-        sent_fail=sent_fail,
-        selected_variant=selected_variant,
-        mode="selected_chats",
-    )
-    
-    # Логируем событие отправки
-    await asyncio.to_thread(
-        log_event,
-        user_id=created_by_user_id,
-        username=created_by_username,
-        event="broadcast_sent",
-        meta={
-            "broadcast_id": broadcast_id,
-            "mode": "selected_chats",
-            "variant": selected_variant,
-            "total": total,
-            "ok": sent_ok,
-            "fail": sent_fail,
-        },
-    )
-    
-    # Отвечаем админу
-    result_text = (
-        f"✅ <b>Рассылка отправлена</b>\n\n"
-        f"📊 Статистика:\n"
-        f"• Всего получателей: {total}\n"
-        f"• Успешно: {sent_ok}\n"
-        f"• Ошибок: {sent_fail}\n\n"
-        f"ID рассылки: <code>{broadcast_id}</code>"
-    )
-    
-    await callback.message.answer(result_text, parse_mode=ParseMode.HTML)
-    await state.clear()
