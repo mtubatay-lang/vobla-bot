@@ -194,6 +194,9 @@ async def _generate_answer_from_chunks(
     question: str,
     chunks: List[Dict[str, Any]],
     conversation_history: List[Dict[str, str]],
+    *,
+    is_first_turn: bool = False,
+    user_name: str = "пользователь",
 ) -> str:
     """Генерирует ответ на основе найденных чанков."""
     try:
@@ -213,9 +216,21 @@ async def _generate_answer_from_chunks(
             f"Фрагмент {i+1}:\n{chunk.get('text', '')}"
             for i, chunk in enumerate(chunks)
         ])
+
+        # Инструкция по приветствию (при первом обращении в диалоге)
+        if is_first_turn:
+            greeting_instruction = (
+                f"ВАЖНО: Это первое обращение пользователя в этой беседе. "
+                f"Приветствуй его по имени ({user_name}) в начале ответа, например: «Привет, {user_name}!» или «Здравствуй, {user_name}!»"
+            )
+        else:
+            greeting_instruction = (
+                "ВАЖНО: Это НЕ первое сообщение в диалоге. НЕ приветствуй пользователя заново, не используй «Привет» или «Здравствуй» в начале."
+            )
         
         system_prompt = (
             "Ты — AI-ассистент корпоративного бота «Воблаbeer». Общайся как живой менеджер поддержки: тепло, ясно, без канцелярита.\n\n"
+            f"{greeting_instruction}\n\n"
             "Стиль:\n"
             "- Пиши на русском, дружелюбно и по делу. Тон: вежливый менеджер в чате.\n"
             "- Не начинай каждый ответ с «Здравствуйте». Приветствие только в первом сообщении диалога или если пользователь сам поздоровался.\n"
@@ -343,6 +358,7 @@ async def process_question_in_group_chat(message: Message) -> None:
         query_text = None  # определим ниже
         conversation_history.append({"role": "user", "text": question})
     
+    searching_msg = None
     try:
         # Определяем запрос для поиска (при ответе на уточнение уже задан query_text)
         if query_text is None:
@@ -350,6 +366,9 @@ async def process_question_in_group_chat(message: Message) -> None:
                 msg.get("text", "") for msg in conversation_history[-3:]
             ])
             query_text = f"{context_text}\n{question}" if context_text else question
+
+        # Промежуточное сообщение о поиске (как в приватном чате)
+        searching_msg = await message.answer("🔍 Ищу в базе знаний...")
         
         # Усиленный RAG: расширение запроса, несколько поисков, re-ranking (как в приватном чате)
         expanded_query = await _expand_query_for_search(query_text)
@@ -406,6 +425,9 @@ async def process_question_in_group_chat(message: Message) -> None:
         
         all_found_chunks.sort(key=lambda x: x.get("score", 0), reverse=True)
         initial_chunks = all_found_chunks[:10]
+
+        if initial_chunks:
+            await searching_msg.edit_text(f"🔍 Нашёл {len(initial_chunks)} фрагментов, анализирую релевантность...")
         
         if initial_chunks:
             try:
@@ -429,17 +451,31 @@ async def process_question_in_group_chat(message: Message) -> None:
         
         # Проверяем, нужно ли эскалировать менеджеру
         if await _should_escalate_to_manager(found_chunks, (sufficient, missing_info)):
+            await searching_msg.delete()
             await _tag_manager_in_chat(message, query_text)
             return
-        
+
         # Если данных недостаточно, задаем уточняющий вопрос
         if not sufficient and missing_info:
+            await searching_msg.delete()
             await _ask_clarification_question(message, query_text, found_chunks, missing_info)
             return
-        
+
+        # Формирую ответ...
+        await searching_msg.edit_text("✍️ Формирую ответ на основе найденной информации...")
+
+        # Первое обращение в диалоге — приветствие в ответе
+        is_first_turn = not any(m.get("role") == "assistant" for m in conversation_history)
+        user_name = (message.from_user.first_name or "пользователь") if message.from_user else "пользователь"
+
         # Генерируем ответ (используем эффективный вопрос)
-        answer = await _generate_answer_from_chunks(query_text, found_chunks, conversation_history)
-        
+        answer = await _generate_answer_from_chunks(
+            query_text, found_chunks, conversation_history,
+            is_first_turn=is_first_turn,
+            user_name=user_name,
+        )
+
+        await searching_msg.delete()
         # Отправляем ответ
         await message.answer(answer)
         
@@ -456,6 +492,11 @@ async def process_question_in_group_chat(message: Message) -> None:
         
     except Exception as e:
         logger.exception(f"[GROUP_CHAT_QA] Ошибка обработки вопроса: {e}")
+        if searching_msg is not None:
+            try:
+                await searching_msg.delete()
+            except Exception:
+                pass
         await message.answer("Извините, произошла ошибка при обработке вопроса.")
 
 
@@ -479,12 +520,13 @@ async def handle_group_chat_message(message: Message):
     if rag_test_chat_id is not None and message.chat.id != rag_test_chat_id:
         return
     
-    # Проверяем через AI, является ли сообщение вопросом
-    is_question = await _is_question(message.text)
-    
-    if not is_question:
-        return
-    
+    # Если пользователь отвечает на уточняющий вопрос — всегда обрабатываем (не проверяем is_question)
+    context = _get_user_context(message.chat.id, message.from_user.id if message.from_user else 0)
+    if context.get("pending_clarification") is None:
+        is_question = await _is_question(message.text)
+        if not is_question:
+            return
+
     # Обрабатываем вопрос
     await process_question_in_group_chat(message)
 
