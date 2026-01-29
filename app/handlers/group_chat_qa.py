@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 from typing import List, Dict, Any, Optional
 
 from aiogram import Router, F
@@ -13,7 +14,9 @@ from app.services.auth_service import find_user_by_telegram_id
 from app.services.qdrant_service import get_qdrant_service
 from app.services.openai_client import create_embedding, client, CHAT_MODEL
 from app.services.metrics_service import alog_event
+from app.services.reranking_service import rerank_chunks_with_llm, select_best_chunks
 from app.config import MANAGER_USERNAMES, get_rag_test_chat_id
+from app.handlers.qa_mode import _expand_query_for_search
 
 logger = logging.getLogger(__name__)
 
@@ -163,7 +166,9 @@ async def _ask_clarification_question(
             temperature=0.3,
         )
         
-        clarification = resp.choices[0].message.content or "Можете уточнить ваш вопрос?"
+        clarification_text = resp.choices[0].message.content or "Можете уточнить ваш вопрос?"
+        intro = "Чтобы ответить точнее, нужны уточнения.\n\n"
+        clarification = intro + clarification_text
         
         await message.answer(clarification)
         
@@ -210,15 +215,27 @@ async def _generate_answer_from_chunks(
         ])
         
         system_prompt = (
-            "Ты помощник корпоративного бота сети магазинов Воблабир.\n"
-            "Твоя задача — ответить на вопрос пользователя на основе предоставленных фрагментов базы знаний.\n\n"
-            "Правила:\n"
-            "1. Используй ТОЛЬКО информацию из предоставленных фрагментов.\n"
-            "2. НЕ придумывай факты, которых нет в фрагментах.\n"
-            "3. Если информации недостаточно, скажи об этом честно.\n"
-            "4. Структурируй ответ: абзацы, списки, если уместно.\n"
-            "5. Будь дружелюбным и понятным.\n"
-            "6. Учитывай контекст предыдущих сообщений в диалоге."
+            "Ты — AI-ассистент корпоративного бота «Воблаbeer». Общайся как живой менеджер поддержки: тепло, ясно, без канцелярита.\n\n"
+            "Стиль:\n"
+            "- Пиши на русском, дружелюбно и по делу. Тон: вежливый менеджер в чате.\n"
+            "- Не начинай каждый ответ с «Здравствуйте». Приветствие только в первом сообщении диалога или если пользователь сам поздоровался.\n"
+            "- Короткие абзацы. Используй списки и шаги (1–2–3), где уместно. 1–3 уместных эмодзи, без перебора.\n"
+            "- Простой вопрос — краткий ответ. Сложный — разбивай на шаги.\n\n"
+            "Структура ответа:\n"
+            "1) Сначала краткий вывод или ответ (если можно дать сразу).\n"
+            "2) Затем конкретные действия/инструкция (что сделать).\n"
+            "3) В конце — один уточняющий вопрос только если он действительно нужен для точности. Если пользователь просит «просто ответ» — не задавай уточнений.\n\n"
+            "Работа с фрагментами базы знаний (критично):\n"
+            "- Отвечай ТОЛЬКО на основе предоставленных фрагментов. НЕ выдумывай факты, цифры, сроки, названия, стандарты.\n"
+            "- Можно перефразировать и улучшать читаемость, но НЕ менять смысл.\n"
+            "- Если информации в фрагментах недостаточно — скажи об этом честно и предложи уточнение или передачу менеджеру.\n"
+            "- Если несколько фрагментов релевантны — объединяй в один связный ответ без противоречий. Если фрагменты противоречат друг другу — скажи об этом и попроси уточнение (контекст/город/точка и т.д.).\n\n"
+            "Формат:\n"
+            "- Без длинных вступлений. Не повторяй вопрос пользователя целиком, если не нужно прояснить.\n"
+            "- Инструкции — шагами 1–2–3. Важное выделяй одной строкой: «Важно: …».\n\n"
+            "Запрещено:\n"
+            "- Придумывать стандарты, требования, юридические/финансовые детали без опоры на фрагменты.\n"
+            "- Длинные полотна текста, капс, спам эмодзи."
         )
         
         user_prompt = (
@@ -314,27 +331,91 @@ async def process_question_in_group_chat(message: Message) -> None:
     # Получаем контекст диалога
     context = _get_user_context(chat_id, user_id)
     conversation_history = context.get("conversation_history", [])
-    
-    # Добавляем вопрос в историю
-    conversation_history.append({"role": "user", "text": question})
+    pending_clarification = context.get("pending_clarification")
+
+    # Ответ на уточнение: объединяем исходный вопрос и уточнение, сбрасываем флаг
+    if pending_clarification:
+        combined = f"Исходный вопрос: {pending_clarification}\nУточнение пользователя: {question}"
+        query_text = combined
+        conversation_history.append({"role": "user", "text": combined})
+        _update_user_context(chat_id, user_id, {"conversation_history": conversation_history, "pending_clarification": None})
+    else:
+        query_text = None  # определим ниже
+        conversation_history.append({"role": "user", "text": question})
     
     try:
-        # Создаем эмбеддинг для вопроса + контекста
-        # Объединяем последние сообщения для контекста
-        context_text = "\n".join([
-            msg.get("text", "") for msg in conversation_history[-3:]
-        ])
-        query_text = f"{context_text}\n{question}" if context_text else question
+        # Определяем запрос для поиска (при ответе на уточнение уже задан query_text)
+        if query_text is None:
+            context_text = "\n".join([
+                msg.get("text", "") for msg in conversation_history[-3:]
+            ])
+            query_text = f"{context_text}\n{question}" if context_text else question
         
-        embedding = await asyncio.to_thread(create_embedding, query_text)
-        
-        # Поиск в Qdrant
+        # Усиленный RAG: расширение запроса, несколько поисков, re-ranking (как в приватном чате)
+        expanded_query = await _expand_query_for_search(query_text)
         qdrant_service = get_qdrant_service()
-        found_chunks = qdrant_service.search(
-            query_embedding=embedding,
+        all_found_chunks = []
+        seen_texts = set()
+        
+        # Поиск 1: расширенный запрос
+        embedding_expanded = await asyncio.to_thread(create_embedding, expanded_query)
+        chunks_expanded = qdrant_service.search_multi_level(
+            query_embedding=embedding_expanded,
             top_k=5,
-            score_threshold=0.7,
+            initial_threshold=0.5,
+            fallback_thresholds=[0.3, 0.1],
         )
+        for chunk in chunks_expanded:
+            t = chunk.get("text", "")
+            if t and t not in seen_texts:
+                all_found_chunks.append(chunk)
+                seen_texts.add(t)
+        
+        # Поиск 2: оригинальный запрос (если отличается)
+        if query_text.strip() != expanded_query.strip() and len(query_text.strip()) > 5:
+            embedding_original = await asyncio.to_thread(create_embedding, query_text)
+            chunks_original = qdrant_service.search_multi_level(
+                query_embedding=embedding_original,
+                top_k=5,
+                initial_threshold=0.5,
+                fallback_thresholds=[0.3, 0.1],
+            )
+            for chunk in chunks_original:
+                t = chunk.get("text", "")
+                if t and t not in seen_texts:
+                    all_found_chunks.append(chunk)
+                    seen_texts.add(t)
+        
+        # Поиск 3: ключевые слова из вопроса
+        keywords = re.findall(r"\b\w{4,}\b", query_text.lower())
+        if keywords and len(keywords) >= 2:
+            keywords_query = " ".join(keywords[:5])
+            if keywords_query != query_text.lower() and len(keywords_query) > 5:
+                embedding_kw = await asyncio.to_thread(create_embedding, keywords_query)
+                chunks_kw = qdrant_service.search_multi_level(
+                    query_embedding=embedding_kw,
+                    top_k=3,
+                    initial_threshold=0.4,
+                    fallback_thresholds=[0.2, 0.1],
+                )
+                for chunk in chunks_kw:
+                    t = chunk.get("text", "")
+                    if t and t not in seen_texts:
+                        all_found_chunks.append(chunk)
+                        seen_texts.add(t)
+        
+        all_found_chunks.sort(key=lambda x: x.get("score", 0), reverse=True)
+        initial_chunks = all_found_chunks[:10]
+        
+        if initial_chunks:
+            try:
+                reranked_chunks = await rerank_chunks_with_llm(query_text, initial_chunks, top_k=8)
+                found_chunks = select_best_chunks(reranked_chunks, max_chunks=5, min_score=0.1)
+            except Exception as e:
+                logger.exception(f"[GROUP_CHAT_QA] Ошибка re-ranking: {e}")
+                found_chunks = initial_chunks[:5]
+        else:
+            found_chunks = []
         
         await alog_event(
             user_id=user_id,
@@ -343,21 +424,21 @@ async def process_question_in_group_chat(message: Message) -> None:
             meta={"question": question, "chunks_found": len(found_chunks)},
         )
         
-        # Проверка достаточности данных
-        sufficient, missing_info = await _check_sufficient_data(question, found_chunks)
+        # Проверка достаточности данных (используем эффективный вопрос: объединённый при ответе на уточнение)
+        sufficient, missing_info = await _check_sufficient_data(query_text, found_chunks)
         
         # Проверяем, нужно ли эскалировать менеджеру
         if await _should_escalate_to_manager(found_chunks, (sufficient, missing_info)):
-            await _tag_manager_in_chat(message, question)
+            await _tag_manager_in_chat(message, query_text)
             return
         
         # Если данных недостаточно, задаем уточняющий вопрос
         if not sufficient and missing_info:
-            await _ask_clarification_question(message, question, found_chunks, missing_info)
+            await _ask_clarification_question(message, query_text, found_chunks, missing_info)
             return
         
-        # Генерируем ответ
-        answer = await _generate_answer_from_chunks(question, found_chunks, conversation_history)
+        # Генерируем ответ (используем эффективный вопрос)
+        answer = await _generate_answer_from_chunks(query_text, found_chunks, conversation_history)
         
         # Отправляем ответ
         await message.answer(answer)
@@ -391,6 +472,11 @@ async def handle_group_chat_message(message: Message):
     
     # Игнорируем сообщения без текста
     if not message.text or not message.text.strip():
+        return
+
+    # Если задан тестовый чат, обрабатываем только его
+    rag_test_chat_id = get_rag_test_chat_id()
+    if rag_test_chat_id is not None and message.chat.id != rag_test_chat_id:
         return
     
     # Проверяем через AI, является ли сообщение вопросом

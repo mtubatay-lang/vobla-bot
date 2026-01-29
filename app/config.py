@@ -103,16 +103,21 @@ CHUNK_ANALYSIS_ENABLED = os.getenv("CHUNK_ANALYSIS_ENABLED", "true").lower() == 
 MAX_CHUNKS_TO_ANALYZE = int(os.getenv("MAX_CHUNKS_TO_ANALYZE", "10"))
 
 # --- RAG Test Chat Settings (для ограничения работы только в тестовом чате) ---
-# Опциональная переменная: если не указана, бот работает во всех чатах
-# Используем функцию-геттер, чтобы Railway не требовал переменную при статическом анализе
+# RAG_TEST_CHAT_ID: не задана — дефолт -1003377597100 (тестовый чат); пустая строка — все чаты
+RAG_TEST_CHAT_ID_DEFAULT = -1003377597100
+
+
 def get_rag_test_chat_id() -> int | None:
-    """Возвращает ID тестового чата для RAG или None, если не указан."""
+    """Возвращает ID тестового чата для RAG или None (все чаты).
+    Не задана env — дефолт RAG_TEST_CHAT_ID_DEFAULT. Пустая env — None (все чаты).
+    """
+    var_name = "RAG_" + "TEST_CHAT_ID"
+    raw = os.environ.get(var_name)
+    if raw is None:
+        return RAG_TEST_CHAT_ID_DEFAULT
+    if not str(raw).strip():
+        return None
     try:
-        # Используем переменную для имени, чтобы Railway не видел строку напрямую
-        var_name = "RAG_" + "TEST_CHAT_ID"
-        _test_chat_id_raw = os.environ.get(var_name)
-        if _test_chat_id_raw:
-            return int(_test_chat_id_raw)
-    except (ValueError, TypeError, KeyError):
-        pass
-    return None
+        return int(raw)
+    except (ValueError, TypeError):
+        return RAG_TEST_CHAT_ID_DEFAULT
