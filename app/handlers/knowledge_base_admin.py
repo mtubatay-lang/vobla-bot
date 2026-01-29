@@ -105,30 +105,36 @@ async def migrate_faq_async(
 ):
     """Асинхронная миграция FAQ из Google Sheets в Qdrant."""
     try:
+        async def progress(stage: str, detail: str) -> None:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=status_msg_id,
+                text=f"⏳ {stage}: {detail}",
+            )
+
         # Обновляем статус
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=status_msg_id,
             text="⏳ Читаю FAQ из Google Sheets...",
         )
-        
-        # Выполняем миграцию
-        result = await migrate_faq_to_qdrant()
-        
+
+        result = await migrate_faq_to_qdrant(progress_callback=progress)
+
         if result["success"]:
-            # Успешная миграция
+            dedup = result.get("deduplicated_groups", 0)
             await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=status_msg_id,
                 text=(
                     f"✅ <b>Миграция завершена успешно</b>\n\n"
                     f"📊 Обработано FAQ: {result['total_faqs']}\n"
-                    f"📦 Создано чанков: {result['total_chunks']}"
+                    f"📋 После дедупликации групп: {dedup}\n"
+                    f"📦 Создано чанков в RAG: {result['total_chunks']}"
                 ),
                 parse_mode="HTML",
             )
-            
-            # Логируем событие
+
             await alog_event(
                 user_id=user_id,
                 username=None,
@@ -136,6 +142,7 @@ async def migrate_faq_async(
                 meta={
                     "total_faqs": result["total_faqs"],
                     "total_chunks": result["total_chunks"],
+                    "deduplicated_groups": dedup,
                 },
             )
         else:

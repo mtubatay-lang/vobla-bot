@@ -3,66 +3,96 @@
 import asyncio
 import logging
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Callable, Awaitable
 
 from app.services.sheets_client import load_faq_rows
 from app.services.chunking_service import semantic_chunk_text, extract_metadata_from_text
 from app.services.context_enrichment import enrich_chunks_batch
 from app.services.openai_client import create_embedding
 from app.services.qdrant_service import get_qdrant_service
+from app.services.faq_llm_processor import deduplicate_and_normalize_faq, improve_faq_entry_llm
 
 logger = logging.getLogger(__name__)
 
 
-async def migrate_faq_to_qdrant() -> Dict[str, Any]:
-    """Мигрирует все FAQ из Google Sheets в Qdrant.
-    
+async def migrate_faq_to_qdrant(
+    progress_callback: Optional[Callable[[str, str], Awaitable[None]]] = None,
+) -> Dict[str, Any]:
+    """Мигрирует все FAQ из Google Sheets в Qdrant (два прохода: дедупликация + улучшение).
+
+    Args:
+        progress_callback: опционально вызывается (stage, detail) для обновления статуса в Telegram.
+
     Returns:
         Словарь с результатами миграции:
-        {
-            "total_faqs": int,
-            "total_chunks": int,
-            "success": bool,
-            "error": str (если была ошибка)
-        }
+        total_faqs, total_chunks, deduplicated_groups, success, error
     """
+    async def _progress(stage: str, detail: str) -> None:
+        if progress_callback:
+            await progress_callback(stage, detail)
+
     try:
-        # 1. Читаем все FAQ из Google Sheets
         logger.info("[FAQ_MIGRATION] Начинаю миграцию FAQ из Google Sheets в Qdrant")
         rows = load_faq_rows()
-        
+
         if not rows:
             logger.warning("[FAQ_MIGRATION] Нет FAQ для миграции")
             return {
                 "total_faqs": 0,
                 "total_chunks": 0,
+                "deduplicated_groups": 0,
                 "success": True,
                 "error": None,
             }
-        
+
         logger.info(f"[FAQ_MIGRATION] Найдено {len(rows)} FAQ записей")
-        
-        # 2. Обрабатываем каждую пару вопрос-ответ
+        await _progress("Читаю FAQ", f"{len(rows)} записей")
+
+        # Проход 1: дедупликация
+        await _progress("Проход 1", "дедупликация вопросов")
+        normalized = await deduplicate_and_normalize_faq(rows)
+        if not normalized and rows:
+            logger.error("[FAQ_MIGRATION] Дедупликация вернула пустой список при непустых rows")
+            return {
+                "total_faqs": len(rows),
+                "total_chunks": 0,
+                "deduplicated_groups": 0,
+                "success": False,
+                "error": "Ошибка дедупликации: пустой результат",
+            }
+        await _progress("Проход 1", f"осталось {len(normalized)} групп")
+
+        # Проход 2: улучшение формулировок
+        await _progress("Проход 2", "улучшение формулировок")
+        improved_entries: List[Dict[str, Any]] = []
+        for entry in normalized:
+            improved = await improve_faq_entry_llm(entry)
+            improved_entries.append(improved)
+
+        # Загрузка: чанкинг, обогащение, эмбеддинги
+        await _progress("Загрузка", "создание чанков и эмбеддингов")
         all_chunks = []
         all_embeddings = []
         timestamp = datetime.now().isoformat()
-        
-        for idx, row in enumerate(rows):
-            question = row.get("question", "").strip()
-            answer = row.get("answer", "").strip()
-            media_json = row.get("media_json", "").strip()
-            
-            if not question or not answer:
+
+        for idx, entry in enumerate(improved_entries):
+            canonical_question = entry.get("canonical_question", "")
+            question_variants = entry.get("question_variants", []) or [canonical_question]
+            improved_answer = entry.get("improved_answer", entry.get("merged_answer", ""))
+            synonym_questions = entry.get("synonym_questions", []) or []
+            media_json = entry.get("media_json", "").strip()
+
+            if not improved_answer:
                 continue
-            
-            # Создаем единый текст: вопрос + ответ
-            full_text = f"Вопрос: {question}\nОтвет: {answer}"
-            
-            # Разбиваем на чанки семантически
+
+            parts = ["Вопрос (варианты): " + ", ".join(question_variants)]
+            if synonym_questions:
+                parts.append("Синонимы: " + ", ".join(synonym_questions))
+            parts.append("Ответ: " + improved_answer)
+            full_text = "\n".join(parts)
+
             chunks = semantic_chunk_text(full_text)
-            
             if not chunks:
-                # Если чанкинг не сработал, создаем один чанк
                 chunks = [{
                     "text": full_text,
                     "chunk_index": 0,
@@ -70,19 +100,16 @@ async def migrate_faq_to_qdrant() -> Dict[str, Any]:
                     "start_char": 0,
                     "end_char": len(full_text),
                 }]
-            
-            # Обогащаем контекстом
-            document_title = f"FAQ: {question[:50]}..." if len(question) > 50 else f"FAQ: {question}"
+
+            document_title = f"FAQ: {canonical_question[:50]}..." if len(canonical_question) > 50 else f"FAQ: {canonical_question}"
             try:
                 enriched_chunks = await enrich_chunks_batch(chunks, document_title)
             except Exception as e:
                 logger.exception(f"[FAQ_MIGRATION] Ошибка обогащения FAQ {idx}: {e}")
                 enriched_chunks = chunks
-            
-            # Извлекаем метаданные из текста
+
             extracted_metadata = extract_metadata_from_text(full_text, source="faq_migration")
-            
-            # Создаем эмбеддинги для каждого чанка
+
             for chunk in enriched_chunks:
                 try:
                     embedding = await asyncio.to_thread(
@@ -90,8 +117,6 @@ async def migrate_faq_to_qdrant() -> Dict[str, Any]:
                         chunk.get("text", ""),
                     )
                     all_embeddings.append(embedding)
-                    
-                    # Подготавливаем метаданные с расширенными полями
                     chunk_with_metadata = {
                         "text": chunk.get("text", ""),
                         "metadata": {
@@ -100,8 +125,9 @@ async def migrate_faq_to_qdrant() -> Dict[str, Any]:
                             "category": extracted_metadata.get("category", "общее"),
                             "tags": extracted_metadata.get("tags", []),
                             "keywords": extracted_metadata.get("keywords", []),
-                            "original_question": question,
-                            "original_answer": answer,
+                            "original_question": canonical_question,
+                            "original_answer": improved_answer,
+                            "question_variants": question_variants,
                             "media_json": media_json,
                             "chunk_index": chunk.get("chunk_index", 0),
                             "total_chunks": chunk.get("total_chunks", len(enriched_chunks)),
@@ -113,31 +139,32 @@ async def migrate_faq_to_qdrant() -> Dict[str, Any]:
                 except Exception as e:
                     logger.exception(f"[FAQ_MIGRATION] Ошибка создания эмбеддинга для FAQ {idx}: {e}")
                     continue
-            
+
             if (idx + 1) % 10 == 0:
-                logger.info(f"[FAQ_MIGRATION] Обработано {idx + 1}/{len(rows)} FAQ")
-        
-        # 3. Загружаем все в Qdrant
+                logger.info(f"[FAQ_MIGRATION] Обработано {idx + 1}/{len(improved_entries)} FAQ")
+
         if all_chunks:
             logger.info(f"[FAQ_MIGRATION] Загружаю {len(all_chunks)} чанков в Qdrant")
             qdrant_service = get_qdrant_service()
             qdrant_service.add_documents(all_chunks, all_embeddings)
-            logger.info(f"[FAQ_MIGRATION] Миграция завершена успешно")
+            logger.info("[FAQ_MIGRATION] Миграция завершена успешно")
         else:
             logger.warning("[FAQ_MIGRATION] Нет чанков для загрузки")
-        
+
         return {
             "total_faqs": len(rows),
             "total_chunks": len(all_chunks),
+            "deduplicated_groups": len(normalized),
             "success": True,
             "error": None,
         }
-        
+
     except Exception as e:
         logger.exception(f"[FAQ_MIGRATION] Ошибка миграции: {e}")
         return {
             "total_faqs": 0,
             "total_chunks": 0,
+            "deduplicated_groups": 0,
             "success": False,
             "error": str(e),
         }
