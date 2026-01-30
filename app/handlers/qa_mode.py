@@ -854,24 +854,41 @@ async def _ask_clarification_question_private(
             )
         else:
             # Режим недостаточности данных ПОСЛЕ поиска
-            chunks_summary = "\n".join([
-                f"- {chunk.get('text', '')[:200]}..."
-                for chunk in found_chunks[:2]
-            ]) if found_chunks else "Фрагменты не найдены"
-            
-            prompt = (
-                f"Пользователь спросил: {question}\n\n"
-                f"Найденные фрагменты:\n{chunks_summary}\n\n"
-                f"Недостающая информация: {missing_info}\n\n"
-                "Сформулируй один развернутый и понятный уточняющий вопрос, который поможет найти нужный ответ.\n"
-                "Вопрос должен быть максимально конкретным и понятным, как будто ты менеджер, который хочет помочь клиенту.\n"
-                "Не используй технические термины, говори простым языком.\n"
-                "Вопрос должен быть полным предложением, не используй сокращения."
-            )
-            
-            system_content = (
-                "Ты дружелюбный менеджер, который помогает клиентам, задавая понятные уточняющие вопросы."
-            )
+            if found_chunks:
+                # Есть чанки: уточнение привязано к конкретным найденным фрагментам (выбор среди них)
+                _max_chunks = 5
+                _chunk_chars = 400
+                chunks_list = "\n\n".join([
+                    f"Фрагмент {i+1} (релевантность: {chunk.get('score', 0):.2f}):\n{chunk.get('text', '')[: _chunk_chars]}"
+                    for i, chunk in enumerate(found_chunks[:_max_chunks])
+                ])
+                missing_note = f"\nСистема отметила: {missing_info[:200]}." if missing_info else ""
+                system_content = (
+                    "Ты дружелюбный менеджер, который формулирует уточняющие вопросы. "
+                    "Твоя задача — по перечисленным ниже фрагментам базы знаний сформулировать один уточняющий вопрос, "
+                    "который поможет пользователю выбрать среди этих конкретных вариантов (или сузить тему к одному из фрагментов). "
+                    "Можно использовать формат «Вас интересует 1) … 2) … или 3) …?» или один короткий вопрос по сути различий. "
+                    "Не придумывай варианты, которых нет в приведённых фрагментах. Вопрос должен быть конкретным и понятным."
+                )
+                prompt = (
+                    f"Вопрос пользователя: {question}\n\n"
+                    f"Найденные фрагменты из базы знаний:\n{chunks_list}\n\n"
+                    f"{missing_note}\n\n"
+                    "Сформулируй один уточняющий вопрос, помогающий выбрать среди этих вариантов."
+                )
+            else:
+                # Нет чанков: уточнение по missing_info
+                prompt = (
+                    f"Пользователь спросил: {question}\n\n"
+                    f"Недостающая информация: {missing_info}\n\n"
+                    "Сформулируй один развернутый и понятный уточняющий вопрос, который поможет найти нужный ответ.\n"
+                    "Вопрос должен быть максимально конкретным и понятным, как будто ты менеджер, который хочет помочь клиенту.\n"
+                    "Не используй технические термины, говори простым языком.\n"
+                    "Вопрос должен быть полным предложением, не используй сокращения."
+                )
+                system_content = (
+                    "Ты дружелюбный менеджер, который помогает клиентам, задавая понятные уточняющие вопросы."
+                )
         
         resp = await asyncio.to_thread(
             client.chat.completions.create,
@@ -1273,13 +1290,16 @@ async def qa_handle_question(message: Message, state: FSMContext):
     # Получаем предыдущие чанки из state (если есть)
     previous_chunks = data.get("qa_found_chunks", [])
     
-    await state.update_data(
-        qa_questions_count=cnt,
-        qa_last_question=q,
-        qa_original_question=original_question,
-        qa_awaiting_clarification=False,  # Сбрасываем флаг после обработки
-        qa_history=history[-8:],  # Ограничиваем историю
-    )
+    update_payload = {
+        "qa_questions_count": cnt,
+        "qa_last_question": q,
+        "qa_original_question": original_question,
+        "qa_awaiting_clarification": False,  # Сбрасываем флаг после обработки
+        "qa_history": history[-8:],  # Ограничиваем историю
+    }
+    if is_new_question or is_first_question:
+        update_payload["qa_clarification_rounds"] = 0
+    await state.update_data(**update_payload)
 
     # Показываем индикатор обработки
     await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
@@ -1483,13 +1503,20 @@ async def qa_handle_question(message: Message, state: FSMContext):
             logger.info(f"[QA_MODE] Решение об эскалации: should_escalate={should_escalate}")
             
             if not should_escalate:
-                # Если данных недостаточно, задаем уточняющий вопрос
+                # Если данных недостаточно — задаем уточняющий вопрос, но не более одного раунда при наличии чанков
+                clarification_rounds = (await state.get_data()).get("qa_clarification_rounds", 0)
                 if not sufficient and missing_info:
-                    logger.info("[QA_MODE] Задаем уточняющий вопрос пользователю")
-                    # Сохраняем найденные чанки для повторного использования
-                    await state.update_data(qa_found_chunks=all_chunks)
-                    await _ask_clarification_question_private(message, q, all_chunks, missing_info, state)
-                    return
+                    if clarification_rounds >= 1 and len(all_chunks) >= 2:
+                        # Уже задавали уточнение и чанков достаточно — отвечаем по лучшим чанкам
+                        sufficient = True
+                        missing_info = None
+                        logger.info("[QA_MODE] Пропускаем повторное уточнение, отвечаем по чанкам")
+                    else:
+                        logger.info("[QA_MODE] Задаем уточняющий вопрос пользователю")
+                        # Сохраняем найденные чанки для повторного использования
+                        await state.update_data(qa_found_chunks=all_chunks, qa_clarification_rounds=clarification_rounds + 1)
+                        await _ask_clarification_question_private(message, q, all_chunks, missing_info, state)
+                        return
                 
                 # Извлекаем темы из истории для контекста
                 topics_summary = await build_topic_summary(history)

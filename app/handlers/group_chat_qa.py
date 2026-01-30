@@ -45,6 +45,7 @@ def _get_user_context(chat_id: int, user_id: int) -> Dict[str, Any]:
         _conversation_contexts[key] = {
             "conversation_history": [],
             "pending_clarification": None,
+            "clarification_rounds": 0,
         }
     return _conversation_contexts[key]
 
@@ -136,49 +137,72 @@ async def _check_sufficient_data(
         return (True, None)
 
 
+# Константы для уточнений по чанкам
+CLARIFICATION_MAX_CHUNKS = 5
+CLARIFICATION_CHUNK_CHARS = 400
+
+
 async def _ask_clarification_question(
     message: Message,
     question: str,
     found_chunks: List[Dict[str, Any]],
     missing_info: str,
 ) -> None:
-    """Задает уточняющий вопрос пользователю."""
+    """Задает уточняющий вопрос пользователю. При наличии чанков — помогает выбрать среди них."""
     try:
-        chunks_summary = "\n".join([
-            f"- {chunk.get('text', '')[:200]}..."
-            for chunk in found_chunks[:2]
-        ])
-        
-        prompt = (
-            f"Пользователь спросил: {question}\n\n"
-            f"Найденные фрагменты:\n{chunks_summary}\n\n"
-            f"Недостающая информация: {missing_info}\n\n"
-            "Сформулируй один уточняющий вопрос, который поможет найти нужный ответ.\n"
-            "Вопрос должен быть конкретным и понятным."
-        )
-        
+        if found_chunks:
+            # Есть чанки: уточнение привязано к конкретным найденным фрагментам
+            chunks_list = "\n\n".join([
+                f"Фрагмент {i+1} (релевантность: {chunk.get('score', 0):.2f}):\n{chunk.get('text', '')[:CLARIFICATION_CHUNK_CHARS]}"
+                for i, chunk in enumerate(found_chunks[:CLARIFICATION_MAX_CHUNKS])
+            ])
+            missing_note = f"\nСистема отметила: {missing_info[:200]}." if missing_info else ""
+            system_content = (
+                "Ты помощник, который формулирует уточняющие вопросы. "
+                "Твоя задача — по перечисленным ниже фрагментам базы знаний сформулировать один уточняющий вопрос, "
+                "который поможет пользователю выбрать среди этих конкретных вариантов (или сузить тему к одному из фрагментов). "
+                "Можно использовать формат «Вас интересует 1) … 2) … или 3) …?» или один короткий вопрос по сути различий. "
+                "Не придумывай варианты, которых нет в приведённых фрагментах. Вопрос должен быть конкретным и понятным."
+            )
+            user_content = (
+                f"Вопрос пользователя: {question}\n\n"
+                f"Найденные фрагменты из базы знаний:\n{chunks_list}\n\n"
+                f"{missing_note}\n\n"
+                "Сформулируй один уточняющий вопрос, помогающий выбрать среди этих вариантов."
+            )
+        else:
+            # Нет чанков: текущая логика по missing_info
+            prompt = (
+                f"Пользователь спросил: {question}\n\n"
+                f"Недостающая информация: {missing_info}\n\n"
+                "Сформулируй один уточняющий вопрос, который поможет найти нужный ответ.\n"
+                "Вопрос должен быть конкретным и понятным."
+            )
+            system_content = "Ты помощник, который формулирует уточняющие вопросы."
+            user_content = prompt
+
         resp = client.chat.completions.create(
             model=CHAT_MODEL,
             messages=[
-                {"role": "system", "content": "Ты помощник, который формулирует уточняющие вопросы."},
-                {"role": "user", "content": prompt},
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": user_content},
             ],
             temperature=0.3,
         )
-        
+
         clarification_text = resp.choices[0].message.content or "Можете уточнить ваш вопрос?"
         intro = "Чтобы ответить точнее, нужны уточнения.\n\n"
         clarification = intro + clarification_text
-        
+
         await message.answer(clarification)
-        
+
         # Сохраняем в контекст
         _update_user_context(
             message.chat.id,
             message.from_user.id if message.from_user else 0,
             {"pending_clarification": question},
         )
-        
+
         await alog_event(
             user_id=message.from_user.id if message.from_user else None,
             username=message.from_user.username if message.from_user else None,
@@ -357,6 +381,8 @@ async def process_question_in_group_chat(message: Message) -> None:
     else:
         query_text = None  # определим ниже
         conversation_history.append({"role": "user", "text": question})
+        # Новый вопрос — сбрасываем счётчик раундов уточнений
+        _update_user_context(chat_id, user_id, {"clarification_rounds": 0})
     
     searching_msg = None
     try:
@@ -455,11 +481,18 @@ async def process_question_in_group_chat(message: Message) -> None:
             await _tag_manager_in_chat(message, query_text)
             return
 
-        # Если данных недостаточно, задаем уточняющий вопрос
+        # Если данных недостаточно — задаем уточняющий вопрос, но не более одного раунда при наличии чанков
+        clarification_rounds = context.get("clarification_rounds", 0)
         if not sufficient and missing_info:
-            await searching_msg.delete()
-            await _ask_clarification_question(message, query_text, found_chunks, missing_info)
-            return
+            if clarification_rounds >= 1 and len(found_chunks) >= 2:
+                # Уже задавали уточнение и чанков достаточно — отвечаем по лучшим чанкам
+                sufficient = True
+                missing_info = None
+            else:
+                await searching_msg.delete()
+                await _ask_clarification_question(message, query_text, found_chunks, missing_info)
+                _update_user_context(chat_id, user_id, {"clarification_rounds": clarification_rounds + 1})
+                return
 
         # Формирую ответ...
         await searching_msg.edit_text("✍️ Формирую ответ на основе найденной информации...")
