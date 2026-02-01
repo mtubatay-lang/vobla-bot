@@ -172,6 +172,83 @@ async def is_follow_up_question(
         return False
 
 
+async def detect_clarification_response_vs_new_question(
+    user_message: str,
+    last_bot_message: str,
+    original_question: str,
+) -> str:
+    """Определяет: ответ на уточняющий вопрос или пользователь задаёт новый вопрос.
+
+    Returns:
+        "clarification_response" | "new_question"
+    """
+    if not user_message.strip() or not last_bot_message.strip():
+        return "clarification_response"
+    try:
+        prompt = (
+            f"Бот задал уточняющий вопрос к теме: {original_question[:300]}\n\n"
+            f"Уточняющий вопрос бота: {last_bot_message[:400]}\n\n"
+            f"Сообщение пользователя: {user_message}\n\n"
+            "Это ответ на уточнение или пользователь перешёл к новому/другому вопросу? "
+            "Ответь одним словом: clarification_response или new_question."
+        )
+        resp = await asyncio.to_thread(
+            client.chat.completions.create,
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": "Ты помощник. Определи тип сообщения: ответ на уточнение или новый вопрос. Ответь только clarification_response или new_question."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.0,
+            max_tokens=20,
+        )
+        answer = (resp.choices[0].message.content or "").strip().lower()
+        if "new_question" in answer or "new" in answer.split():
+            logger.info("[QA_MODE] LLM: clarification_response vs new_question -> new_question")
+            return "new_question"
+        logger.info("[QA_MODE] LLM: clarification_response vs new_question -> clarification_response")
+        return "clarification_response"
+    except Exception as e:
+        logger.exception(f"[QA_MODE] Ошибка detect_clarification_response_vs_new_question, fallback clarification_response: {e}")
+        return "clarification_response"
+
+
+async def detect_new_question_vs_follow_up(user_message: str, last_bot_answer: str) -> str:
+    """Определяет: новый самостоятельный вопрос или реакция/уточнение к предыдущему ответу.
+
+    Returns:
+        "new_question" | "follow_up"
+    """
+    if not user_message.strip() or not last_bot_answer.strip():
+        return "new_question"
+    try:
+        prompt = (
+            f"Последний ответ бота: {last_bot_answer[:400]}\n\n"
+            f"Новое сообщение пользователя: {user_message}\n\n"
+            "Это новый самостоятельный вопрос (другая тема или явный новый запрос) или реакция/уточнение к предыдущему ответу "
+            "(спасибо, ок, «а как…», «подробнее» и т.п.)? Ответь одним словом: new_question или follow_up."
+        )
+        resp = await asyncio.to_thread(
+            client.chat.completions.create,
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": "Ты помощник. Определи: новый вопрос или реакция/уточнение к ответу. Ответь только new_question или follow_up."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.0,
+            max_tokens=10,
+        )
+        answer = (resp.choices[0].message.content or "").strip().lower()
+        if "follow_up" in answer or "follow" in answer:
+            logger.info("[QA_MODE] LLM: new_question vs follow_up -> follow_up")
+            return "follow_up"
+        logger.info("[QA_MODE] LLM: new_question vs follow_up -> new_question")
+        return "new_question"
+    except Exception as e:
+        logger.exception(f"[QA_MODE] Ошибка detect_new_question_vs_follow_up, fallback new_question: {e}")
+        return "new_question"
+
+
 async def detect_topic_shift(
     current_question: str,
     conversation_history: List[Dict[str, Any]],
@@ -1229,15 +1306,26 @@ async def qa_handle_question(message: Message, state: FSMContext):
         if msg.get("role") == "assistant":
             last_assistant_msg = msg.get("text", "")
             break
-    
+
+    # LLM: при ожидании ответа на уточнение — ответ на уточнение или новый вопрос?
+    if not is_first_question and awaiting_clarification and last_assistant_msg and original_question:
+        clarification_vs_new = await detect_clarification_response_vs_new_question(q, last_assistant_msg, original_question)
+        if clarification_vs_new == "new_question":
+            is_clarification_response = False
+            original_question = q
+            awaiting_clarification = False
+            logger.info(f"[QA_MODE] LLM: пользователь задал новый вопрос вместо ответа на уточнение: '{q[:50]}...'")
+
     is_new_question = False
-    if last_assistant_msg and not is_first_question:
-        # Если последний ответ бота НЕ был уточняющим (не содержит ключевой фразы),
-        # значит текущее сообщение - это новый вопрос
-        if "уточнения" not in last_assistant_msg.lower():
-            is_new_question = True
-            logger.info("[QA_MODE] Определен новый вопрос (последний ответ был полным)")
-    
+    # LLM: после полного ответа бота — новый вопрос или реакция/уточнение к ответу?
+    if last_assistant_msg and not is_first_question and "уточнения" not in last_assistant_msg.lower() and not is_clarification_response:
+        new_vs_follow = await detect_new_question_vs_follow_up(q, last_assistant_msg)
+        is_new_question = new_vs_follow == "new_question"
+        if is_new_question:
+            logger.info(f"[QA_MODE] Определен новый вопрос (LLM): '{q[:50]}...'")
+        else:
+            logger.info(f"[QA_MODE] Определена реакция/follow-up к предыдущему ответу (LLM): '{q[:50]}...'")
+
     # Если это новый вопрос (не первый и не уточнение), обновляем исходный вопрос
     if is_new_question and not is_first_question:
         original_question = q
