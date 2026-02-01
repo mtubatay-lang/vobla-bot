@@ -16,7 +16,7 @@ from app.services.openai_client import create_embedding, client, CHAT_MODEL
 from app.services.metrics_service import alog_event
 from app.services.reranking_service import rerank_chunks_with_llm, select_best_chunks
 from app.config import MANAGER_USERNAMES, get_rag_test_chat_id
-from app.handlers.qa_mode import _expand_query_for_search
+from app.handlers.qa_mode import _expand_query_for_search, detect_clarification_response_vs_new_question
 
 logger = logging.getLogger(__name__)
 
@@ -372,12 +372,28 @@ async def process_question_in_group_chat(message: Message) -> None:
     conversation_history = context.get("conversation_history", [])
     pending_clarification = context.get("pending_clarification")
 
-    # Ответ на уточнение: объединяем исходный вопрос и уточнение, сбрасываем флаг
+    # При ожидании ответа на уточнение — LLM: ответ на уточнение или новый вопрос?
     if pending_clarification:
-        combined = f"Исходный вопрос: {pending_clarification}\nУточнение пользователя: {question}"
-        query_text = combined
-        conversation_history.append({"role": "user", "text": combined})
-        _update_user_context(chat_id, user_id, {"conversation_history": conversation_history, "pending_clarification": None})
+        last_assistant_msg = ""
+        for msg in reversed(conversation_history):
+            if msg.get("role") == "assistant":
+                last_assistant_msg = msg.get("text", "")
+                break
+        clarification_vs_new = await detect_clarification_response_vs_new_question(
+            question, last_assistant_msg, pending_clarification
+        )
+        if clarification_vs_new == "new_question":
+            # Новый вопрос — не объединяем, обрабатываем только текущее сообщение
+            logger.info("[GROUP_CHAT_QA] LLM: новый вопрос вместо ответа на уточнение, обрабатываем отдельно")
+            query_text = question
+            conversation_history.append({"role": "user", "text": question})
+            _update_user_context(chat_id, user_id, {"conversation_history": conversation_history, "pending_clarification": None, "clarification_rounds": 0})
+        else:
+            # Ответ на уточнение — объединяем как раньше
+            combined = f"Исходный вопрос: {pending_clarification}\nУточнение пользователя: {question}"
+            query_text = combined
+            conversation_history.append({"role": "user", "text": combined})
+            _update_user_context(chat_id, user_id, {"conversation_history": conversation_history, "pending_clarification": None})
     else:
         query_text = None  # определим ниже
         conversation_history.append({"role": "user", "text": question})
