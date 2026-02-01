@@ -559,8 +559,8 @@ async def handle_test_self(callback: CallbackQuery, state: FSMContext) -> None:
         if media_json:
             try:
                 attachments = json.loads(media_json)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("[BROADCAST] Парсинг media_json при тесте: %s", e, exc_info=True)
         
         # Отправляем тест
         if attachments:
@@ -675,8 +675,8 @@ async def handle_send_selected_chats(callback: CallbackQuery, state: FSMContext)
     if media_json:
         try:
             attachments = json.loads(media_json)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[BROADCAST] Парсинг media_json (send selected_chats): %s", e, exc_info=True)
     
     # Отправляем всем получателям
     sent_ok = 0
@@ -855,8 +855,8 @@ async def _show_regions_selection(
                 reply_markup=keyboard,
                 parse_mode=ParseMode.HTML
             )
-        except Exception:
-            # Если не удалось обновить, отправляем новое
+        except Exception as e:
+            logger.warning("[BROADCAST] edit_message_text (regions) не удалось, отправляем новое: %s", e, exc_info=True)
             sent_msg = await message.answer(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
             await state.update_data(regions_selection_message_id=sent_msg.message_id)
     else:
@@ -958,8 +958,8 @@ async def handle_send_selected_regions(callback: CallbackQuery, state: FSMContex
     if media_json:
         try:
             attachments = json.loads(media_json)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[BROADCAST] Парсинг media_json (send selected_regions): %s", e, exc_info=True)
     
     # Отправляем всем получателям
     sent_ok = 0
@@ -1158,8 +1158,8 @@ async def handle_send_broadcast(callback: CallbackQuery, state: FSMContext) -> N
     if media_json:
         try:
             attachments = json.loads(media_json)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[BROADCAST] Парсинг media_json (send users/chats): %s", e, exc_info=True)
     
     # Отправляем всем получателям
     sent_ok = 0
@@ -1508,8 +1508,8 @@ async def _show_chats_selection(
                 reply_markup=keyboard,
                 parse_mode=ParseMode.HTML
             )
-        except Exception:
-            # Если не удалось обновить, отправляем новое
+        except Exception as e:
+            logger.warning("[BROADCAST] edit_message_text (selection) не удалось, отправляем новое: %s", e, exc_info=True)
             sent_msg = await message.answer(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
             await state.update_data(selection_message_id=sent_msg.message_id)
     else:

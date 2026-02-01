@@ -1,45 +1,50 @@
 """Клиент для чтения данных из Google Sheets."""
 
 import json
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 import gspread
 from google.oauth2.service_account import Credentials
 
 from app.config import GOOGLE_SERVICE_ACCOUNT_JSON, SHEET_ID, SHEET_RANGE
 
+# Синглтоны: один клиент с полным scope (чтение и запись), один только для чтения
+_sheets_client_rw: Optional[gspread.Client] = None
+_sheets_client_ro: Optional[gspread.Client] = None
+
 
 def _get_client() -> gspread.Client:
-    """Создает gspread-клиент из JSON сервисного аккаунта."""
+    """Возвращает gspread-клиент с правами только на чтение (singleton)."""
+    global _sheets_client_ro
+    if _sheets_client_ro is not None:
+        return _sheets_client_ro
     if not GOOGLE_SERVICE_ACCOUNT_JSON:
         raise ValueError(
             "GOOGLE_SERVICE_ACCOUNT_JSON не задан. "
             "Добавь JSON сервисного аккаунта в переменные окружения."
         )
-
     info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
-
     scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
     creds = Credentials.from_service_account_info(info, scopes=scopes)
-
-    return gspread.authorize(creds)
+    _sheets_client_ro = gspread.authorize(creds)
+    return _sheets_client_ro
 
 
 def get_sheets_client() -> gspread.Client:
-    """Публичная функция для получения gspread-клиента с правами на чтение и запись."""
+    """Возвращает gspread-клиент с правами на чтение и запись (singleton)."""
+    global _sheets_client_rw
+    if _sheets_client_rw is not None:
+        return _sheets_client_rw
     if not GOOGLE_SERVICE_ACCOUNT_JSON:
         raise ValueError(
             "GOOGLE_SERVICE_ACCOUNT_JSON не задан. "
             "Добавь JSON сервисного аккаунта в переменные окружения."
         )
-
     info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
-
-    # Права на чтение и запись (нужно для auth_service)
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     creds = Credentials.from_service_account_info(info, scopes=scopes)
-
-    return gspread.authorize(creds)
+    _sheets_client_rw = gspread.authorize(creds)
+    return _sheets_client_rw
 
 
 def load_faq_rows() -> List[Dict[str, str]]:

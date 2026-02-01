@@ -11,10 +11,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional, List
 
+from cachetools import TTLCache
+
 from app.config import USERS_SHEET_ID
 from app.services.sheets_client import get_sheets_client  # уже есть в проекте
 
 USERS_SHEET_NAME = "Пользователи"
+
+# Кэш списка пользователей: TTL 5 минут, при bind_telegram_id инвалидируется
+_users_cache: TTLCache = TTLCache(maxsize=1, ttl=300)
+_USERS_CACHE_KEY = "users"
 
 
 @dataclass
@@ -61,8 +67,13 @@ def _parse_bool(value) -> bool:
 def load_users() -> List[User]:
     """
     Загружает всех пользователей из листа 'Пользователи'
-    и возвращает список User.
+    и возвращает список User. Результат кэшируется на 5 минут.
     """
+    try:
+        return _users_cache[_USERS_CACHE_KEY]
+    except KeyError:
+        pass
+
     ws = _get_worksheet()
 
     # get_all_records читает всю таблицу, первая строка — заголовки
@@ -97,6 +108,7 @@ def load_users() -> List[User]:
         )
         users.append(user)
 
+    _users_cache[_USERS_CACHE_KEY] = users
     return users
 
 
@@ -123,6 +135,7 @@ def find_user_by_code(code: str) -> Optional[User]:
 def bind_telegram_id(user: User, telegram_id: int) -> None:
     """
     Привязывает telegram_id к пользователю и проставляет used_at (дата/время).
+    Инвалидирует кэш пользователей, чтобы при следующем запросе подтянуть свежие данные.
     """
     ws = _get_worksheet()
 
@@ -132,4 +145,6 @@ def bind_telegram_id(user: User, telegram_id: int) -> None:
     # колонка 7 — used_at
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     ws.update_cell(user.row, 7, now_str)
+
+    _users_cache.pop(_USERS_CACHE_KEY, None)
 

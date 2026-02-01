@@ -7,19 +7,25 @@ from typing import List, Dict, Optional
 
 from openai import OpenAI
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+from app.config import (
+    OPENAI_API_KEY,
+    OPENAI_TIMEOUT,
+    OPENAI_MODEL,
+    OPENAI_EMBEDDING_MODEL,
+)
+
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY не задан в переменных окружения")
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+client = OpenAI(api_key=OPENAI_API_KEY, timeout=OPENAI_TIMEOUT)
 
 
 # -----------------------------
 #     ЭМБЕДДИНГИ
 # -----------------------------
 
-EMBEDDING_MODEL = "text-embedding-3-small"
-CHAT_MODEL = "gpt-4o-mini"  # можно заменить на другой, если нужно
+EMBEDDING_MODEL = OPENAI_EMBEDDING_MODEL
+CHAT_MODEL = OPENAI_MODEL
 
 
 def create_embedding(text: str) -> List[float]:
@@ -293,12 +299,12 @@ def improve_broadcast_text(text: str) -> Dict[str, str]:
             response_format={"type": "json_object"},
         )
         
-        result_text = resp.choices[0].message.content.strip()
+        result_text = (resp.choices[0].message.content or "").strip()
+        if not result_text:
+            return {"fixed": text, "suggested": text}
         result_json = json.loads(result_text)
-        
         fixed = result_json.get("fixed", text)
         suggested = result_json.get("suggested", text)
-        
         return {
             "fixed": fixed if fixed else text,
             "suggested": suggested if suggested else text,

@@ -78,10 +78,14 @@ RECIPIENTS_CHATS_TAB = os.getenv("RECIPIENTS_CHATS_TAB", "recipients_chats")
 BROADCASTS_TAB = os.getenv("BROADCASTS_TAB", "broadcasts")
 BROADCAST_LOGS_TAB = os.getenv("BROADCAST_LOGS_TAB", "broadcast_logs")
 
+# --- OpenAI timeouts (seconds) ---
+OPENAI_TIMEOUT = float(os.getenv("OPENAI_TIMEOUT", "60"))
+
 # --- Qdrant Vector Database ---
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", "")
 QDRANT_COLLECTION_NAME = os.getenv("QDRANT_COLLECTION_NAME", "knowledge_base")
+QDRANT_TIMEOUT = float(os.getenv("QDRANT_TIMEOUT", "30"))
 
 # --- Knowledge Base Settings ---
 _manager_usernames_raw = os.getenv("MANAGER_USERNAMES", "")
@@ -111,8 +115,7 @@ def get_rag_test_chat_id() -> int | None:
     """Возвращает ID тестового чата для RAG или None (все чаты).
     Не задана env — дефолт RAG_TEST_CHAT_ID_DEFAULT. Пустая env — None (все чаты).
     """
-    var_name = "RAG_" + "TEST_CHAT_ID"
-    raw = os.environ.get(var_name)
+    raw = os.environ.get("RAG_TEST_CHAT_ID")
     if raw is None:
         return RAG_TEST_CHAT_ID_DEFAULT
     if not str(raw).strip():

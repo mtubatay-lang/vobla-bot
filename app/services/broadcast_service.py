@@ -1,9 +1,12 @@
 """Сервис для работы с рассылками в Google Sheets."""
 
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from app.config import STATS_SHEET_ID, BROADCASTS_TAB, BROADCAST_LOGS_TAB, RECIPIENTS_USERS_TAB, RECIPIENTS_CHATS_TAB
 from app.services.sheets_client import get_sheets_client
@@ -131,9 +134,10 @@ def finalize_broadcast(
         if not cell:
             return
         row_num = cell.row
-    except Exception:
+    except Exception as e:
+        logger.warning("[BROADCAST_SERVICE] finalize_broadcast: не удалось найти broadcast_id в таблице: %s", e, exc_info=True)
         return
-    
+
     updates = {}
     # Обновляем text (финальный текст)
     if "text" in header_map:
@@ -261,7 +265,8 @@ def read_active_recipients_users() -> List[int]:
                 continue
         
         return result
-    except Exception:
+    except Exception as e:
+        logger.warning("[BROADCAST_SERVICE] read_active_recipients_users: %s", e, exc_info=True)
         return []
 
 
@@ -313,7 +318,8 @@ def read_active_recipients_chats() -> List[int]:
                 continue
         
         return result
-    except Exception:
+    except Exception as e:
+        logger.warning("[BROADCAST_SERVICE] read_active_recipients_chats: %s", e, exc_info=True)
         return []
 
 
@@ -383,7 +389,8 @@ def read_active_recipients_chats_with_names() -> List[Dict[str, Any]]:
                 continue
         
         return result
-    except Exception:
+    except Exception as e:
+        logger.warning("[BROADCAST_SERVICE] read_active_recipients_chats_with_names: %s", e, exc_info=True)
         return []
 
 
@@ -442,7 +449,8 @@ def read_active_regions() -> List[str]:
                 regions_set.add(region)
         
         return sorted(list(regions_set))
-    except Exception:
+    except Exception as e:
+        logger.warning("[BROADCAST_SERVICE] read_active_regions: %s", e, exc_info=True)
         return []
 
 
@@ -511,7 +519,8 @@ def read_chats_by_regions(regions: List[str]) -> List[int]:
                     continue
         
         return result
-    except Exception:
+    except Exception as e:
+        logger.warning("[BROADCAST_SERVICE] read_chats_by_regions: %s", e, exc_info=True)
         return []
 
 
@@ -533,25 +542,26 @@ def mark_user_failed(user_id: int, error_text: str) -> None:
             if not cell:
                 return
             row_num = cell.row
-        except Exception:
+        except Exception as e:
+            logger.warning("[BROADCAST_SERVICE] mark_user_failed: не удалось найти user_id в таблице: %s", e, exc_info=True)
             return
-        
+
         updates = {}
-        
+
         # Если ошибка 403/blocked → is_active=0
         if "blocked" in error_text.lower() or "forbidden" in error_text.lower():
             if "is_active" in header_map:
                 updates["is_active"] = "0"
-        
+
         # Всегда обновляем last_error
         if "last_error" in header_map:
             updates["last_error"] = error_text[:500]  # Ограничиваем длину
-        
+
         for key, value in updates.items():
             col = header_map[key]
             ws.update_cell(row_num, col, value)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("[BROADCAST_SERVICE] mark_user_failed: %s", e, exc_info=True)
 
 
 def mark_chat_failed(chat_id: int, error_text: str) -> None:
@@ -572,23 +582,24 @@ def mark_chat_failed(chat_id: int, error_text: str) -> None:
             if not cell:
                 return
             row_num = cell.row
-        except Exception:
+        except Exception as e:
+            logger.warning("[BROADCAST_SERVICE] mark_chat_failed: не удалось найти chat_id в таблице: %s", e, exc_info=True)
             return
-        
+
         updates = {}
-        
+
         # Если ошибка 403/blocked → is_active=0
         if "blocked" in error_text.lower() or "forbidden" in error_text.lower():
             if "is_active" in header_map:
                 updates["is_active"] = "0"
-        
+
         # Всегда обновляем last_error
         if "last_error" in header_map:
             updates["last_error"] = error_text[:500]  # Ограничиваем длину
-        
+
         for key, value in updates.items():
             col = header_map[key]
             ws.update_cell(row_num, col, value)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("[BROADCAST_SERVICE] mark_chat_failed: %s", e, exc_info=True)
 

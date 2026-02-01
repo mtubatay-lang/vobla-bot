@@ -41,11 +41,6 @@ async def main() -> None:
     )
     logger = logging.getLogger(__name__)
 
-    if not BOT_TOKEN:
-        raise RuntimeError(
-            "BOT_TOKEN не задан. Проверь .env или переменные окружения на сервере."
-        )
-
     # --- Создаём бота и диспетчер ---
     bot = Bot(
         token=BOT_TOKEN,

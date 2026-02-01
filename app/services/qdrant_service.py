@@ -8,7 +8,7 @@ from datetime import datetime
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue, Query
 
-from app.config import QDRANT_URL, QDRANT_API_KEY, QDRANT_COLLECTION_NAME
+from app.config import QDRANT_URL, QDRANT_API_KEY, QDRANT_COLLECTION_NAME, QDRANT_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
@@ -23,9 +23,10 @@ class QdrantService:
                 self.client = QdrantClient(
                     url=QDRANT_URL,
                     api_key=QDRANT_API_KEY,
+                    timeout=QDRANT_TIMEOUT,
                 )
             else:
-                self.client = QdrantClient(url=QDRANT_URL)
+                self.client = QdrantClient(url=QDRANT_URL, timeout=QDRANT_TIMEOUT)
             
             self.collection_name = QDRANT_COLLECTION_NAME
             self._ensure_collection()
@@ -155,29 +156,38 @@ class QdrantService:
                 "score": float,
             }
         """
-        try:
-            # Строим фильтр, если указан source
-            query_filter = None
-            if source_filter:
-                query_filter = Filter(
-                    must=[
-                        FieldCondition(
-                            key="source",
-                            match=MatchValue(value=source_filter),
-                        )
-                    ]
-                )
-            
-            # Используем новый API query_points вместо устаревшего search
-            # Передаем query_embedding напрямую как список чисел
-            results = self.client.query_points(
-                collection_name=self.collection_name,
-                query=query_embedding,  # Передаем список напрямую
-                limit=top_k,
-                score_threshold=score_threshold,
-                query_filter=query_filter,
+        query_filter = None
+        if source_filter:
+            query_filter = Filter(
+                must=[
+                    FieldCondition(
+                        key="source",
+                        match=MatchValue(value=source_filter),
+                    )
+                ]
             )
-            
+
+        for attempt in range(2):
+            try:
+                # Используем новый API query_points вместо устаревшего search
+                results = self.client.query_points(
+                    collection_name=self.collection_name,
+                    query=query_embedding,
+                    limit=top_k,
+                    score_threshold=score_threshold,
+                    query_filter=query_filter,
+                )
+                break
+            except Exception as e:
+                if attempt == 0:
+                    logger.warning(f"[QDRANT] Ошибка поиска (попытка {attempt + 1}/2): {e}, повтор...")
+                else:
+                    logger.exception(f"[QDRANT] Ошибка поиска после повтора: {e}")
+                    return []
+        else:
+            return []
+
+        try:
             # Преобразуем результаты в удобный формат
             # query_points возвращает объект QueryResult, нужно получить points
             formatted_results = []

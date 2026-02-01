@@ -1,10 +1,13 @@
 """Сервис для работы с получателями рассылок в Google Sheets."""
 
+import logging
 from datetime import datetime, timezone
 from typing import Dict, Optional
 
 from app.config import STATS_SHEET_ID, RECIPIENTS_USERS_TAB, RECIPIENTS_CHATS_TAB
 from app.services.sheets_client import get_sheets_client
+
+logger = logging.getLogger(__name__)
 
 
 def _utc_now_iso() -> str:
@@ -36,8 +39,8 @@ def _find_row_by_value(ws, col: int, value: str) -> Optional[int]:
         cell = ws.find(str(value), in_column=col)
         if cell:
             return cell.row
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("[BROADCAST_RECIPIENTS] _find_row_by_value: %s", e, exc_info=True)
     return None
 
 
@@ -116,9 +119,8 @@ def upsert_user_recipient(user_id: int, username: Optional[str] = None, full_nam
                     row.append("")
             
             ws.append_row(row, value_input_option="RAW")
-    except Exception:
-        # Тихий выход при ошибках (чтобы не ломать основной функционал)
-        pass
+    except Exception as e:
+        logger.warning("[BROADCAST_RECIPIENTS] upsert_user_recipient: %s", e, exc_info=True)
 
 
 def upsert_chat_recipient(chat_id: int, chat_type: str, title: Optional[str] = None, username: Optional[str] = None) -> None:
@@ -200,7 +202,6 @@ def upsert_chat_recipient(chat_id: int, chat_type: str, title: Optional[str] = N
                     row.append("")
             
             ws.append_row(row, value_input_option="RAW")
-    except Exception:
-        # Тихий выход при ошибках (чтобы не ломать основной функционал)
-        pass
+    except Exception as e:
+        logger.warning("[BROADCAST_RECIPIENTS] upsert_chat_recipient: %s", e, exc_info=True)
 

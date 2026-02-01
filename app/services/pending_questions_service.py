@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 from aiogram.enums import ParseMode
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
@@ -22,7 +25,8 @@ def _manager_chat_id_int() -> Optional[int]:
         return None
     try:
         return int(MANAGER_CHAT_ID)
-    except Exception:
+    except Exception as e:
+        logger.warning("[PENDING_QUESTIONS] _manager_chat_id_int: %s", e, exc_info=True)
         return None
 
 
@@ -96,7 +100,8 @@ def find_ticket_row(ticket_id: str) -> Optional[int]:
         if cell.col != 1:
             return None
         return cell.row
-    except Exception:
+    except Exception as e:
+        logger.warning("[PENDING_QUESTIONS] find_ticket_row(%s): %s", ticket_id, e, exc_info=True)
         return None
 
 

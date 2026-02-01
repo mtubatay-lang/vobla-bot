@@ -9,6 +9,7 @@ from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message
+from cachetools import TTLCache
 
 from app.services.auth_service import find_user_by_telegram_id
 from app.services.qdrant_service import get_qdrant_service
@@ -29,8 +30,8 @@ class GroupChatQAState(StatesGroup):
     pending_clarification = State()
 
 
-# Хранилище контекста диалогов: (chat_id, user_id) -> данные
-_conversation_contexts: Dict[tuple[int, int], Dict[str, Any]] = {}
+# Хранилище контекста диалогов: (chat_id, user_id) -> данные. LRU + TTL 1 час, макс. 1000 ключей.
+_conversation_contexts: TTLCache = TTLCache(maxsize=1000, ttl=3600)
 
 
 def _get_context_key(chat_id: int, user_id: int) -> tuple[int, int]:
@@ -41,13 +42,16 @@ def _get_context_key(chat_id: int, user_id: int) -> tuple[int, int]:
 def _get_user_context(chat_id: int, user_id: int) -> Dict[str, Any]:
     """Получает контекст диалога пользователя."""
     key = _get_context_key(chat_id, user_id)
-    if key not in _conversation_contexts:
-        _conversation_contexts[key] = {
+    try:
+        return _conversation_contexts[key]
+    except KeyError:
+        default = {
             "conversation_history": [],
             "pending_clarification": None,
             "clarification_rounds": 0,
         }
-    return _conversation_contexts[key]
+        _conversation_contexts[key] = default
+        return default
 
 
 def _update_user_context(chat_id: int, user_id: int, updates: Dict[str, Any]) -> None:
@@ -69,7 +73,8 @@ async def _is_question(message_text: str) -> bool:
             f"Сообщение: {message_text}"
         )
         
-        resp = client.chat.completions.create(
+        resp = await asyncio.to_thread(
+            client.chat.completions.create,
             model=CHAT_MODEL,
             messages=[
                 {"role": "system", "content": "Ты помощник для определения, является ли сообщение вопросом. Отвечай только 'yes' или 'no'."},
@@ -112,7 +117,8 @@ async def _check_sufficient_data(
             "Если 'no', укажи кратко, какая информация отсутствует."
         )
         
-        resp = client.chat.completions.create(
+        resp = await asyncio.to_thread(
+            client.chat.completions.create,
             model=CHAT_MODEL,
             messages=[
                 {"role": "system", "content": "Ты помощник для оценки достаточности данных для ответа."},
@@ -181,7 +187,8 @@ async def _ask_clarification_question(
             system_content = "Ты помощник, который формулирует уточняющие вопросы."
             user_content = prompt
 
-        resp = client.chat.completions.create(
+        resp = await asyncio.to_thread(
+            client.chat.completions.create,
             model=CHAT_MODEL,
             messages=[
                 {"role": "system", "content": system_content},
@@ -284,7 +291,8 @@ async def _generate_answer_from_chunks(
             "Сформулируй ответ на основе этих фрагментов."
         )
         
-        resp = client.chat.completions.create(
+        resp = await asyncio.to_thread(
+            client.chat.completions.create,
             model=CHAT_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},

@@ -703,7 +703,8 @@ async def _expand_query_for_search(original_query: str) -> str:
             "Используй формат: ключевое слово 1, ключевое слово 2, тема 1, тема 2..."
         )
         
-        resp = client.chat.completions.create(
+        resp = await asyncio.to_thread(
+            client.chat.completions.create,
             model=CHAT_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -849,7 +850,8 @@ async def _check_sufficient_data_private(
             "Если 'no', укажи кратко, какая информация отсутствует."
         )
         
-        resp = client.chat.completions.create(
+        resp = await asyncio.to_thread(
+            client.chat.completions.create,
             model=CHAT_MODEL,
             messages=[
                 {"role": "system", "content": "Ты помощник для оценки достаточности данных для ответа. Учитывай контекст диалога и релевантность найденных фрагментов."},

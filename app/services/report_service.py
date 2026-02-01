@@ -1,9 +1,12 @@
 import calendar
 import json
+import logging
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from app.services.metrics_service import read_events_by_dates
+
+logger = logging.getLogger(__name__)
 from app.services.pending_questions_read_service import read_pending_open_count
 from app.services.qa_feedback_read_service import read_qa_feedback_by_dates
 
@@ -25,7 +28,8 @@ ANSWER_EVENTS = {"pending_answer_written"}
 def _parse_iso_ts(ts: str) -> Optional[datetime]:
     try:
         return datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    except Exception:
+    except Exception as e:
+        logger.warning("[REPORT] _parse_iso_ts(%r): %s", ts[:50] if ts else ts, e, exc_info=True)
         return None
 
 
@@ -36,7 +40,8 @@ def _parse_meta(meta: Any) -> Dict[str, Any]:
     if isinstance(meta, str) and meta.strip():
         try:
             return json.loads(meta)
-        except Exception:
+        except Exception as e:
+            logger.warning("[REPORT] _parse_meta: %s", e, exc_info=True)
             return {}
     return {}
 
