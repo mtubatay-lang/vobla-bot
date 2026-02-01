@@ -16,7 +16,7 @@ from app.services.qdrant_service import get_qdrant_service
 from app.services.openai_client import create_embedding, client, CHAT_MODEL
 from app.services.metrics_service import alog_event
 from app.services.reranking_service import rerank_chunks_with_llm, select_best_chunks
-from app.config import MANAGER_USERNAMES, get_rag_test_chat_id
+from app.config import MANAGER_USERNAMES, get_rag_test_chat_id, MAX_CLARIFICATION_ROUNDS
 from app.handlers.qa_mode import _expand_query_for_search, detect_clarification_response_vs_new_question
 
 logger = logging.getLogger(__name__)
@@ -525,11 +525,11 @@ async def process_question_in_group_chat(message: Message) -> None:
             await _tag_manager_in_chat(message, query_text)
             return
 
-        # Если данных недостаточно — задаем уточняющий вопрос, но не более одного раунда при наличии чанков
+        # Если данных недостаточно — задаем уточняющий вопрос, но не более MAX_CLARIFICATION_ROUNDS раундов
         clarification_rounds = context.get("clarification_rounds", 0)
         if not sufficient and missing_info:
-            if clarification_rounds >= 1 and len(found_chunks) >= 2:
-                # Уже задавали уточнение и чанков достаточно — отвечаем по лучшим чанкам
+            if clarification_rounds >= MAX_CLARIFICATION_ROUNDS:
+                # Лимит раундов: больше не спрашиваем, отвечаем по лучшему что есть
                 sufficient = True
                 missing_info = None
             else:

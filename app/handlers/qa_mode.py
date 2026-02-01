@@ -27,6 +27,7 @@ from app.services.chunk_analyzer_service import (
 )
 from app.services.conversation_phrases import get_phrases_examples
 from app.ui.keyboards import qa_kb, main_menu_kb
+from app.config import MAX_CLARIFICATION_ROUNDS
 
 logger = logging.getLogger(__name__)
 
@@ -1410,13 +1411,13 @@ async def qa_handle_question(message: Message, state: FSMContext):
         q, history, is_topic_shift=is_topic_shift
     )
     
-    # Если контекста недостаточно, задаем уточняющий вопрос и прекращаем обработку
+    # Если контекста недостаточно, задаем уточняющий вопрос и прекращаем обработку (считается одним раундом)
     if not context_sufficient:
         logger.info(
             f"[QA_MODE] Контекста недостаточно для поиска: {missing_context}. "
             f"Задаем уточняющий вопрос."
         )
-        
+        await state.update_data(qa_clarification_rounds=1)
         await _ask_clarification_question_private(
             message=message,
             question=q,
@@ -1608,17 +1609,16 @@ async def qa_handle_question(message: Message, state: FSMContext):
             logger.info(f"[QA_MODE] Решение об эскалации: should_escalate={should_escalate}")
             
             if not should_escalate:
-                # Если данных недостаточно — задаем уточняющий вопрос, но не более одного раунда при наличии чанков
+                # Если данных недостаточно — задаем уточняющий вопрос, но не более MAX_CLARIFICATION_ROUNDS раундов
                 clarification_rounds = (await state.get_data()).get("qa_clarification_rounds", 0)
                 if not sufficient and missing_info:
-                    if clarification_rounds >= 1 and len(all_chunks) >= 2:
-                        # Уже задавали уточнение и чанков достаточно — отвечаем по лучшим чанкам
+                    if clarification_rounds >= MAX_CLARIFICATION_ROUNDS:
+                        # Лимит раундов: больше не спрашиваем, отвечаем по лучшему что есть
                         sufficient = True
                         missing_info = None
-                        logger.info("[QA_MODE] Пропускаем повторное уточнение, отвечаем по чанкам")
+                        logger.info("[QA_MODE] Лимит раундов уточнений, отвечаем по чанкам")
                     else:
                         logger.info("[QA_MODE] Задаем уточняющий вопрос пользователю")
-                        # Сохраняем найденные чанки для повторного использования
                         await state.update_data(qa_found_chunks=all_chunks, qa_clarification_rounds=clarification_rounds + 1)
                         await _ask_clarification_question_private(message, q, all_chunks, missing_info, state)
                         return
@@ -1720,7 +1720,7 @@ async def qa_handle_question(message: Message, state: FSMContext):
         if not found_chunks:
             logger.info("[QA_MODE] Чанки не найдены в RAG")
             
-            # Если тема сменилась и чанки не найдены, задаем уточняющий вопрос
+            # Если тема сменилась и чанки не найдены, задаем уточняющий вопрос (считается одним раундом)
             if is_topic_shift:
                 logger.info(
                     f"[QA_MODE] Тема сменилась ({previous_topic}), чанки не найдены. "
@@ -1730,7 +1730,7 @@ async def qa_handle_question(message: Message, state: FSMContext):
                     await searching_msg.delete()
                 except:
                     pass
-                
+                await state.update_data(qa_clarification_rounds=1)
                 await _ask_clarification_question_private(
                     message=message,
                     question=q,

@@ -106,6 +106,9 @@ RERANK_USE_LLM = os.getenv("RERANK_USE_LLM", "true").lower() == "true"
 CHUNK_ANALYSIS_ENABLED = os.getenv("CHUNK_ANALYSIS_ENABLED", "true").lower() == "true"
 MAX_CHUNKS_TO_ANALYZE = int(os.getenv("MAX_CHUNKS_TO_ANALYZE", "10"))
 
+# Максимум раундов уточняющих вопросов (группа и приват); после лимита отвечаем по лучшим чанкам
+MAX_CLARIFICATION_ROUNDS = int(os.getenv("MAX_CLARIFICATION_ROUNDS", "1"))
+
 # --- RAG Test Chat Settings (для ограничения работы только в тестовом чате) ---
 # RAG_TEST_CHAT_ID: не задана — дефолт -1003377597100 (тестовый чат); пустая строка — все чаты
 RAG_TEST_CHAT_ID_DEFAULT = -1003377597100
