@@ -426,10 +426,8 @@ async def process_question_in_group_chat(message: Message) -> None:
                             logger.info(f"[GROUP_CHAT_QA] Пользователь написал «другой вопрос», ищем по предыдущему: '{query_text[:80]}...'")
                             break
             if query_text is None:
-                context_text = "\n".join([
-                    msg.get("text", "") for msg in conversation_history[-3:]
-                ])
-                query_text = f"{context_text}\n{question}" if context_text else question
+                # Новый вопрос — ищем только по текущему сообщению, без контекста прошлых ответов
+                query_text = question
 
         # Промежуточное сообщение о поиске (как в приватном чате)
         searching_msg = await message.answer("🔍 Ищу в базе знаний...")
