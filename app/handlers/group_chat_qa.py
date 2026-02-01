@@ -380,16 +380,30 @@ async def process_question_in_group_chat(message: Message) -> None:
     conversation_history = context.get("conversation_history", [])
     pending_clarification = context.get("pending_clarification")
 
-    # При ожидании ответа на уточнение — LLM: ответ на уточнение или новый вопрос?
+    # При ожидании ответа на уточнение — ответ на уточнение или новый вопрос?
     if pending_clarification:
-        last_assistant_msg = ""
-        for msg in reversed(conversation_history):
-            if msg.get("role") == "assistant":
-                last_assistant_msg = msg.get("text", "")
-                break
-        clarification_vs_new = await detect_clarification_response_vs_new_question(
-            question, last_assistant_msg, pending_clarification
+        q_stripped = question.strip()
+        # Короткий ответ-выбор (1, 2, 3, вариант 1 и т.п.) — всегда считаем ответом на уточнение, не вызываем LLM
+        is_short_choice = (
+            len(q_stripped) <= 15
+            and (
+                q_stripped.isdigit()
+                or (q_stripped.lower().startswith("вариант ") and q_stripped.split()[-1].isdigit())
+                or q_stripped.lower() in ("1)", "2)", "3)", "4)", "первый", "второй", "третий", "четвёртый", "четвертый")
+            )
         )
+        if is_short_choice:
+            clarification_vs_new = "clarification_response"
+            logger.info("[GROUP_CHAT_QA] Короткий ответ-выбор, считаем ответом на уточнение")
+        else:
+            last_assistant_msg = ""
+            for msg in reversed(conversation_history):
+                if msg.get("role") == "assistant":
+                    last_assistant_msg = msg.get("text", "")
+                    break
+            clarification_vs_new = await detect_clarification_response_vs_new_question(
+                question, last_assistant_msg, pending_clarification
+            )
         if clarification_vs_new == "new_question":
             # Новый вопрос — не объединяем; если написал «другой вопрос» — ищем по предыдущему его вопросу
             logger.info("[GROUP_CHAT_QA] LLM: новый вопрос вместо ответа на уточнение, обрабатываем отдельно")
