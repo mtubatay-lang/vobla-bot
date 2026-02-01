@@ -225,14 +225,14 @@ async def detect_new_question_vs_follow_up(user_message: str, last_bot_answer: s
         prompt = (
             f"Последний ответ бота: {last_bot_answer[:400]}\n\n"
             f"Новое сообщение пользователя: {user_message}\n\n"
-            "Это новый самостоятельный вопрос (другая тема или явный новый запрос) или реакция/уточнение к предыдущему ответу "
-            "(спасибо, ок, «а как…», «подробнее» и т.п.)? Ответь одним словом: new_question или follow_up."
+            "Это новый самостоятельный вопрос (другая тема, другая область — например было про маркировку товаров, стало про вывески/оформление) или реакция/уточнение к предыдущему ответу "
+            "(спасибо, ок, «а как…», «подробнее»)? Если вопрос явно про другую область — это new_question. Ответь одним словом: new_question или follow_up."
         )
         resp = await asyncio.to_thread(
             client.chat.completions.create,
             model=CHAT_MODEL,
             messages=[
-                {"role": "system", "content": "Ты помощник. Определи: новый вопрос или реакция/уточнение к ответу. Ответь только new_question или follow_up."},
+                {"role": "system", "content": "Ты помощник. Определи: новый вопрос (другая тема/область) или реакция/уточнение к ответу. Явная смена темы = new_question. Ответь только new_question или follow_up."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.0,
@@ -1432,11 +1432,26 @@ async def qa_handle_question(message: Message, state: FSMContext):
 
     try:
         # ШАГ 1: Подготовка запроса для поиска
+        # «Другой вопрос» / «новая тема» — пользователь указывает на смену темы; ищем по предыдущему его вопросу
+        q_clean = q.strip().lower()
+        if (q_clean in ("другой вопрос", "другой вопрос.", "новая тема", "по другой теме") or
+                (len(q) < 30 and "другой" in q_clean and "вопрос" in q_clean)):
+            for msg in reversed(history[:-1]):  # без последнего (текущее сообщение)
+                if msg.get("role") == "user":
+                    prev_text = (msg.get("text") or "").strip()
+                    if len(prev_text) > 10 and ("?" in prev_text or "как" in prev_text or "что" in prev_text or "какие" in prev_text):
+                        q = prev_text
+                        logger.info(f"[QA_MODE] Пользователь написал «другой вопрос», ищем по предыдущему: '{q[:80]}...'")
+                        break
         # Если это ответ на уточнение, q уже содержит объединенный вопрос
-        # Иначе используем контекст из истории
+        # Если новый вопрос или смена темы — ищем только по текущему вопросу, без контекста старой темы
+        # Иначе (follow-up) — используем контекст из истории
         if is_clarification_response:
             query_text = q  # q уже содержит объединенный вопрос
             logger.info(f"[QA_MODE] Используем объединенный вопрос для поиска: '{query_text[:100]}...'")
+        elif is_new_question or is_topic_shift:
+            query_text = q
+            logger.info(f"[QA_MODE] Новый вопрос / смена темы, ищем только по текущему: '{query_text[:80]}...'")
         else:
             context_text = "\n".join([msg.get("text", "") for msg in history[-3:]])
             query_text = f"{context_text}\n{q}" if context_text else q

@@ -383,10 +383,21 @@ async def process_question_in_group_chat(message: Message) -> None:
             question, last_assistant_msg, pending_clarification
         )
         if clarification_vs_new == "new_question":
-            # Новый вопрос — не объединяем, обрабатываем только текущее сообщение
+            # Новый вопрос — не объединяем; если написал «другой вопрос» — ищем по предыдущему его вопросу
             logger.info("[GROUP_CHAT_QA] LLM: новый вопрос вместо ответа на уточнение, обрабатываем отдельно")
+            original_msg = question
+            q_clean = question.strip().lower()
+            if (q_clean in ("другой вопрос", "другой вопрос.", "новая тема", "по другой теме") or
+                    (len(question) < 30 and "другой" in q_clean and "вопрос" in q_clean)):
+                for msg in reversed(conversation_history):
+                    if msg.get("role") == "user":
+                        prev_text = (msg.get("text") or "").strip()
+                        if len(prev_text) > 10 and ("?" in prev_text or "как" in prev_text or "что" in prev_text or "какие" in prev_text):
+                            question = prev_text
+                            logger.info(f"[GROUP_CHAT_QA] «Другой вопрос» — ищем по предыдущему: '{question[:80]}...'")
+                            break
             query_text = question
-            conversation_history.append({"role": "user", "text": question})
+            conversation_history.append({"role": "user", "text": original_msg})
             _update_user_context(chat_id, user_id, {"conversation_history": conversation_history, "pending_clarification": None, "clarification_rounds": 0})
         else:
             # Ответ на уточнение — объединяем как раньше
@@ -404,10 +415,21 @@ async def process_question_in_group_chat(message: Message) -> None:
     try:
         # Определяем запрос для поиска (при ответе на уточнение уже задан query_text)
         if query_text is None:
-            context_text = "\n".join([
-                msg.get("text", "") for msg in conversation_history[-3:]
-            ])
-            query_text = f"{context_text}\n{question}" if context_text else question
+            q_clean = question.strip().lower()
+            if (q_clean in ("другой вопрос", "другой вопрос.", "новая тема", "по другой теме") or
+                    (len(question) < 30 and "другой" in q_clean and "вопрос" in q_clean)):
+                for msg in reversed(conversation_history[:-1]):
+                    if msg.get("role") == "user":
+                        prev_text = (msg.get("text") or "").strip()
+                        if len(prev_text) > 10 and ("?" in prev_text or "как" in prev_text or "что" in prev_text or "какие" in prev_text):
+                            query_text = prev_text
+                            logger.info(f"[GROUP_CHAT_QA] Пользователь написал «другой вопрос», ищем по предыдущему: '{query_text[:80]}...'")
+                            break
+            if query_text is None:
+                context_text = "\n".join([
+                    msg.get("text", "") for msg in conversation_history[-3:]
+                ])
+                query_text = f"{context_text}\n{question}" if context_text else question
 
         # Промежуточное сообщение о поиске (как в приватном чате)
         searching_msg = await message.answer("🔍 Ищу в базе знаний...")
