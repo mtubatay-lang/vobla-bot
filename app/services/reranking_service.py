@@ -207,3 +207,86 @@ def select_best_chunks(
     )
     
     return unique_chunks
+
+
+def _diversity_group_key(chunk: Dict[str, Any], diversity_key: str = "section_heading") -> str:
+    """Ключ группы для diversity: section_heading или is_checklist + первые слова текста."""
+    meta = chunk.get("metadata") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    if diversity_key == "section_heading":
+        sh = (meta.get("section_heading") or "").strip()
+        if sh:
+            return sh[:150]
+    # Fallback: is_checklist + first 80 chars of text
+    text = (chunk.get("text") or "").strip()
+    prefix = " ".join(text.split()[:15])[:80] if text else ""
+    is_cl = meta.get("is_checklist", False)
+    return f"cl_{is_cl}_{prefix}"
+
+
+def select_best_chunks_diverse(
+    chunks: List[Dict[str, Any]],
+    max_chunks: int = 5,
+    min_score: float = 0.0,
+    diversity_key: str = "section_heading",
+    max_per_group: int = 2,
+) -> List[Dict[str, Any]]:
+    """Выбирает лучшие чанки с учётом разнообразия: не более max_per_group из одной группы.
+    
+    Группировка по section_heading (или по is_checklist + начало текста). Сначала набираем
+    по одному-два чанка из разных групп, затем добиваем по score до max_chunks.
+    """
+    if not chunks:
+        return []
+    
+    filtered = [c for c in chunks if c.get("score", 0) >= min_score]
+    filtered.sort(
+        key=lambda c: (c.get("score", 0), _source_priority(c)),
+        reverse=True,
+    )
+    
+    group_counts: Dict[str, int] = {}
+    unique_chunks: List[Dict[str, Any]] = []
+    seen_texts: set = set()
+    
+    # Фаза 1: набираем до max_chunks с лимитом max_per_group на группу
+    for chunk in filtered:
+        if len(unique_chunks) >= max_chunks:
+            break
+        text = chunk.get("text", "").strip()
+        normalized = " ".join(text.lower().split())
+        is_dup = any(
+            len(set(normalized.split()) & set(s.split())) / max(len(set(normalized.split())), len(set(s.split())), 1) > 0.8
+            for s in seen_texts
+        )
+        if is_dup:
+            continue
+        gk = _diversity_group_key(chunk, diversity_key)
+        if group_counts.get(gk, 0) >= max_per_group:
+            continue
+        unique_chunks.append(chunk)
+        seen_texts.add(normalized)
+        group_counts[gk] = group_counts.get(gk, 0) + 1
+    
+    # Фаза 2: если не набрали max_chunks, добиваем по score без лимита по группе
+    for chunk in filtered:
+        if len(unique_chunks) >= max_chunks:
+            break
+        if chunk in unique_chunks:
+            continue
+        text = chunk.get("text", "").strip()
+        normalized = " ".join(text.lower().split())
+        is_dup = any(
+            len(set(normalized.split()) & set(s.split())) / max(len(set(normalized.split())), len(set(s.split())), 1) > 0.8
+            for s in seen_texts
+        )
+        if is_dup:
+            continue
+        unique_chunks.append(chunk)
+        seen_texts.add(normalized)
+    
+    logger.info(
+        f"[RERANKING] Выбрано {len(unique_chunks)} чанков (diverse, max={max_chunks}, min_score={min_score})"
+    )
+    return unique_chunks
