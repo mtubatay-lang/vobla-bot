@@ -1484,12 +1484,12 @@ async def qa_handle_question(message: Message, state: FSMContext):
         chunks_original_count = 0
         chunks_keywords_count = 0
         
-        # Поиск 1: Расширенный запрос
+        # Поиск 1: Расширенный запрос (увеличен top_k для лучшего recall — вариант E)
         embedding_expanded = await asyncio.to_thread(create_embedding, expanded_query)
         chunks_expanded = qdrant_service.search_multi_level(
             query_embedding=embedding_expanded,
-            top_k=5,
-            initial_threshold=0.5,
+            top_k=12,
+            initial_threshold=0.45,
             fallback_thresholds=[0.3, 0.1],
         )
         chunks_expanded_count = len(chunks_expanded)
@@ -1504,8 +1504,8 @@ async def qa_handle_question(message: Message, state: FSMContext):
             embedding_original = await asyncio.to_thread(create_embedding, query_text)
             chunks_original = qdrant_service.search_multi_level(
                 query_embedding=embedding_original,
-                top_k=5,
-                initial_threshold=0.5,
+                top_k=12,
+                initial_threshold=0.45,
                 fallback_thresholds=[0.3, 0.1],
             )
             chunks_original_count = len(chunks_original)
@@ -1526,7 +1526,7 @@ async def qa_handle_question(message: Message, state: FSMContext):
                 embedding_keywords = await asyncio.to_thread(create_embedding, keywords_query)
                 chunks_keywords = qdrant_service.search_multi_level(
                     query_embedding=embedding_keywords,
-                    top_k=3,
+                    top_k=6,
                     initial_threshold=0.4,
                     fallback_thresholds=[0.2, 0.1],
                 )
@@ -1544,33 +1544,33 @@ async def qa_handle_question(message: Message, state: FSMContext):
                 embedding_hyde = await asyncio.to_thread(create_embedding, hyde_text)
                 hyde_chunks = qdrant_service.search_multi_level(
                     query_embedding=embedding_hyde,
-                    top_k=10,
+                    top_k=12,
                     initial_threshold=0.3,
                     fallback_thresholds=[0.2, 0.1],
                 )
                 if hyde_chunks:
-                    all_found_chunks = merge_hyde_with_main(all_found_chunks, hyde_chunks, top_n=20)
+                    all_found_chunks = merge_hyde_with_main(all_found_chunks, hyde_chunks, top_n=25)
         
-        # Сортируем по score и берем топ-15 для re-ranking (опционально гибрид vector+BM25)
+        # Сортируем по score и берем топ-20 для re-ranking (гибрид vector+BM25 по умолчанию — вариант E)
         all_found_chunks.sort(key=lambda x: x.get("score", 0), reverse=True)
         if USE_HYBRID_BM25 and all_found_chunks:
             from app.services.bm25_search import hybrid_vector_bm25
-            initial_chunks = hybrid_vector_bm25(query_text, all_found_chunks, top_n=15)
+            initial_chunks = hybrid_vector_bm25(query_text, all_found_chunks, top_n=20)
         else:
-            initial_chunks = all_found_chunks[:15]
+            initial_chunks = all_found_chunks[:20]
         
-        # Re-ranking через LLM
+        # Re-ranking через LLM (больше кандидатов в rerank и в финале)
         if initial_chunks:
             try:
                 await searching_msg.edit_text(f"🔍 Нашёл {len(initial_chunks)} фрагментов, анализирую релевантность...")
-                reranked_chunks = await rerank_chunks_with_llm(q, initial_chunks, top_k=8)
+                reranked_chunks = await rerank_chunks_with_llm(q, initial_chunks, top_k=10)
                 # Выбираем лучшие уникальные чанки
-                found_chunks = select_best_chunks(reranked_chunks, max_chunks=5, min_score=0.1)
+                found_chunks = select_best_chunks(reranked_chunks, max_chunks=6, min_score=0.1)
                 found_chunks = [c for c in found_chunks if c.get("score", 0) >= MIN_SCORE_AFTER_RERANK]
                 logger.info(f"[QA_MODE] После re-ranking выбрано {len(found_chunks)} чанков (score >= {MIN_SCORE_AFTER_RERANK})")
             except Exception as e:
                 logger.exception(f"[QA_MODE] Ошибка re-ranking: {e}")
-                found_chunks = [c for c in initial_chunks[:5] if c.get("score", 0) >= MIN_SCORE_AFTER_RERANK]
+                found_chunks = [c for c in initial_chunks[:6] if c.get("score", 0) >= MIN_SCORE_AFTER_RERANK]
         else:
             found_chunks = []
 
