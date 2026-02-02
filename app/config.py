@@ -116,12 +116,6 @@ DEDUP_AT_INDEX_THRESHOLD = float(os.getenv("DEDUP_AT_INDEX_THRESHOLD", "0.95"))
 # Кэш результатов RAG по запросу (in-memory, TTL в секундах)
 RAG_QUERY_CACHE_ENABLED = os.getenv("RAG_QUERY_CACHE_ENABLED", "false").lower() == "true"
 RAG_QUERY_CACHE_TTL = int(os.getenv("RAG_QUERY_CACHE_TTL", "3600"))
-# Максимум чанков в контексте генерации (ответ «как весь документ»)
-RAG_MAX_CHUNKS_FOR_GENERATION = int(os.getenv("RAG_MAX_CHUNKS_FOR_GENERATION", "8"))
-# Multi-aspect retrieval: подзапросы по аспектам (критерии, скоринг, процесс, чек-лист)
-USE_MULTI_ASPECT = os.getenv("USE_MULTI_ASPECT", "true").lower() == "true"
-# Diversity-aware отбор: не более 2 чанков из одной группы (section_heading)
-USE_DIVERSE_CHUNKS = os.getenv("USE_DIVERSE_CHUNKS", "true").lower() == "true"
 
 # Chunk Analysis Settings
 CHUNK_ANALYSIS_ENABLED = os.getenv("CHUNK_ANALYSIS_ENABLED", "true").lower() == "true"

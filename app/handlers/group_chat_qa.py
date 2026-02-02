@@ -16,8 +16,8 @@ from app.services.qdrant_service import get_qdrant_service
 from app.services.openai_client import create_embedding, client, CHAT_MODEL
 from app.services.openai_client import check_answer_grounding
 from app.services.metrics_service import alog_event
-from app.services.reranking_service import rerank_chunks_with_llm, select_best_chunks, select_best_chunks_diverse
-from app.config import MANAGER_USERNAMES, get_rag_test_chat_id, MAX_CLARIFICATION_ROUNDS, MIN_SCORE_AFTER_RERANK, RAG_MAX_CHUNKS_FOR_GENERATION, USE_DIVERSE_CHUNKS, USE_HYBRID_BM25, USE_HYDE, USE_MULTI_ASPECT
+from app.services.reranking_service import rerank_chunks_with_llm, select_best_chunks
+from app.config import MANAGER_USERNAMES, get_rag_test_chat_id, MAX_CLARIFICATION_ROUNDS, MIN_SCORE_AFTER_RERANK, USE_HYBRID_BM25, USE_HYDE
 from app.handlers.qa_mode import _expand_query_for_search, detect_clarification_response_vs_new_question
 
 logger = logging.getLogger(__name__)
@@ -274,7 +274,6 @@ async def _generate_answer_from_chunks(
             "2) Затем конкретные действия/инструкция (что сделать).\n"
             "3) В конце — один уточняющий вопрос только если он действительно нужен для точности. Если пользователь просит «просто ответ» — не задавай уточнений.\n\n"
             "Работа с фрагментами базы знаний (критично):\n"
-            "- Фрагменты могут описывать разные аспекты темы (критерии, процесс, чек-листы, документы). Твой ответ должен объединять все релевантные аспекты из всех фрагментов в один структурированный ответ: разделы, списки, шаги. Действуй так, как если бы у тебя был весь документ — не ограничивайся одним фрагментом.\n"
             "- Отвечай ТОЛЬКО на основе предоставленных фрагментов. НЕ выдумывай факты, цифры, сроки, названия, стандарты.\n"
             "- Для каждого факта указывай номер фрагмента (1, 2, …), если уместно. Не используй информацию не из фрагментов.\n"
             "- Можно перефразировать и улучшать читаемость, но НЕ менять смысл.\n"
@@ -534,28 +533,6 @@ async def process_question_in_group_chat(message: Message) -> None:
                     )
                     if hyde_chunks:
                         all_found_chunks = merge_hyde_with_main(all_found_chunks, hyde_chunks, top_n=25)
-            # Multi-aspect: подзапросы по аспектам
-            if USE_MULTI_ASPECT and query_text.strip():
-                from app.services.aspect_queries import get_aspect_queries, ASPECT_SEARCH_TOP_K
-                aspect_queries = get_aspect_queries(query_text)
-                for aq in aspect_queries:
-                    if not aq or aq.strip().lower() == query_text.strip().lower():
-                        continue
-                    try:
-                        emb_aq = await asyncio.to_thread(create_embedding, aq)
-                        chunks_aq = qdrant_service.search_multi_level(
-                            query_embedding=emb_aq,
-                            top_k=ASPECT_SEARCH_TOP_K,
-                            initial_threshold=0.4,
-                            fallback_thresholds=[0.25, 0.1],
-                        )
-                        for chunk in chunks_aq:
-                            t = chunk.get("text", "")
-                            if t and t not in seen_texts:
-                                all_found_chunks.append(chunk)
-                                seen_texts.add(t)
-                    except Exception as e:
-                        logger.warning(f"[GROUP_CHAT_QA] Ошибка aspect-поиска '{aq[:40]}...': {e}")
             all_found_chunks.sort(key=lambda x: x.get("score", 0), reverse=True)
             if USE_HYBRID_BM25 and all_found_chunks:
                 from app.services.bm25_search import hybrid_vector_bm25
@@ -567,14 +544,11 @@ async def process_question_in_group_chat(message: Message) -> None:
             if initial_chunks:
                 try:
                     reranked_chunks = await rerank_chunks_with_llm(query_text, initial_chunks, top_k=10)
-                    if USE_DIVERSE_CHUNKS:
-                        found_chunks = select_best_chunks_diverse(reranked_chunks, max_chunks=RAG_MAX_CHUNKS_FOR_GENERATION, min_score=0.1, max_per_group=2)
-                    else:
-                        found_chunks = select_best_chunks(reranked_chunks, max_chunks=RAG_MAX_CHUNKS_FOR_GENERATION, min_score=0.1)
+                    found_chunks = select_best_chunks(reranked_chunks, max_chunks=6, min_score=0.1)
                     found_chunks = [c for c in found_chunks if c.get("score", 0) >= MIN_SCORE_AFTER_RERANK]
                 except Exception as e:
                     logger.exception(f"[GROUP_CHAT_QA] Ошибка re-ranking: {e}")
-                    found_chunks = [c for c in initial_chunks[:RAG_MAX_CHUNKS_FOR_GENERATION] if c.get("score", 0) >= MIN_SCORE_AFTER_RERANK]
+                    found_chunks = [c for c in initial_chunks[:6] if c.get("score", 0) >= MIN_SCORE_AFTER_RERANK]
             else:
                 found_chunks = []
             if not found_chunks:
