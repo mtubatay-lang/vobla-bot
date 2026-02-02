@@ -8,7 +8,14 @@ from datetime import datetime
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue, Query
 
-from app.config import QDRANT_URL, QDRANT_API_KEY, QDRANT_COLLECTION_NAME, QDRANT_TIMEOUT
+from app.config import (
+    QDRANT_URL,
+    QDRANT_API_KEY,
+    QDRANT_COLLECTION_NAME,
+    QDRANT_TIMEOUT,
+    DEDUP_AT_INDEX,
+    DEDUP_AT_INDEX_THRESHOLD,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -105,16 +112,28 @@ class QdrantService:
         if not chunks:
             return
         
+        from app.services.chunking_service import get_chunk_structural_metadata
+
         points = []
         for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+            if DEDUP_AT_INDEX:
+                dup = self.search(
+                    query_embedding=embedding,
+                    top_k=1,
+                    score_threshold=DEDUP_AT_INDEX_THRESHOLD,
+                )
+                if dup:
+                    logger.debug(
+                        f"[QDRANT] Пропуск чанка (дубликат, score={dup[0].get('score', 0):.3f})"
+                    )
+                    continue
             point_id = str(uuid.uuid4())
-            
-            # Подготавливаем payload (метаданные)
-            payload = {
-                "text": chunk.get("text", ""),
-                **chunk.get("metadata", {}),
-            }
-            
+            text = chunk.get("text", "")
+            meta = dict(chunk.get("metadata", {}))
+            for key, value in get_chunk_structural_metadata(text).items():
+                if key not in meta:
+                    meta[key] = value
+            payload = {"text": text, **meta}
             points.append(
                 PointStruct(
                     id=point_id,
@@ -122,7 +141,9 @@ class QdrantService:
                     payload=payload,
                 )
             )
-        
+        if not points:
+            logger.info("[QDRANT] Все чанки отфильтрованы как дубликаты, нечего добавлять")
+            return
         try:
             self.client.upsert(
                 collection_name=self.collection_name,
@@ -201,7 +222,9 @@ class QdrantService:
                 
                 scores_list.append(score)
                 payload = getattr(point, 'payload', {}) or {}
+                point_id = getattr(point, 'id', None)
                 formatted_results.append({
+                    "id": str(point_id) if point_id is not None else "",
                     "text": payload.get("text", ""),
                     "metadata": {k: v for k, v in payload.items() if k != "text"},
                     "score": score,

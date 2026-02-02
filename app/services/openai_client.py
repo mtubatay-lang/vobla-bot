@@ -1,5 +1,6 @@
 """Клиент OpenAI для эмбеддингов и работы с ответами FAQ."""
 
+import asyncio
 import json
 import os
 import re
@@ -243,6 +244,43 @@ def polish_faq_answer(
         out = _strip_greeting(out)
     
     return out
+
+
+# -----------------------------
+#   ПРОВЕРКА GROUNDING ОТВЕТА RAG
+# -----------------------------
+
+
+def check_answer_grounding_sync(answer: str, chunks_text: str) -> bool:
+    """Проверяет, что в ответе нет утверждений, которых нет в фрагментах. Возвращает True если ответ обоснован фрагментами."""
+    if not answer or not chunks_text or len(chunks_text.strip()) < 50:
+        return True
+    prompt = (
+        f"Ответ модели:\n{answer[:1500]}\n\n"
+        f"Фрагменты из базы знаний:\n{chunks_text[:3000]}\n\n"
+        "Есть ли в ответе модели утверждения, факты или цифры, которых нет в приведённых фрагментах? "
+        "Ответь только: да или нет."
+    )
+    try:
+        resp = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": "Ты проверяешь, обоснован ли ответ модели фрагментами. Ответь только «да» или «нет»."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.0,
+            max_tokens=5,
+        )
+        out = (resp.choices[0].message.content or "").strip().lower()
+        return "нет" in out or "no" in out
+    except Exception:
+        return True
+
+
+async def check_answer_grounding(answer: str, chunks: List[Dict]) -> bool:
+    """Асинхронная проверка grounding по списку чанков."""
+    chunks_text = "\n\n---\n\n".join([c.get("text", "")[:800] for c in (chunks or [])])
+    return await asyncio.to_thread(check_answer_grounding_sync, answer, chunks_text)
 
 
 # -----------------------------

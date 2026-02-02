@@ -14,9 +14,10 @@ from cachetools import TTLCache
 from app.services.auth_service import find_user_by_telegram_id
 from app.services.qdrant_service import get_qdrant_service
 from app.services.openai_client import create_embedding, client, CHAT_MODEL
+from app.services.openai_client import check_answer_grounding
 from app.services.metrics_service import alog_event
 from app.services.reranking_service import rerank_chunks_with_llm, select_best_chunks
-from app.config import MANAGER_USERNAMES, get_rag_test_chat_id, MAX_CLARIFICATION_ROUNDS
+from app.config import MANAGER_USERNAMES, get_rag_test_chat_id, MAX_CLARIFICATION_ROUNDS, MIN_SCORE_AFTER_RERANK, USE_HYBRID_BM25, USE_HYDE
 from app.handlers.qa_mode import _expand_query_for_search, detect_clarification_response_vs_new_question
 
 logger = logging.getLogger(__name__)
@@ -274,6 +275,7 @@ async def _generate_answer_from_chunks(
             "3) В конце — один уточняющий вопрос только если он действительно нужен для точности. Если пользователь просит «просто ответ» — не задавай уточнений.\n\n"
             "Работа с фрагментами базы знаний (критично):\n"
             "- Отвечай ТОЛЬКО на основе предоставленных фрагментов. НЕ выдумывай факты, цифры, сроки, названия, стандарты.\n"
+            "- Для каждого факта указывай номер фрагмента (1, 2, …), если уместно. Не используй информацию не из фрагментов.\n"
             "- Можно перефразировать и улучшать читаемость, но НЕ менять смысл.\n"
             "- Если информации в фрагментах недостаточно — скажи об этом честно и предложи уточнение или передачу менеджеру.\n"
             "- Если несколько фрагментов релевантны — объединяй в один связный ответ без противоречий. Если фрагменты противоречат друг другу — скажи об этом и попроси уточнение (контекст/город/точка и т.д.).\n\n"
@@ -456,80 +458,119 @@ async def process_question_in_group_chat(message: Message) -> None:
         searching_msg = await message.answer("🔍 Ищу в базе знаний...")
         
         # Усиленный RAG: расширение запроса, несколько поисков, re-ranking (как в приватном чате)
-        expanded_query = await _expand_query_for_search(query_text)
-        qdrant_service = get_qdrant_service()
-        all_found_chunks = []
-        seen_texts = set()
-        
-        # Поиск 1: расширенный запрос
-        embedding_expanded = await asyncio.to_thread(create_embedding, expanded_query)
-        chunks_expanded = qdrant_service.search_multi_level(
-            query_embedding=embedding_expanded,
-            top_k=5,
-            initial_threshold=0.5,
-            fallback_thresholds=[0.3, 0.1],
-        )
-        for chunk in chunks_expanded:
-            t = chunk.get("text", "")
-            if t and t not in seen_texts:
-                all_found_chunks.append(chunk)
-                seen_texts.add(t)
-        
-        # Поиск 2: оригинальный запрос (если отличается)
-        if query_text.strip() != expanded_query.strip() and len(query_text.strip()) > 5:
-            embedding_original = await asyncio.to_thread(create_embedding, query_text)
-            chunks_original = qdrant_service.search_multi_level(
-                query_embedding=embedding_original,
+        from app.services.rag_query_cache import get_cached_chunks, set_cached_chunks
+        cached = get_cached_chunks(query_text)
+        if cached is not None:
+            found_chunks = [c for c in cached if c.get("score", 0) >= MIN_SCORE_AFTER_RERANK]
+            if not found_chunks:
+                logger.info("[GROUP_CHAT_QA] Кэш: нет чанков выше MIN_SCORE_AFTER_RERANK, эскалация")
+                await searching_msg.delete()
+                _qh = str(hash(query_text.strip().lower()[:200])) if query_text else ""
+                await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": _qh, "chunks_found": 0, "outcome": "escalation", "from_cache": True})
+                await _tag_manager_in_chat(message, query_text)
+                return
+            question_hash = str(hash(query_text.strip().lower()[:200])) if query_text else ""
+            await alog_event(user_id=user_id, username=message.from_user.username, event="kb_search_performed", meta={"question_hash": question_hash, "chunks_found": len(found_chunks), "top_scores": [round(c.get("score", 0), 3) for c in found_chunks[:3]], "top_sources": [str((c.get("metadata") or {}).get("source", ""))[:50] for c in found_chunks[:3]], "from_cache": True})
+        else:
+            expanded_query = await _expand_query_for_search(query_text)
+            qdrant_service = get_qdrant_service()
+            all_found_chunks = []
+            seen_texts = set()
+            # Поиск 1: расширенный запрос
+            embedding_expanded = await asyncio.to_thread(create_embedding, expanded_query)
+            chunks_expanded = qdrant_service.search_multi_level(
+                query_embedding=embedding_expanded,
                 top_k=5,
                 initial_threshold=0.5,
                 fallback_thresholds=[0.3, 0.1],
             )
-            for chunk in chunks_original:
+            for chunk in chunks_expanded:
                 t = chunk.get("text", "")
                 if t and t not in seen_texts:
                     all_found_chunks.append(chunk)
                     seen_texts.add(t)
-        
-        # Поиск 3: ключевые слова из вопроса
-        keywords = re.findall(r"\b\w{4,}\b", query_text.lower())
-        if keywords and len(keywords) >= 2:
-            keywords_query = " ".join(keywords[:5])
-            if keywords_query != query_text.lower() and len(keywords_query) > 5:
-                embedding_kw = await asyncio.to_thread(create_embedding, keywords_query)
-                chunks_kw = qdrant_service.search_multi_level(
-                    query_embedding=embedding_kw,
-                    top_k=3,
-                    initial_threshold=0.4,
-                    fallback_thresholds=[0.2, 0.1],
+            # Поиск 2: оригинальный запрос (если отличается)
+            if query_text.strip() != expanded_query.strip() and len(query_text.strip()) > 5:
+                embedding_original = await asyncio.to_thread(create_embedding, query_text)
+                chunks_original = qdrant_service.search_multi_level(
+                    query_embedding=embedding_original,
+                    top_k=5,
+                    initial_threshold=0.5,
+                    fallback_thresholds=[0.3, 0.1],
                 )
-                for chunk in chunks_kw:
+                for chunk in chunks_original:
                     t = chunk.get("text", "")
                     if t and t not in seen_texts:
                         all_found_chunks.append(chunk)
                         seen_texts.add(t)
-        
-        all_found_chunks.sort(key=lambda x: x.get("score", 0), reverse=True)
-        initial_chunks = all_found_chunks[:10]
-
-        if initial_chunks:
-            await searching_msg.edit_text(f"🔍 Нашёл {len(initial_chunks)} фрагментов, анализирую релевантность...")
-        
-        if initial_chunks:
-            try:
-                reranked_chunks = await rerank_chunks_with_llm(query_text, initial_chunks, top_k=8)
-                found_chunks = select_best_chunks(reranked_chunks, max_chunks=5, min_score=0.1)
-            except Exception as e:
-                logger.exception(f"[GROUP_CHAT_QA] Ошибка re-ranking: {e}")
-                found_chunks = initial_chunks[:5]
-        else:
-            found_chunks = []
-        
-        await alog_event(
-            user_id=user_id,
-            username=message.from_user.username,
-            event="kb_search_performed",
-            meta={"question": question, "chunks_found": len(found_chunks)},
-        )
+            # Поиск 3: ключевые слова из вопроса
+            keywords = re.findall(r"\b\w{4,}\b", query_text.lower())
+            if keywords and len(keywords) >= 2:
+                keywords_query = " ".join(keywords[:5])
+                if keywords_query != query_text.lower() and len(keywords_query) > 5:
+                    embedding_kw = await asyncio.to_thread(create_embedding, keywords_query)
+                    chunks_kw = qdrant_service.search_multi_level(
+                        query_embedding=embedding_kw,
+                        top_k=3,
+                        initial_threshold=0.4,
+                        fallback_thresholds=[0.2, 0.1],
+                    )
+                    for chunk in chunks_kw:
+                        t = chunk.get("text", "")
+                        if t and t not in seen_texts:
+                            all_found_chunks.append(chunk)
+                            seen_texts.add(t)
+            if USE_HYDE and query_text.strip():
+                from app.services.hyde_search import generate_hypothetical_answer, merge_hyde_with_main
+                hyde_text = await generate_hypothetical_answer(query_text)
+                if hyde_text:
+                    embedding_hyde = await asyncio.to_thread(create_embedding, hyde_text)
+                    hyde_chunks = qdrant_service.search_multi_level(
+                        query_embedding=embedding_hyde,
+                        top_k=10,
+                        initial_threshold=0.3,
+                        fallback_thresholds=[0.2, 0.1],
+                    )
+                    if hyde_chunks:
+                        all_found_chunks = merge_hyde_with_main(all_found_chunks, hyde_chunks, top_n=20)
+            all_found_chunks.sort(key=lambda x: x.get("score", 0), reverse=True)
+            if USE_HYBRID_BM25 and all_found_chunks:
+                from app.services.bm25_search import hybrid_vector_bm25
+                initial_chunks = hybrid_vector_bm25(query_text, all_found_chunks, top_n=15)
+            else:
+                initial_chunks = all_found_chunks[:15]
+            if initial_chunks:
+                await searching_msg.edit_text(f"🔍 Нашёл {len(initial_chunks)} фрагментов, анализирую релевантность...")
+            if initial_chunks:
+                try:
+                    reranked_chunks = await rerank_chunks_with_llm(query_text, initial_chunks, top_k=8)
+                    found_chunks = select_best_chunks(reranked_chunks, max_chunks=5, min_score=0.1)
+                    found_chunks = [c for c in found_chunks if c.get("score", 0) >= MIN_SCORE_AFTER_RERANK]
+                except Exception as e:
+                    logger.exception(f"[GROUP_CHAT_QA] Ошибка re-ranking: {e}")
+                    found_chunks = [c for c in initial_chunks[:5] if c.get("score", 0) >= MIN_SCORE_AFTER_RERANK]
+            else:
+                found_chunks = []
+            if not found_chunks:
+                logger.info("[GROUP_CHAT_QA] Нет чанков выше MIN_SCORE_AFTER_RERANK, эскалация")
+                await searching_msg.delete()
+                _qh = str(hash(query_text.strip().lower()[:200])) if query_text else ""
+                await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": _qh, "chunks_found": 0, "outcome": "escalation"})
+                await _tag_manager_in_chat(message, query_text)
+                return
+            set_cached_chunks(query_text, found_chunks)
+            question_hash = str(hash(query_text.strip().lower()[:200])) if query_text else ""
+            await alog_event(
+                user_id=user_id,
+                username=message.from_user.username,
+                event="kb_search_performed",
+                meta={
+                    "question_hash": question_hash,
+                    "chunks_found": len(found_chunks),
+                    "top_scores": [round(c.get("score", 0), 3) for c in found_chunks[:3]],
+                    "top_sources": [str((c.get("metadata") or {}).get("source", ""))[:50] for c in found_chunks[:3]],
+                },
+            )
         
         # Проверка достаточности данных (используем эффективный вопрос: объединённый при ответе на уточнение)
         sufficient, missing_info = await _check_sufficient_data(query_text, found_chunks)
@@ -566,6 +607,12 @@ async def process_question_in_group_chat(message: Message) -> None:
             is_first_turn=is_first_turn,
             user_name=user_name,
         )
+        grounded = await check_answer_grounding(answer, found_chunks)
+        if not grounded:
+            logger.warning("[GROUP_CHAT_QA] Ответ не обоснован фрагментами (grounding), эскалация")
+            await searching_msg.delete()
+            await _tag_manager_in_chat(message, query_text)
+            return
 
         await searching_msg.delete()
         # Отправляем ответ
@@ -579,7 +626,11 @@ async def process_question_in_group_chat(message: Message) -> None:
             user_id=user_id,
             username=message.from_user.username,
             event="kb_answer_generated",
-            meta={"question": question, "chunks_used": len(found_chunks)},
+            meta={
+                "question_hash": question_hash,
+                "chunks_used": len(found_chunks),
+                "outcome": "answer",
+            },
         )
         
     except Exception as e:

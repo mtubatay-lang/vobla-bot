@@ -14,6 +14,23 @@ from app.config import (
 logger = logging.getLogger(__name__)
 
 
+def get_chunk_structural_metadata(chunk_text: str) -> Dict[str, Any]:
+    """Возвращает структурные метаданные для чанка: is_checklist, item_count, section_heading."""
+    text = (chunk_text or "").strip()
+    numbered_lines = re.findall(r"^\d+[\.\)]\s+.+", text, re.MULTILINE)
+    item_count = len(numbered_lines)
+    is_checklist = item_count >= 3
+    section_heading = ""
+    first_line = text.split("\n")[0].strip() if text else ""
+    if first_line and (first_line.endswith(":") or first_line.startswith("#") or re.match(r"^\d+[\.\)]\s+", first_line)):
+        section_heading = first_line[:200]
+    return {
+        "is_checklist": is_checklist,
+        "item_count": item_count,
+        "section_heading": section_heading,
+    }
+
+
 def chunk_text(text: str, chunk_size: int = None, overlap: int = None) -> List[Dict[str, Any]]:
     """Разбивает текст на чанки с перекрытием.
     
@@ -233,7 +250,8 @@ def semantic_chunk_text(
     
     for i, paragraph in enumerate(paragraphs):
         para_length = len(paragraph)
-        
+        is_numbered_item = bool(re.match(r'^\d+[\.\)]\s+', paragraph))
+
         # Проверяем, не является ли это границей смыслового блока
         # (упрощенная проверка - если абзац короткий и похож на заголовок)
         is_boundary = (
@@ -241,6 +259,18 @@ def semantic_chunk_text(
             (paragraph.endswith(':') or paragraph.startswith('#') or
              re.match(r'^\d+[\.\)]\s+[А-ЯЁ]', paragraph))
         )
+        
+        # Не разрываем нумерованный список: если текущий чанк заканчивается на пункт списка и абзац — тоже пункт, не режем
+        last_is_numbered = (
+            current_chunk_parts and
+            re.match(r'^\d+[\.\)]\s+', current_chunk_parts[-1])
+        )
+        if last_is_numbered and is_numbered_item and (current_length + para_length > max_size):
+            # Превысили max_size, но оба — пункты списка: не режем, добавляем в текущий чанк (до разумного лимита)
+            if current_length + para_length <= max_size * 2:
+                current_chunk_parts.append(paragraph)
+                current_length += para_length + 2
+                continue
         
         # Если добавление абзаца превысит max_size
         if current_length + para_length > max_size and current_chunk_parts:

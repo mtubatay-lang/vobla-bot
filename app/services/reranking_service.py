@@ -5,7 +5,7 @@ import logging
 from typing import List, Dict, Any, Optional
 
 from app.services.openai_client import client, CHAT_MODEL
-from app.config import RERANK_TOP_K, RERANK_USE_LLM
+from app.config import RERANK_TOP_K, RERANK_USE_LLM, USE_CROSS_ENCODER_RERANK, COHERE_API_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -25,13 +25,17 @@ async def rerank_chunks_with_llm(
     Returns:
         Отсортированный список чанков с обновленными scores
     """
+    if not chunks:
+        return []
+
+    if USE_CROSS_ENCODER_RERANK and COHERE_API_KEY:
+        from app.services.cross_encoder_reranker import rerank_chunks_with_cohere
+        return await rerank_chunks_with_cohere(question, chunks, top_k=top_k or RERANK_TOP_K)
+
     if not RERANK_USE_LLM:
         # Если re-ranking отключен, просто сортируем по исходному score
         sorted_chunks = sorted(chunks, key=lambda x: x.get("score", 0), reverse=True)
         return sorted_chunks[:top_k or RERANK_TOP_K]
-    
-    if not chunks:
-        return []
     
     if top_k is None:
         top_k = RERANK_TOP_K
@@ -58,8 +62,9 @@ async def rerank_chunks_with_llm(
             "2. Чанк должен напрямую отвечать на вопрос или содержать релевантную информацию\n"
             "3. Учитывай исходный score, но можешь его корректировать\n"
             "4. Если в вопросе есть «чек-лист», «критерии», «требования к помещению/месту», «выбор месторасположения» — отдавай приоритет чанкам с подробным нумерованным списком (много пунктов), а не короткому перечню из 2–3 пунктов.\n"
-            "5. Верни список номеров чанков в порядке убывания релевантности\n"
-            "6. Формат ответа: только номера чанков через запятую, например: 3,1,5,2,4"
+            "5. При равной релевантности предпочитай чанки из официальных источников (чек-лист, регламент, document_type или source с такими значениями).\n"
+            "6. Верни список номеров чанков в порядке убывания релевантности\n"
+            "7. Формат ответа: только номера чанков через запятую, например: 3,1,5,2,4"
         )
         
         user_prompt = (
@@ -129,6 +134,19 @@ async def rerank_chunks_with_llm(
         return sorted(chunks_to_rerank, key=lambda x: x.get("score", 0), reverse=True)[:top_k]
 
 
+def _source_priority(chunk: Dict[str, Any]) -> int:
+    """Возвращает 1 если чанк из официального источника (чек-лист, регламент), иначе 0."""
+    meta = chunk.get("metadata") or {}
+    if not isinstance(meta, dict):
+        return 0
+    source = (meta.get("source") or "").lower()
+    doc_type = (meta.get("document_type") or "").lower()
+    for term in ("чек-лист", "чеклист", "регламент", "checklist", "официальн"):
+        if term in source or term in doc_type:
+            return 1
+    return 0
+
+
 def select_best_chunks(
     chunks: List[Dict[str, Any]],
     max_chunks: int = 5,
@@ -149,6 +167,11 @@ def select_best_chunks(
     
     # Фильтруем по минимальному score
     filtered_chunks = [chunk for chunk in chunks if chunk.get("score", 0) >= min_score]
+    # При равном score предпочитаем официальные источники (чек-лист, регламент)
+    filtered_chunks.sort(
+        key=lambda c: (c.get("score", 0), _source_priority(c)),
+        reverse=True,
+    )
     
     # Убираем дубликаты по тексту (схожие чанки)
     seen_texts = set()

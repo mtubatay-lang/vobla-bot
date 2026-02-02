@@ -101,6 +101,21 @@ SEMANTIC_CHUNK_OVERLAP = int(os.getenv("SEMANTIC_CHUNK_OVERLAP", "150"))
 # Re-ranking Settings
 RERANK_TOP_K = int(os.getenv("RERANK_TOP_K", "10"))
 RERANK_USE_LLM = os.getenv("RERANK_USE_LLM", "true").lower() == "true"
+# Минимальный score после rerank: чанки ниже порога не отдаются в генерацию; если все ниже — эскалация
+MIN_SCORE_AFTER_RERANK = float(os.getenv("MIN_SCORE_AFTER_RERANK", "0.25"))
+# Cross-encoder reranker (Cohere): если True и задан COHERE_API_KEY — используем Cohere Rerank вместо LLM
+USE_CROSS_ENCODER_RERANK = os.getenv("USE_CROSS_ENCODER_RERANK", "false").lower() == "true"
+COHERE_API_KEY = os.getenv("COHERE_API_KEY", "")
+# Гибридный поиск: векторный + BM25 по кандидатам, объединение через RRF
+USE_HYBRID_BM25 = os.getenv("USE_HYBRID_BM25", "false").lower() == "true"
+# HyDE: генерировать гипотетический ответ, искать по нему в Qdrant, объединять с основным поиском через RRF
+USE_HYDE = os.getenv("USE_HYDE", "false").lower() == "true"
+# Дедупликация при индексации: не добавлять чанк, если уже есть очень похожий (cosine >= 0.95)
+DEDUP_AT_INDEX = os.getenv("DEDUP_AT_INDEX", "true").lower() == "true"
+DEDUP_AT_INDEX_THRESHOLD = float(os.getenv("DEDUP_AT_INDEX_THRESHOLD", "0.95"))
+# Кэш результатов RAG по запросу (in-memory, TTL в секундах)
+RAG_QUERY_CACHE_ENABLED = os.getenv("RAG_QUERY_CACHE_ENABLED", "false").lower() == "true"
+RAG_QUERY_CACHE_TTL = int(os.getenv("RAG_QUERY_CACHE_TTL", "3600"))
 
 # Chunk Analysis Settings
 CHUNK_ANALYSIS_ENABLED = os.getenv("CHUNK_ANALYSIS_ENABLED", "true").lower() == "true"

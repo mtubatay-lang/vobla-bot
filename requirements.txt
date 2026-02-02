@@ -42,6 +42,7 @@ yarl==1.22.0
 
 # --- Qdrant и обработка документов для RAG ---
 qdrant-client==1.16.2
+rank-bm25==0.2.2
 pypdf==3.17.0
 python-docx==1.1.0
 markdown==3.5.1

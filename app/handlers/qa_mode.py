@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 import uuid
@@ -16,6 +17,7 @@ from app.services.auth_service import find_user_by_telegram_id
 from app.services.faq_service import find_similar_question
 from app.services.metrics_service import alog_event  # async-логгер
 from app.services.openai_client import polish_faq_answer, create_embedding, client, CHAT_MODEL
+from app.services.openai_client import check_answer_grounding
 from app.services.qdrant_service import get_qdrant_service
 from app.services.pending_questions_service import create_ticket_and_notify_managers
 from app.services.qa_feedback_service import save_qa_feedback
@@ -27,7 +29,7 @@ from app.services.chunk_analyzer_service import (
 )
 from app.services.conversation_phrases import get_phrases_examples
 from app.ui.keyboards import qa_kb, main_menu_kb
-from app.config import MAX_CLARIFICATION_ROUNDS
+from app.config import MAX_CLARIFICATION_ROUNDS, MIN_SCORE_AFTER_RERANK, USE_HYBRID_BM25, USE_HYDE
 
 logger = logging.getLogger(__name__)
 
@@ -659,6 +661,7 @@ async def _expand_query_for_search(original_query: str) -> str:
         "расскажи про", "расскажи о", "что такое", "что это",
         "как работает", "про что",
         "как выбрать", "как подобрать", "по каким критериям",
+        "чек-лист", "чек лист", "критерии", "требования к",
     ])
     
     # Проверяем, нужно ли добавить нормализацию названий
@@ -1108,12 +1111,13 @@ async def _generate_answer_from_chunks_private(
             "5. Если фрагменты действительно не содержат релевантной информации, только тогда скажи об этом.\n\n"
             "ПРАВИЛА ОТВЕТА:\n"
             "1. Используй ТОЛЬКО информацию из предоставленных фрагментов\n"
-            "2. НЕ придумывай факты, которых нет в фрагментах\n"
-            "3. Внимательно ищи релевантную информацию в каждом фрагменте\n"
-            "4. Объединяй информацию из всех релевантных фрагментов для создания полного ответа\n"
-            "5. Структурируй ответ: абзацы, списки, если уместно\n"
-            "6. Будь дружелюбным и понятным\n"
-            "7. Учитывай контекст предыдущих сообщений, но отвечай на текущий вопрос"
+            "2. Для каждого факта указывай номер фрагмента (1, 2, …), если уместно. Не используй информацию не из фрагментов.\n"
+            "3. НЕ придумывай факты, которых нет в фрагментах\n"
+            "4. Внимательно ищи релевантную информацию в каждом фрагменте\n"
+            "5. Объединяй информацию из всех релевантных фрагментов для создания полного ответа\n"
+            "6. Структурируй ответ: абзацы, списки, если уместно\n"
+            "7. Будь дружелюбным и понятным\n"
+            "8. Учитывай контекст предыдущих сообщений, но отвечай на текущий вопрос"
         )
         
         # Добавляем контекст предыдущего ответа для follow-up вопросов
@@ -1533,9 +1537,27 @@ async def qa_handle_question(message: Message, state: FSMContext):
                         all_found_chunks.append(chunk)
                         seen_texts.add(chunk_text)
         
-        # Сортируем по score и берем топ-10 для re-ranking
+        if USE_HYDE and query_text.strip():
+            from app.services.hyde_search import generate_hypothetical_answer, merge_hyde_with_main
+            hyde_text = await generate_hypothetical_answer(query_text)
+            if hyde_text:
+                embedding_hyde = await asyncio.to_thread(create_embedding, hyde_text)
+                hyde_chunks = qdrant_service.search_multi_level(
+                    query_embedding=embedding_hyde,
+                    top_k=10,
+                    initial_threshold=0.3,
+                    fallback_thresholds=[0.2, 0.1],
+                )
+                if hyde_chunks:
+                    all_found_chunks = merge_hyde_with_main(all_found_chunks, hyde_chunks, top_n=20)
+        
+        # Сортируем по score и берем топ-15 для re-ranking (опционально гибрид vector+BM25)
         all_found_chunks.sort(key=lambda x: x.get("score", 0), reverse=True)
-        initial_chunks = all_found_chunks[:10]
+        if USE_HYBRID_BM25 and all_found_chunks:
+            from app.services.bm25_search import hybrid_vector_bm25
+            initial_chunks = hybrid_vector_bm25(query_text, all_found_chunks, top_n=15)
+        else:
+            initial_chunks = all_found_chunks[:15]
         
         # Re-ranking через LLM
         if initial_chunks:
@@ -1544,12 +1566,16 @@ async def qa_handle_question(message: Message, state: FSMContext):
                 reranked_chunks = await rerank_chunks_with_llm(q, initial_chunks, top_k=8)
                 # Выбираем лучшие уникальные чанки
                 found_chunks = select_best_chunks(reranked_chunks, max_chunks=5, min_score=0.1)
-                logger.info(f"[QA_MODE] После re-ranking выбрано {len(found_chunks)} чанков")
+                found_chunks = [c for c in found_chunks if c.get("score", 0) >= MIN_SCORE_AFTER_RERANK]
+                logger.info(f"[QA_MODE] После re-ranking выбрано {len(found_chunks)} чанков (score >= {MIN_SCORE_AFTER_RERANK})")
             except Exception as e:
                 logger.exception(f"[QA_MODE] Ошибка re-ranking: {e}")
-                found_chunks = initial_chunks[:5]
+                found_chunks = [c for c in initial_chunks[:5] if c.get("score", 0) >= MIN_SCORE_AFTER_RERANK]
         else:
             found_chunks = []
+
+        if not found_chunks:
+            logger.info("[QA_MODE] Нет чанков выше MIN_SCORE_AFTER_RERANK, переход к эскалации/FAQ")
         
         if len(all_found_chunks) > chunks_expanded_count:
             logger.info(
@@ -1579,11 +1605,17 @@ async def qa_handle_question(message: Message, state: FSMContext):
                 f"(расширенный: '{expanded_query[:80]}...')"
             )
         
+        q_hash = str(hash((query_text or q).strip().lower()[:200]))
         await alog_event(
             user_id=message.from_user.id if message.from_user else None,
             username=message.from_user.username if message.from_user else None,
             event="kb_search_performed_private",
-            meta={"question": q, "chunks_found": len(found_chunks)},
+            meta={
+                "question_hash": q_hash,
+                "chunks_found": len(found_chunks),
+                "top_scores": [round(c.get("score", 0), 3) for c in found_chunks[:3]],
+                "top_sources": [str((c.get("metadata") or {}).get("source", ""))[:50] for c in found_chunks[:3]],
+            },
         )
         
         # Если нашли чанки в Qdrant
@@ -1642,6 +1674,12 @@ async def qa_handle_question(message: Message, state: FSMContext):
                     is_first_question=is_first_question,
                     topics_summary=topics_summary
                 )
+                grounded = await check_answer_grounding(answer, all_chunks)
+                if not grounded:
+                    logger.warning("[QA_MODE] Ответ не обоснован фрагментами (grounding), эскалация")
+                    should_escalate = True
+                else:
+                    pass  # продолжаем проверки и отправку ответа ниже
                 
                 # Проверяем, не говорит ли ответ что данных нет (хотя чанки найдены)
                 answer_lower = answer.lower()
@@ -1654,14 +1692,16 @@ async def qa_handle_question(message: Message, state: FSMContext):
                     "данные отсутствуют",
                 ]
                 
-                if any(phrase in answer_lower for phrase in no_data_phrases) and all_chunks:
-                    logger.warning(
-                        f"[QA_MODE] LLM говорит что данных нет, но чанки найдены ({len(all_chunks)}). "
-                        f"Эскалируем менеджеру."
-                    )
-                    # Эскалируем менеджеру - устанавливаем флаг и продолжаем выполнение
-                    should_escalate = True
-                else:
+                if not grounded or (any(phrase in answer_lower for phrase in no_data_phrases) and all_chunks):
+                    if not grounded:
+                        pass  # already set should_escalate above
+                    else:
+                        logger.warning(
+                            f"[QA_MODE] LLM говорит что данных нет, но чанки найдены ({len(all_chunks)}). "
+                            f"Эскалируем менеджеру."
+                        )
+                        should_escalate = True
+                if not should_escalate:
                     # Извлекаем ключевые моменты из ответа (простая версия)
                     # Можно улучшить через LLM для более точного извлечения
                     answer_sentences = re.split(r'[.!?]\s+', answer)
@@ -1696,6 +1736,7 @@ async def qa_handle_question(message: Message, state: FSMContext):
                         qa_history=history[-8:],
                         qa_last_answer_source="qdrant_rag",
                         qa_found_chunks=all_chunks,  # Сохраняем для follow-up вопросов
+                        qa_last_answer_text=answer,
                     )
                     
                     # Удаляем промежуточное сообщение
@@ -1766,6 +1807,8 @@ async def qa_handle_question(message: Message, state: FSMContext):
             await state.update_data(
                 qa_history=history[-8:],
                 qa_last_answer_source="faq",
+                qa_last_answer_text=pretty,
+                qa_found_chunks=[],  # FAQ — не из RAG
             )
             
             # Удаляем промежуточное сообщение, если оно есть
@@ -1824,7 +1867,7 @@ async def qa_handle_question(message: Message, state: FSMContext):
             f"Исходный вопрос: '{original_question[:50]}...'. "
             f"Полный контекст: '{full_question[:150]}...'. Эскалируем менеджеру."
         )
-        await state.update_data(qa_last_answer_source="manager")
+        await state.update_data(qa_last_answer_source="manager", qa_last_answer_text="", qa_found_chunks=[])
         
         # Удаляем промежуточное сообщение
         try:
@@ -1925,6 +1968,25 @@ async def _finalize_feedback(msg_obj, state: FSMContext, comment: str):
 
     user_id = msg_obj.from_user.id
     username = msg_obj.from_user.username
+
+    # Phase 5.4: при «Не помогло» логируем вопрос, chunk ids и ответ для разбора
+    if helped == "no":
+        last_answer_text = data.get("qa_last_answer_text", "") or ""
+        found_chunks = data.get("qa_found_chunks", []) or []
+        chunk_ids = [str(c.get("id", "")) for c in found_chunks if c.get("id")]
+        question_hash = hashlib.sha256((last_question or "").strip().encode("utf-8")).hexdigest()[:16]
+        await alog_event(
+            user_id=user_id,
+            username=username,
+            event="qa_feedback_not_helped",
+            meta={
+                "question_hash": question_hash,
+                "question_preview": (last_question or "")[:100],
+                "chunk_ids": chunk_ids,
+                "answer_preview": last_answer_text[:300],
+                "answer_source": last_answer_source,
+            },
+        )
 
     save_qa_feedback(
         session_id=session_id,
