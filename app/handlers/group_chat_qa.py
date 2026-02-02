@@ -16,8 +16,8 @@ from app.services.qdrant_service import get_qdrant_service
 from app.services.openai_client import create_embedding, client, CHAT_MODEL
 from app.services.openai_client import check_answer_grounding
 from app.services.metrics_service import alog_event
-from app.services.reranking_service import rerank_chunks_with_llm, select_best_chunks, select_best_chunks_diverse
-from app.config import MANAGER_USERNAMES, get_rag_test_chat_id, MAX_CLARIFICATION_ROUNDS, MIN_SCORE_AFTER_RERANK, RAG_MAX_CHUNKS_FOR_GENERATION, USE_DIVERSE_CHUNKS, USE_HYBRID_BM25, USE_HYDE, USE_MULTI_ASPECT
+from app.services.reranking_service import rerank_chunks_with_llm
+from app.config import MANAGER_USERNAMES, get_rag_test_chat_id, MAX_CLARIFICATION_ROUNDS, RAG_MAX_CHUNKS_TO_LLM, USE_HYBRID_BM25, USE_HYDE, USE_MULTI_ASPECT
 from app.handlers.qa_mode import _expand_query_for_search, detect_clarification_response_vs_new_question
 
 logger = logging.getLogger(__name__)
@@ -274,6 +274,7 @@ async def _generate_answer_from_chunks(
             "2) Затем конкретные действия/инструкция (что сделать).\n"
             "3) В конце — один уточняющий вопрос только если он действительно нужен для точности. Если пользователь просит «просто ответ» — не задавай уточнений.\n\n"
             "Работа с фрагментами базы знаний (критично):\n"
+            "- Тебе передано много фрагментов; часть может быть слабо связана с вопросом. Используй только релевантные, про остальные не пиши. Собери из релевантных один полный структурированный ответ.\n"
             "- Фрагменты могут описывать разные аспекты темы (критерии, процесс, чек-листы, документы). Твой ответ должен объединять все релевантные аспекты из всех фрагментов в один структурированный ответ: разделы, списки, шаги. Действуй так, как если бы у тебя был весь документ — не ограничивайся одним фрагментом.\n"
             "- Отвечай ТОЛЬКО на основе предоставленных фрагментов. НЕ выдумывай факты, цифры, сроки, названия, стандарты.\n"
             "- Для каждого факта указывай номер фрагмента (1, 2, …), если уместно. Не используй информацию не из фрагментов.\n"
@@ -462,9 +463,9 @@ async def process_question_in_group_chat(message: Message) -> None:
         from app.services.rag_query_cache import get_cached_chunks, set_cached_chunks
         cached = get_cached_chunks(query_text)
         if cached is not None:
-            found_chunks = [c for c in cached if c.get("score", 0) >= MIN_SCORE_AFTER_RERANK]
+            found_chunks = cached[:RAG_MAX_CHUNKS_TO_LLM]
             if not found_chunks:
-                logger.info("[GROUP_CHAT_QA] Кэш: нет чанков выше MIN_SCORE_AFTER_RERANK, эскалация")
+                logger.info("[GROUP_CHAT_QA] Кэш: пусто, эскалация")
                 await searching_msg.delete()
                 _qh = str(hash(query_text.strip().lower()[:200])) if query_text else ""
                 await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": _qh, "chunks_found": 0, "outcome": "escalation", "from_cache": True})
@@ -566,19 +567,15 @@ async def process_question_in_group_chat(message: Message) -> None:
                 await searching_msg.edit_text(f"🔍 Нашёл {len(initial_chunks)} фрагментов, анализирую релевантность...")
             if initial_chunks:
                 try:
-                    reranked_chunks = await rerank_chunks_with_llm(query_text, initial_chunks, top_k=10)
-                    if USE_DIVERSE_CHUNKS:
-                        found_chunks = select_best_chunks_diverse(reranked_chunks, max_chunks=RAG_MAX_CHUNKS_FOR_GENERATION, min_score=0.1, max_per_group=2)
-                    else:
-                        found_chunks = select_best_chunks(reranked_chunks, max_chunks=RAG_MAX_CHUNKS_FOR_GENERATION, min_score=0.1)
-                    found_chunks = [c for c in found_chunks if c.get("score", 0) >= MIN_SCORE_AFTER_RERANK]
+                    reranked_chunks = await rerank_chunks_with_llm(query_text, initial_chunks, top_k=RAG_MAX_CHUNKS_TO_LLM)
+                    found_chunks = reranked_chunks[:RAG_MAX_CHUNKS_TO_LLM]
                 except Exception as e:
                     logger.exception(f"[GROUP_CHAT_QA] Ошибка re-ranking: {e}")
-                    found_chunks = [c for c in initial_chunks[:RAG_MAX_CHUNKS_FOR_GENERATION] if c.get("score", 0) >= MIN_SCORE_AFTER_RERANK]
+                    found_chunks = initial_chunks[:RAG_MAX_CHUNKS_TO_LLM]
             else:
                 found_chunks = []
             if not found_chunks:
-                logger.info("[GROUP_CHAT_QA] Нет чанков выше MIN_SCORE_AFTER_RERANK, эскалация")
+                logger.info("[GROUP_CHAT_QA] Нет чанков после rerank, эскалация")
                 await searching_msg.delete()
                 _qh = str(hash(query_text.strip().lower()[:200])) if query_text else ""
                 await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": _qh, "chunks_found": 0, "outcome": "escalation"})

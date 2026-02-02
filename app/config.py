@@ -118,6 +118,8 @@ RAG_QUERY_CACHE_ENABLED = os.getenv("RAG_QUERY_CACHE_ENABLED", "false").lower() 
 RAG_QUERY_CACHE_TTL = int(os.getenv("RAG_QUERY_CACHE_TTL", "3600"))
 # Максимум чанков в контексте генерации (ответ «как весь документ»)
 RAG_MAX_CHUNKS_FOR_GENERATION = int(os.getenv("RAG_MAX_CHUNKS_FOR_GENERATION", "8"))
+# Верхняя граница чанков, передаваемых в LLM после rerank (все до лимита, без фильтра по score)
+RAG_MAX_CHUNKS_TO_LLM = int(os.getenv("RAG_MAX_CHUNKS_TO_LLM", "20"))
 # Multi-aspect retrieval: подзапросы по аспектам (критерии, скоринг, процесс, чек-лист)
 USE_MULTI_ASPECT = os.getenv("USE_MULTI_ASPECT", "true").lower() == "true"
 # Diversity-aware отбор: не более 2 чанков из одной группы (section_heading)

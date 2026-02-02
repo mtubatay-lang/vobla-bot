@@ -21,7 +21,7 @@ from app.services.openai_client import check_answer_grounding
 from app.services.qdrant_service import get_qdrant_service
 from app.services.pending_questions_service import create_ticket_and_notify_managers
 from app.services.qa_feedback_service import save_qa_feedback
-from app.services.reranking_service import rerank_chunks_with_llm, select_best_chunks, select_best_chunks_diverse
+from app.services.reranking_service import rerank_chunks_with_llm
 from app.services.chunk_analyzer_service import (
     analyze_chunks_relevance,
     select_and_combine_chunks,
@@ -29,7 +29,7 @@ from app.services.chunk_analyzer_service import (
 )
 from app.services.conversation_phrases import get_phrases_examples
 from app.ui.keyboards import qa_kb, main_menu_kb
-from app.config import MAX_CLARIFICATION_ROUNDS, MIN_SCORE_AFTER_RERANK, RAG_MAX_CHUNKS_FOR_GENERATION, USE_DIVERSE_CHUNKS, USE_HYBRID_BM25, USE_HYDE, USE_MULTI_ASPECT
+from app.config import MAX_CLARIFICATION_ROUNDS, RAG_MAX_CHUNKS_TO_LLM, USE_HYBRID_BM25, USE_HYDE, USE_MULTI_ASPECT
 
 logger = logging.getLogger(__name__)
 
@@ -1110,15 +1110,16 @@ async def _generate_answer_from_chunks_private(
             "4. Если в фрагментах есть информация, связанная с вопросом (даже частично), используй её для ответа.\n"
             "5. Если фрагменты действительно не содержат релевантной информации, только тогда скажи об этом.\n\n"
             "ПРАВИЛА ОТВЕТА:\n"
-            "1. Фрагменты могут описывать разные аспекты темы (критерии, процесс, чек-листы, документы). Твой ответ должен объединять все релевантные аспекты из всех фрагментов в один структурированный ответ: разделы, списки, шаги. Действуй так, как если бы у тебя был весь документ — не ограничивайся одним фрагментом.\n"
-            "2. Используй ТОЛЬКО информацию из предоставленных фрагментов\n"
-            "3. Для каждого факта указывай номер фрагмента (1, 2, …), если уместно. Не используй информацию не из фрагментов.\n"
-            "4. НЕ придумывай факты, которых нет в фрагментах\n"
-            "5. Внимательно ищи релевантную информацию в каждом фрагменте\n"
-            "6. Объединяй информацию из всех релевантных фрагментов для создания полного ответа\n"
-            "7. Структурируй ответ: абзацы, списки, если уместно\n"
-            "8. Будь дружелюбным и понятным\n"
-            "9. Учитывай контекст предыдущих сообщений, но отвечай на текущий вопрос"
+            "1. Тебе передано много фрагментов; часть может быть слабо связана с вопросом. Используй только релевантные, про остальные не пиши. Собери из релевантных один полный структурированный ответ.\n"
+            "2. Фрагменты могут описывать разные аспекты темы (критерии, процесс, чек-листы, документы). Твой ответ должен объединять все релевантные аспекты из всех фрагментов в один структурированный ответ: разделы, списки, шаги. Действуй так, как если бы у тебя был весь документ — не ограничивайся одним фрагментом.\n"
+            "3. Используй ТОЛЬКО информацию из предоставленных фрагментов\n"
+            "4. Для каждого факта указывай номер фрагмента (1, 2, …), если уместно. Не используй информацию не из фрагментов.\n"
+            "5. НЕ придумывай факты, которых нет в фрагментах\n"
+            "6. Внимательно ищи релевантную информацию в каждом фрагменте\n"
+            "7. Объединяй информацию из всех релевантных фрагментов для создания полного ответа\n"
+            "8. Структурируй ответ: абзацы, списки, если уместно\n"
+            "9. Будь дружелюбным и понятным\n"
+            "10. Учитывай контекст предыдущих сообщений, но отвечай на текущий вопрос"
         )
         
         # Добавляем контекст предыдущего ответа для follow-up вопросов
@@ -1583,26 +1584,21 @@ async def qa_handle_question(message: Message, state: FSMContext):
         else:
             initial_chunks = all_found_chunks[:20]
         
-        # Re-ranking через LLM (больше кандидатов в rerank и в финале)
+        # Re-ranking через LLM; все чанки после rerank (до лимита) передаём в генерацию
         if initial_chunks:
             try:
                 await searching_msg.edit_text(f"🔍 Нашёл {len(initial_chunks)} фрагментов, анализирую релевантность...")
-                reranked_chunks = await rerank_chunks_with_llm(q, initial_chunks, top_k=10)
-                # Выбираем лучшие уникальные чанки (с diversity по section_heading при включённом флаге)
-                if USE_DIVERSE_CHUNKS:
-                    found_chunks = select_best_chunks_diverse(reranked_chunks, max_chunks=RAG_MAX_CHUNKS_FOR_GENERATION, min_score=0.1, max_per_group=2)
-                else:
-                    found_chunks = select_best_chunks(reranked_chunks, max_chunks=RAG_MAX_CHUNKS_FOR_GENERATION, min_score=0.1)
-                found_chunks = [c for c in found_chunks if c.get("score", 0) >= MIN_SCORE_AFTER_RERANK]
-                logger.info(f"[QA_MODE] После re-ranking выбрано {len(found_chunks)} чанков (score >= {MIN_SCORE_AFTER_RERANK})")
+                reranked_chunks = await rerank_chunks_with_llm(q, initial_chunks, top_k=RAG_MAX_CHUNKS_TO_LLM)
+                found_chunks = reranked_chunks[:RAG_MAX_CHUNKS_TO_LLM]
+                logger.info(f"[QA_MODE] После re-ranking передаём в LLM {len(found_chunks)} чанков")
             except Exception as e:
                 logger.exception(f"[QA_MODE] Ошибка re-ranking: {e}")
-                found_chunks = [c for c in initial_chunks[:RAG_MAX_CHUNKS_FOR_GENERATION] if c.get("score", 0) >= MIN_SCORE_AFTER_RERANK]
+                found_chunks = initial_chunks[:RAG_MAX_CHUNKS_TO_LLM]
         else:
             found_chunks = []
 
         if not found_chunks:
-            logger.info("[QA_MODE] Нет чанков выше MIN_SCORE_AFTER_RERANK, переход к эскалации/FAQ")
+            logger.info("[QA_MODE] Нет чанков после rerank, переход к эскалации/FAQ")
         
         if len(all_found_chunks) > chunks_expanded_count:
             logger.info(
