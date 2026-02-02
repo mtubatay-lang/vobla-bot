@@ -116,11 +116,6 @@ async def rerank_chunks_with_llm(
                 # Берем только top_k
                 reranked_chunks = reranked_chunks[:top_k]
             
-            # Присваиваем score по позиции после rerank, чтобы фильтр MIN_SCORE_AFTER_RERANK
-            # не отсекал чанки, которые LLM уже признал релевантными (исходные vector scores
-            # от aspect-запросов с низким порогом могли быть < порога)
-            reranked_chunks = _assign_rerank_scores_by_position(reranked_chunks)
-            
             logger.info(
                 f"[RERANKING] Переранжировано {len(reranked_chunks)} чанков из {len(chunks_to_rerank)} "
                 f"для вопроса: '{question[:50]}...'"
@@ -131,23 +126,12 @@ async def rerank_chunks_with_llm(
         except Exception as e:
             logger.exception(f"[RERANKING] Ошибка парсинга ответа LLM: {e}")
             # При ошибке возвращаем исходный порядок
-            out = chunks_to_rerank[:top_k]
-            return _assign_rerank_scores_by_position(out)
+            return chunks_to_rerank[:top_k]
             
     except Exception as e:
         logger.exception(f"[RERANKING] Ошибка re-ranking через LLM: {e}")
         # При ошибке возвращаем исходный порядок
-        out = sorted(chunks_to_rerank, key=lambda x: x.get("score", 0), reverse=True)[:top_k]
-        return _assign_rerank_scores_by_position(out)
-
-
-def _assign_rerank_scores_by_position(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Присваивает чанкам score по позиции после LLM-rerank (топ=1.0, далее по убыванию).
-    Чтобы фильтр MIN_SCORE_AFTER_RERANK не отсекал чанки, уже отобранные reranker'ом."""
-    for i, chunk in enumerate(chunks):
-        # 1.0, 0.92, 0.84, ... — все топ-10 выше 0.25
-        chunk["score"] = max(0.25, 1.0 - (i * 0.08))
-    return chunks
+        return sorted(chunks_to_rerank, key=lambda x: x.get("score", 0), reverse=True)[:top_k]
 
 
 def _source_priority(chunk: Dict[str, Any]) -> int:
