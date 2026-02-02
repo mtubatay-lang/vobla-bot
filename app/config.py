@@ -106,10 +106,10 @@ MIN_SCORE_AFTER_RERANK = float(os.getenv("MIN_SCORE_AFTER_RERANK", "0.25"))
 # Cross-encoder reranker (Cohere): если True и задан COHERE_API_KEY — используем Cohere Rerank вместо LLM
 USE_CROSS_ENCODER_RERANK = os.getenv("USE_CROSS_ENCODER_RERANK", "false").lower() == "true"
 COHERE_API_KEY = os.getenv("COHERE_API_KEY", "")
-# Гибридный поиск: векторный + BM25 по кандидатам, объединение через RRF (вариант E: без Cohere)
-USE_HYBRID_BM25 = os.getenv("USE_HYBRID_BM25", "true").lower() == "true"
+# Гибридный поиск: векторный + BM25 по кандидатам, объединение через RRF
+USE_HYBRID_BM25 = os.getenv("USE_HYBRID_BM25", "false").lower() == "true"
 # HyDE: генерировать гипотетический ответ, искать по нему в Qdrant, объединять с основным поиском через RRF
-USE_HYDE = os.getenv("USE_HYDE", "true").lower() == "true"
+USE_HYDE = os.getenv("USE_HYDE", "false").lower() == "true"
 # Дедупликация при индексации: не добавлять чанк, если уже есть очень похожий (cosine >= 0.95)
 DEDUP_AT_INDEX = os.getenv("DEDUP_AT_INDEX", "true").lower() == "true"
 DEDUP_AT_INDEX_THRESHOLD = float(os.getenv("DEDUP_AT_INDEX_THRESHOLD", "0.95"))

@@ -476,12 +476,12 @@ async def process_question_in_group_chat(message: Message) -> None:
             qdrant_service = get_qdrant_service()
             all_found_chunks = []
             seen_texts = set()
-            # Поиск 1: расширенный запрос (увеличен top_k — вариант E)
+            # Поиск 1: расширенный запрос
             embedding_expanded = await asyncio.to_thread(create_embedding, expanded_query)
             chunks_expanded = qdrant_service.search_multi_level(
                 query_embedding=embedding_expanded,
-                top_k=12,
-                initial_threshold=0.45,
+                top_k=5,
+                initial_threshold=0.5,
                 fallback_thresholds=[0.3, 0.1],
             )
             for chunk in chunks_expanded:
@@ -494,8 +494,8 @@ async def process_question_in_group_chat(message: Message) -> None:
                 embedding_original = await asyncio.to_thread(create_embedding, query_text)
                 chunks_original = qdrant_service.search_multi_level(
                     query_embedding=embedding_original,
-                    top_k=12,
-                    initial_threshold=0.45,
+                    top_k=5,
+                    initial_threshold=0.5,
                     fallback_thresholds=[0.3, 0.1],
                 )
                 for chunk in chunks_original:
@@ -511,7 +511,7 @@ async def process_question_in_group_chat(message: Message) -> None:
                     embedding_kw = await asyncio.to_thread(create_embedding, keywords_query)
                     chunks_kw = qdrant_service.search_multi_level(
                         query_embedding=embedding_kw,
-                        top_k=6,
+                        top_k=3,
                         initial_threshold=0.4,
                         fallback_thresholds=[0.2, 0.1],
                     )
@@ -527,28 +527,28 @@ async def process_question_in_group_chat(message: Message) -> None:
                     embedding_hyde = await asyncio.to_thread(create_embedding, hyde_text)
                     hyde_chunks = qdrant_service.search_multi_level(
                         query_embedding=embedding_hyde,
-                        top_k=12,
+                        top_k=10,
                         initial_threshold=0.3,
                         fallback_thresholds=[0.2, 0.1],
                     )
                     if hyde_chunks:
-                        all_found_chunks = merge_hyde_with_main(all_found_chunks, hyde_chunks, top_n=25)
+                        all_found_chunks = merge_hyde_with_main(all_found_chunks, hyde_chunks, top_n=20)
             all_found_chunks.sort(key=lambda x: x.get("score", 0), reverse=True)
             if USE_HYBRID_BM25 and all_found_chunks:
                 from app.services.bm25_search import hybrid_vector_bm25
-                initial_chunks = hybrid_vector_bm25(query_text, all_found_chunks, top_n=20)
+                initial_chunks = hybrid_vector_bm25(query_text, all_found_chunks, top_n=15)
             else:
-                initial_chunks = all_found_chunks[:20]
+                initial_chunks = all_found_chunks[:15]
             if initial_chunks:
                 await searching_msg.edit_text(f"🔍 Нашёл {len(initial_chunks)} фрагментов, анализирую релевантность...")
             if initial_chunks:
                 try:
-                    reranked_chunks = await rerank_chunks_with_llm(query_text, initial_chunks, top_k=10)
-                    found_chunks = select_best_chunks(reranked_chunks, max_chunks=6, min_score=0.1)
+                    reranked_chunks = await rerank_chunks_with_llm(query_text, initial_chunks, top_k=8)
+                    found_chunks = select_best_chunks(reranked_chunks, max_chunks=5, min_score=0.1)
                     found_chunks = [c for c in found_chunks if c.get("score", 0) >= MIN_SCORE_AFTER_RERANK]
                 except Exception as e:
                     logger.exception(f"[GROUP_CHAT_QA] Ошибка re-ranking: {e}")
-                    found_chunks = [c for c in initial_chunks[:6] if c.get("score", 0) >= MIN_SCORE_AFTER_RERANK]
+                    found_chunks = [c for c in initial_chunks[:5] if c.get("score", 0) >= MIN_SCORE_AFTER_RERANK]
             else:
                 found_chunks = []
             if not found_chunks:
