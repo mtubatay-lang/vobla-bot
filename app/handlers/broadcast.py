@@ -361,9 +361,43 @@ async def skip_media(callback: CallbackQuery, state: FSMContext) -> None:
     await _process_broadcast_text(callback.message, state, text_original, media_json or "")
 
 
+def _audience_preview_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура превью перед выбором аудитории (тест себе, изменить текст/медиа, отмена)."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🧪 Отправить тестовую рассылку себе", callback_data="broadcast:aud:test_self")],
+        [InlineKeyboardButton(text="✏️ Изменить текст", callback_data="broadcast:edit_text")],
+        [InlineKeyboardButton(text="📎 Изменить медиа", callback_data="broadcast:edit_media")],
+        [InlineKeyboardButton(text="❌ Отменить рассылку", callback_data="broadcast:cancel")],
+    ])
+
+
+async def _send_audience_preview(
+    message: Message, text_final: str, media_json: str
+) -> None:
+    """Отправляет превью рассылки и кнопки выбора аудитории (тест себе, изменить текст/медиа, отмена)."""
+    if media_json:
+        try:
+            attachments = json.loads(media_json)
+            if attachments:
+                await _send_media_to_recipient(message.bot, message.chat.id, attachments, text_final)
+        except Exception as e:
+            logger.exception(f"[BROADCAST] Error sending media preview: {e}")
+    keyboard = _audience_preview_keyboard()
+    preview_text = "📋 <b>Превью рассылки</b>\n\n"
+    if text_final:
+        preview_text += f"{text_final}\n\n"
+    else:
+        preview_text += "📝 Текст отсутствует (только медиа)\n\n"
+    if media_json:
+        preview_text += "📎 Медиа прикреплено\n\n"
+    if media_json and text_final:
+        await message.answer("✅ Превью отправлено выше. Выберите действие:", reply_markup=keyboard)
+    else:
+        await message.answer(preview_text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+
+
 async def _process_broadcast_text(message: Message, state: FSMContext, text_original: str, media_json: str) -> None:
-    """Обрабатывает текст рассылки: улучшает через OpenAI и показывает превью."""
-    # Проверка: должен быть хотя бы текст или медиа
+    """Обрабатывает текст рассылки: улучшает через OpenAI и показывает превью (с выбором оригинала/улучшенного при необходимости)."""
     if not text_original and not media_json:
         await message.answer(
             "❌ Нужно ввести хотя бы текст или прикрепить медиа.\n\n"
@@ -371,12 +405,10 @@ async def _process_broadcast_text(message: Message, state: FSMContext, text_orig
         )
         await state.set_state(BroadcastState.waiting_text)
         return
-    
+
     improved_text = ""
     if text_original:
-        # Улучшаем текст через OpenAI
         await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
-        
         try:
             improved = await asyncio.to_thread(improve_broadcast_text, text_original)
             improved_text = improved.get("suggested", text_original) or improved.get("fixed", text_original) or text_original
@@ -385,54 +417,46 @@ async def _process_broadcast_text(message: Message, state: FSMContext, text_orig
             improved_text = text_original
     else:
         improved_text = ""
-    
-    # АВТОМАТИЧЕСКИ выбираем улучшенную версию
+
+    need_variant_choice = (
+        bool(text_original)
+        and bool(improved_text)
+        and improved_text.strip() != text_original.strip()
+    )
+
+    if need_variant_choice:
+        await state.update_data(
+            text_original=text_original,
+            improved_text=improved_text,
+            media_json=media_json,
+        )
+        await state.set_state(BroadcastState.choosing_variant)
+        if media_json:
+            try:
+                attachments = json.loads(media_json)
+                if attachments:
+                    await _send_media_to_recipient(message.bot, message.chat.id, attachments, improved_text)
+            except Exception as e:
+                logger.exception(f"[BROADCAST] Error sending media preview: {e}")
+        variant_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Оставить оригинал", callback_data="broadcast:variant:original")],
+            [InlineKeyboardButton(text="Оставить улучшенный", callback_data="broadcast:variant:improved")],
+        ])
+        preview_msg = "📋 <b>Превью (улучшенный вариант)</b>\n\n" + improved_text
+        if media_json:
+            preview_msg += "\n\n📎 Медиа прикреплено"
+        await message.answer(preview_msg, reply_markup=variant_keyboard, parse_mode=ParseMode.HTML)
+        return
+
     text_final = improved_text if improved_text else text_original
-    
-    # Сохраняем в state
     await state.update_data(
         improved_text=improved_text,
         media_json=media_json,
-        text_final=text_final,  # Сохраняем сразу финальный текст
-        selected_variant="improved"  # Автоматически выбираем улучшенный
+        text_final=text_final,
+        selected_variant="improved" if improved_text else "original",
     )
-    await state.set_state(BroadcastState.choosing_audience)  # Переходим сразу к выбору аудитории
-    
-    # Если есть медиа, отправляем его вместе с текстом
-    if media_json:
-        try:
-            attachments = json.loads(media_json)
-            if attachments:
-                # Отправляем медиа с текстом
-                await _send_media_to_recipient(message.bot, message.chat.id, attachments, text_final)
-        except Exception as e:
-            logger.exception(f"[BROADCAST] Error sending media preview: {e}")
-    
-    # Формируем превью с улучшенным текстом
-    preview_text = "📋 <b>Превью рассылки</b>\n\n"
-    
-    if text_final:
-        preview_text += f"{text_final}\n\n"
-    else:
-        preview_text += "📝 Текст отсутствует (только медиа)\n\n"
-    
-    if media_json:
-        preview_text += "📎 Медиа прикреплено\n\n"
-    
-    # Новые кнопки
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🧪 Отправить тестовую рассылку себе", callback_data="broadcast:aud:test_self")],
-        [InlineKeyboardButton(text="✏️ Изменить текст", callback_data="broadcast:edit_text")],
-        [InlineKeyboardButton(text="📎 Изменить медиа", callback_data="broadcast:edit_media")],
-        [InlineKeyboardButton(text="❌ Отменить рассылку", callback_data="broadcast:cancel")],
-    ])
-    
-    # Если медиа уже отправлено, отправляем только текст с кнопками или только кнопки
-    if media_json and text_final:
-        # Если медиа уже отправлено, отправляем только кнопки
-        await message.answer("✅ Превью отправлено выше. Выберите действие:", reply_markup=keyboard)
-    else:
-        await message.answer(preview_text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+    await state.set_state(BroadcastState.choosing_audience)
+    await _send_audience_preview(message, text_final, media_json)
 
 
 @router.message(BroadcastState.waiting_media)
@@ -499,6 +523,46 @@ async def _process_album_with_debounce(group_key: tuple[str, int], message: Mess
     await _process_broadcast_text(message, state, text_original, media_json)
 
 
+
+
+@router.callback_query(F.data == "broadcast:variant:original")
+async def handle_variant_original(callback: CallbackQuery, state: FSMContext) -> None:
+    """Выбор оригинала в превью рассылки."""
+    if not callback.message:
+        await callback.answer()
+        return
+    if not await _require_admin(callback):
+        await callback.answer()
+        return
+    if not await _check_user_owns_broadcast(callback, state):
+        return
+    data = await state.get_data()
+    text_original = data.get("text_original", "")
+    media_json = data.get("media_json", "")
+    await state.update_data(text_final=text_original, selected_variant="original")
+    await state.set_state(BroadcastState.choosing_audience)
+    await callback.answer()
+    await _send_audience_preview(callback.message, text_original, media_json)
+
+
+@router.callback_query(F.data == "broadcast:variant:improved")
+async def handle_variant_improved(callback: CallbackQuery, state: FSMContext) -> None:
+    """Выбор улучшенного текста в превью рассылки."""
+    if not callback.message:
+        await callback.answer()
+        return
+    if not await _require_admin(callback):
+        await callback.answer()
+        return
+    if not await _check_user_owns_broadcast(callback, state):
+        return
+    data = await state.get_data()
+    improved_text = data.get("improved_text", "")
+    media_json = data.get("media_json", "")
+    await state.update_data(text_final=improved_text, selected_variant="improved")
+    await state.set_state(BroadcastState.choosing_audience)
+    await callback.answer()
+    await _send_audience_preview(callback.message, improved_text, media_json)
 
 
 @router.callback_query(F.data == "broadcast:cancel")
