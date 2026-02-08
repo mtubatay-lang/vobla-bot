@@ -121,8 +121,8 @@ RAG_QUERY_CACHE_TTL = int(os.getenv("RAG_QUERY_CACHE_TTL", "3600"))
 CHUNK_ANALYSIS_ENABLED = os.getenv("CHUNK_ANALYSIS_ENABLED", "true").lower() == "true"
 MAX_CHUNKS_TO_ANALYZE = int(os.getenv("MAX_CHUNKS_TO_ANALYZE", "10"))
 
-# Максимум раундов уточняющих вопросов (группа и приват); после лимита отвечаем по лучшим чанкам
-MAX_CLARIFICATION_ROUNDS = int(os.getenv("MAX_CLARIFICATION_ROUNDS", "1"))
+# Максимум раундов уточняющих вопросов (группа и приват); 0 = не задавать уточнений, отвечать сразу по чанкам
+MAX_CLARIFICATION_ROUNDS = int(os.getenv("MAX_CLARIFICATION_ROUNDS", "0"))
 
 # --- Full file context (временная замена RAG: один файл целиком в контекст LLM) ---
 USE_FULL_FILE_CONTEXT = os.getenv("USE_FULL_FILE_CONTEXT", "false").lower() == "true"
