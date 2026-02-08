@@ -1415,30 +1415,31 @@ async def qa_handle_question(message: Message, state: FSMContext):
             f"previous_topic={previous_topic}"
         )
     
-    # Проверяем достаточность контекста в вопросе ДО поиска
-    context_sufficient, missing_context = await check_question_context_sufficiency(
-        q, history, is_topic_shift=is_topic_shift
-    )
-    
-    # Если контекста недостаточно, задаем уточняющий вопрос и прекращаем обработку (считается одним раундом)
-    if not context_sufficient:
-        logger.info(
-            f"[QA_MODE] Контекста недостаточно для поиска: {missing_context}. "
-            f"Задаем уточняющий вопрос."
+    # В режиме полного документа пропускаем проверку контекста — отвечаем сразу по документу без уточнений
+    from app.services.full_file_context import get_full_file_context
+    _full_doc = get_full_file_context() if USE_FULL_FILE_CONTEXT else None
+    if not (_full_doc and USE_FULL_FILE_CONTEXT):
+        context_sufficient, missing_context = await check_question_context_sufficiency(
+            q, history, is_topic_shift=is_topic_shift
         )
-        await state.update_data(qa_clarification_rounds=1)
-        await _ask_clarification_question_private(
-            message=message,
-            question=q,
-            found_chunks=[],  # Чанки еще не найдены
-            missing_info=missing_context or "Недостаточно контекста для поиска",
-            state=state,
-            insufficient_context=True,
-            is_topic_shift=is_topic_shift,
-            previous_topic=previous_topic,
-        )
-        return
-    
+        if not context_sufficient:
+            logger.info(
+                f"[QA_MODE] Контекста недостаточно для поиска: {missing_context}. "
+                f"Задаем уточняющий вопрос."
+            )
+            await state.update_data(qa_clarification_rounds=1)
+            await _ask_clarification_question_private(
+                message=message,
+                question=q,
+                found_chunks=[],  # Чанки еще не найдены
+                missing_info=missing_context or "Недостаточно контекста для поиска",
+                state=state,
+                insufficient_context=True,
+                is_topic_shift=is_topic_shift,
+                previous_topic=previous_topic,
+            )
+            return
+
     # Отправляем промежуточное сообщение
     searching_msg = await message.answer(f"🔍 Ищу информацию в базе знаний, {user_name}...")
 
