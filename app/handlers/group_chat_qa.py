@@ -14,10 +14,10 @@ from cachetools import TTLCache
 from app.services.auth_service import find_user_by_telegram_id
 from app.services.qdrant_service import get_qdrant_service
 from app.services.openai_client import create_embedding, client, CHAT_MODEL
-from app.services.openai_client import check_answer_grounding
+from app.services.openai_client import check_answer_grounding, generate_answer_from_full_document
 from app.services.metrics_service import alog_event
 from app.services.reranking_service import rerank_chunks_with_llm, select_best_chunks
-from app.config import MANAGER_USERNAMES, get_rag_test_chat_id, MAX_CLARIFICATION_ROUNDS, MIN_SCORE_AFTER_RERANK, USE_HYBRID_BM25, USE_HYDE
+from app.config import MANAGER_USERNAMES, get_rag_test_chat_id, MAX_CLARIFICATION_ROUNDS, MIN_SCORE_AFTER_RERANK, USE_HYBRID_BM25, USE_HYDE, USE_FULL_FILE_CONTEXT
 from app.handlers.qa_mode import _expand_query_for_search, detect_clarification_response_vs_new_question
 
 logger = logging.getLogger(__name__)
@@ -456,7 +456,35 @@ async def process_question_in_group_chat(message: Message) -> None:
 
         # Промежуточное сообщение о поиске (как в приватном чате)
         searching_msg = await message.answer("🔍 Ищу в базе знаний...")
-        
+
+        # Режим «полный файл в контексте»: ответ по одному документу без RAG
+        from app.services.full_file_context import get_full_file_context
+        document = get_full_file_context()
+        if USE_FULL_FILE_CONTEXT and document:
+            await searching_msg.edit_text("🔍 Ищу в документе...")
+            is_first_turn = not any(m.get("role") == "assistant" for m in conversation_history)
+            user_name = (message.from_user.first_name or "пользователь") if message.from_user else "пользователь"
+            answer = await asyncio.to_thread(
+                generate_answer_from_full_document,
+                question,
+                document,
+                conversation_history,
+                user_name=user_name,
+                is_first_turn=is_first_turn,
+            )
+            await searching_msg.delete()
+            await message.answer(answer)
+            conversation_history.append({"role": "assistant", "text": answer})
+            _update_user_context(chat_id, user_id, {"conversation_history": conversation_history})
+            _qh = str(hash((query_text or question).strip().lower()[:200]))
+            await alog_event(
+                user_id=user_id,
+                username=message.from_user.username,
+                event="rag_pipeline",
+                meta={"question_hash": _qh, "chunks_found": 0, "outcome": "answer", "source": "full_file"},
+            )
+            return
+
         # Усиленный RAG: расширение запроса, несколько поисков, re-ranking (как в приватном чате)
         from app.services.rag_query_cache import get_cached_chunks, set_cached_chunks
         cached = get_cached_chunks(query_text)

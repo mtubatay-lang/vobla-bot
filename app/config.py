@@ -124,6 +124,11 @@ MAX_CHUNKS_TO_ANALYZE = int(os.getenv("MAX_CHUNKS_TO_ANALYZE", "10"))
 # Максимум раундов уточняющих вопросов (группа и приват); после лимита отвечаем по лучшим чанкам
 MAX_CLARIFICATION_ROUNDS = int(os.getenv("MAX_CLARIFICATION_ROUNDS", "1"))
 
+# --- Full file context (временная замена RAG: один файл целиком в контекст LLM) ---
+USE_FULL_FILE_CONTEXT = os.getenv("USE_FULL_FILE_CONTEXT", "false").lower() == "true"
+FULL_FILE_PATH = os.getenv("FULL_FILE_PATH", "").strip()
+FULL_FILE_MAX_CHARS = int(os.getenv("FULL_FILE_MAX_CHARS", "120000"))
+
 # --- RAG Test Chat Settings (для ограничения работы только в тестовом чате) ---
 # RAG_TEST_CHAT_ID: не задана — дефолт -1003377597100 (тестовый чат); пустая строка — все чаты
 RAG_TEST_CHAT_ID_DEFAULT = -1003377597100

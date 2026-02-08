@@ -284,6 +284,70 @@ async def check_answer_grounding(answer: str, chunks: List[Dict]) -> bool:
 
 
 # -----------------------------
+#   ОТВЕТ ПО ПОЛНОМУ ДОКУМЕНТУ (ВРЕМЕННАЯ ЗАМЕНА RAG)
+# -----------------------------
+
+def generate_answer_from_full_document(
+    question: str,
+    document: str,
+    conversation_history: List[Dict],
+    *,
+    user_name: str = "пользователь",
+    is_first_turn: bool = False,
+) -> str:
+    """
+    Генерирует ответ на вопрос пользователя на основе полного документа в контексте.
+    Используется при USE_FULL_FILE_CONTEXT вместо RAG по чанкам.
+    """
+    if not document or not document.strip():
+        return "Извините, документ для ответа недоступен."
+    history_lines = []
+    for msg in conversation_history[-5:]:
+        role = "Пользователь" if msg.get("role") == "user" else "Бот"
+        text = msg.get("text", "")
+        if text:
+            history_lines.append(f"{role}: {text}")
+    history_text = "\n".join(history_lines) if history_lines else ""
+    if is_first_turn:
+        greeting_instruction = (
+            f"ВАЖНО: Это первое обращение пользователя в этой беседе. "
+            f"Приветствуй его по имени ({user_name}) в начале ответа."
+        )
+    else:
+        greeting_instruction = (
+            "ВАЖНО: Это НЕ первое сообщение в диалоге. НЕ приветствуй пользователя заново."
+        )
+    system_prompt = (
+        "Ты — AI-ассистент корпоративного бота «Воблабир». Общайся как живой менеджер поддержки: тепло, ясно, без канцелярита.\n\n"
+        f"{greeting_instruction}\n\n"
+        "Ниже приведён полный документ (база знаний). Отвечай на вопросы пользователя только на его основе. "
+        "Не придумывай факты, цифры, сроки. Если в документе нет ответа на вопрос — честно скажи об этом и предложи уточнение или передачу менеджеру.\n"
+        "Стиль: короткие абзацы, списки где уместно, 1–3 эмодзи. Без длинных вступлений."
+    )
+    user_prompt = (
+        f"{'Контекст диалога:\n' + history_text + '\n\n' if history_text else ''}"
+        f"Документ:\n{document}\n\n"
+        f"Вопрос пользователя: {question}\n\n"
+        "Сформулируй ответ на основе документа."
+    )
+    try:
+        resp = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.3,
+        )
+        answer = resp.choices[0].message.content or "Извините, не могу сформировать ответ."
+        return answer.strip()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).exception("Ошибка генерации ответа по полному документу: %s", e)
+        return "Извините, произошла ошибка при формировании ответа."
+
+
+# -----------------------------
 #   УЛУЧШЕНИЕ ТЕКСТА РАССЫЛКИ
 # -----------------------------
 

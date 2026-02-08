@@ -17,7 +17,7 @@ from app.services.auth_service import find_user_by_telegram_id
 from app.services.faq_service import find_similar_question
 from app.services.metrics_service import alog_event  # async-логгер
 from app.services.openai_client import polish_faq_answer, create_embedding, client, CHAT_MODEL
-from app.services.openai_client import check_answer_grounding
+from app.services.openai_client import check_answer_grounding, generate_answer_from_full_document
 from app.services.qdrant_service import get_qdrant_service
 from app.services.pending_questions_service import create_ticket_and_notify_managers
 from app.services.qa_feedback_service import save_qa_feedback
@@ -29,7 +29,7 @@ from app.services.chunk_analyzer_service import (
 )
 from app.services.conversation_phrases import get_phrases_examples
 from app.ui.keyboards import qa_kb, main_menu_kb
-from app.config import MAX_CLARIFICATION_ROUNDS, MIN_SCORE_AFTER_RERANK, USE_HYBRID_BM25, USE_HYDE
+from app.config import MAX_CLARIFICATION_ROUNDS, MIN_SCORE_AFTER_RERANK, USE_HYBRID_BM25, USE_HYDE, USE_FULL_FILE_CONTEXT
 
 logger = logging.getLogger(__name__)
 
@@ -1467,7 +1467,53 @@ async def qa_handle_question(message: Message, state: FSMContext):
         else:
             context_text = "\n".join([msg.get("text", "") for msg in history[-3:]])
             query_text = f"{context_text}\n{q}" if context_text else q
-        
+
+        # Режим «полный файл в контексте»: ответ по одному документу без RAG
+        from app.services.full_file_context import get_full_file_context
+        document = get_full_file_context()
+        if USE_FULL_FILE_CONTEXT and document:
+            try:
+                await searching_msg.edit_text(f"🔍 Ищу в документе, {user_name}...")
+            except Exception:
+                pass
+            answer = await asyncio.to_thread(
+                generate_answer_from_full_document,
+                q,
+                document,
+                history,
+                user_name=user_name,
+                is_first_turn=is_first_question,
+            )
+            try:
+                await searching_msg.delete()
+            except Exception:
+                pass
+            history.append({
+                "role": "assistant",
+                "text": answer,
+                "timestamp": datetime.now().isoformat(),
+                "source": "full_file",
+                "chunks_used": 0,
+            })
+            await state.update_data(
+                qa_history=history[-8:],
+                qa_last_answer_source="full_file",
+                qa_found_chunks=[],
+                qa_last_answer_text=answer,
+            )
+            await message.answer(
+                answer + "\n\nЕсли есть ещё вопрос — просто напиши его 👇",
+                reply_markup=qa_kb(),
+                parse_mode="HTML",
+            )
+            await alog_event(
+                user_id=message.from_user.id if message.from_user else None,
+                username=message.from_user.username if message.from_user else None,
+                event="kb_answer_generated_private",
+                meta={"question": q[:100], "chunks_used": 0, "source": "full_file"},
+            )
+            return
+
         # ШАГ 2: Расширяем запрос для улучшения поиска
         expanded_query = await _expand_query_for_search(query_text)
         logger.info(
