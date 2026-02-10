@@ -553,9 +553,12 @@ def mark_user_failed(user_id: int, error_text: str) -> None:
             if "is_active" in header_map:
                 updates["is_active"] = "0"
 
-        # Всегда обновляем last_error
+        # Обновляем last_error (для 429 не пишем полный текст)
         if "last_error" in header_map:
-            updates["last_error"] = error_text[:500]  # Ограничиваем длину
+            if "429" in error_text or "Quota exceeded" in error_text:
+                updates["last_error"] = "Временная ошибка API"
+            else:
+                updates["last_error"] = error_text[:500]  # Ограничиваем длину
 
         for key, value in updates.items():
             col = header_map[key]
@@ -593,9 +596,12 @@ def mark_chat_failed(chat_id: int, error_text: str) -> None:
             if "is_active" in header_map:
                 updates["is_active"] = "0"
 
-        # Всегда обновляем last_error
+        # Обновляем last_error (для 429 не пишем полный текст, чтобы не помечать чат как проблемный)
         if "last_error" in header_map:
-            updates["last_error"] = error_text[:500]  # Ограничиваем длину
+            if "429" in error_text or "Quota exceeded" in error_text:
+                updates["last_error"] = "Временная ошибка API"
+            else:
+                updates["last_error"] = error_text[:500]  # Ограничиваем длину
 
         for key, value in updates.items():
             col = header_map[key]
