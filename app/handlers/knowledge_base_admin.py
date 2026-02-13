@@ -23,6 +23,7 @@ from app.services.context_enrichment import enrich_chunks_batch
 from app.services.openai_client import create_embedding
 from app.services.metrics_service import alog_event
 from app.services.faq_migration import migrate_faq_to_qdrant
+from app.services.document_preparation import prepare_for_rag
 from app.handlers.broadcast import _check_admin, _require_admin
 
 logger = logging.getLogger(__name__)
@@ -45,8 +46,8 @@ async def cmd_kb_add(message: Message, state: FSMContext):
     await state.set_state(KnowledgeBaseState.waiting_document)
     await message.answer(
         "📚 <b>Пополнение базы знаний</b>\n\n"
-        "Отправьте документ (PDF, TXT, DOCX, MD).\n"
-        "Бот автоматически извлечет текст, разобьет на чанки, обогатит контекстом и загрузит в Qdrant.\n\n"
+        "Отправьте документ (PDF, TXT, DOCX, MD, CSV).\n"
+        "Бот предподготовит файл при необходимости, извлечет текст, разобьет на чанки и загрузит в Qdrant.\n\n"
         "Для отмены отправьте /cancel",
         parse_mode="HTML",
     )
@@ -61,8 +62,8 @@ async def kb_add_callback(cb: CallbackQuery, state: FSMContext):
     await state.set_state(KnowledgeBaseState.waiting_document)
     await cb.message.answer(
         "📚 <b>Пополнение базы знаний</b>\n\n"
-        "Отправьте документ (PDF, TXT, DOCX, MD).\n"
-        "Бот автоматически извлечет текст, разобьет на чанки, обогатит контекстом и загрузит в Qdrant.\n\n"
+        "Отправьте документ (PDF, TXT, DOCX, MD, CSV).\n"
+        "Бот предподготовит файл при необходимости, извлечет текст, разобьет на чанки и загрузит в Qdrant.\n\n"
         "Для отмены отправьте /cancel",
         parse_mode="HTML",
     )
@@ -196,11 +197,11 @@ async def handle_document_upload(message: Message, state: FSMContext):
     
     # Проверяем формат
     filename_lower = filename.lower()
-    supported_formats = ['.pdf', '.txt', '.docx', '.md', '.markdown']
+    supported_formats = ['.pdf', '.txt', '.docx', '.md', '.markdown', '.csv']
     if not any(filename_lower.endswith(ext) for ext in supported_formats):
         await message.answer(
             f"❌ Неподдерживаемый формат файла.\n"
-            f"Поддерживаются: PDF, TXT, DOCX, MD"
+            f"Поддерживаются: PDF, TXT, DOCX, MD, CSV"
         )
         return
     
@@ -280,15 +281,39 @@ async def process_document_async(
     user_id: Optional[int],
     state: FSMContext,
 ):
-    """Асинхронная обработка документа: извлечение текста, чанкинг, обогащение, загрузка в Qdrant."""
+    """Асинхронная обработка документа: предподготовка (если применимо), извлечение текста, чанкинг, обогащение, загрузка в Qdrant."""
     try:
+        is_csv = filename.lower().endswith(".csv")
+
+        # 0. Предподготовка для RAG (CSV → FAQ MD, TXT/PDF/DOCX/MD → регламент MD при распознавании)
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=status_msg_id,
+            text="⏳ Предподготавливаю документ для RAG...",
+        )
+        try:
+            prepared = await asyncio.to_thread(prepare_for_rag, file_content, filename)
+        except Exception as e:
+            logger.exception(f"[KB_ADMIN] Ошибка предподготовки: {e}")
+            prepared = None
+        if prepared is not None:
+            file_content, filename = prepared[0], prepared[1]
+        elif is_csv:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=status_msg_id,
+                text="❌ CSV не распознан. Нужны колонки: «Вопросы из Телеграм», «Ответ в Телеграм» или «Ответы Финал», «Направление (бухгалтерия, маркетинг, технические вопросы)».",
+            )
+            await state.clear()
+            return
+
         # Обновляем статус
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=status_msg_id,
             text="⏳ Извлекаю текст из документа...",
         )
-        
+
         # 1. Извлечение текста и структуры
         try:
             extracted = extract_text_with_structure(file_content, filename)
