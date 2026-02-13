@@ -13,8 +13,12 @@ from aiogram.types import Message, CallbackQuery
 
 from app.services.auth_service import find_user_by_telegram_id
 from app.services.qdrant_service import get_qdrant_service
-from app.services.document_processor import extract_text
-from app.services.chunking_service import semantic_chunk_text, extract_metadata_from_text
+from app.services.document_processor import extract_text, extract_text_with_structure
+from app.services.chunking_service import (
+    structure_aware_chunk_text,
+    semantic_chunk_text,
+    extract_metadata_from_text,
+)
 from app.services.context_enrichment import enrich_chunks_batch
 from app.services.openai_client import create_embedding
 from app.services.metrics_service import alog_event
@@ -285,9 +289,11 @@ async def process_document_async(
             text="⏳ Извлекаю текст из документа...",
         )
         
-        # 1. Извлечение текста
+        # 1. Извлечение текста и структуры
         try:
-            text = extract_text(file_content, filename)
+            extracted = extract_text_with_structure(file_content, filename)
+            text = extracted.get("text", "")
+            structure = extracted.get("structure", [])
             if not text or not text.strip():
                 await bot.edit_message_text(
                     chat_id=chat_id,
@@ -305,15 +311,17 @@ async def process_document_async(
             )
             await state.clear()
             return
-        
-        # 2. Разбивка на чанки (семантически)
+
+        # 2. Разбивка на чанки (structure-aware или семантически)
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=status_msg_id,
             text="⏳ Разбиваю документ на семантические чанки...",
         )
-        
-        chunks = semantic_chunk_text(text)
+
+        chunks = structure_aware_chunk_text(
+            text, structure=structure, document_title=document_title
+        )
         if not chunks:
             await bot.edit_message_text(
                 chat_id=chat_id,
@@ -364,22 +372,24 @@ async def process_document_async(
         timestamp = datetime.now().isoformat()
         chunks_with_metadata = []
         for chunk in enriched_chunks:
-            chunks_with_metadata.append({
-                "text": chunk.get("text", ""),
-                "metadata": {
-                    "source": "manual_upload",
-                    "document_type": extracted_metadata.get("document_type", "reference"),
-                    "category": extracted_metadata.get("category", "общее"),
-                    "tags": extracted_metadata.get("tags", []),
-                    "keywords": extracted_metadata.get("keywords", []),
-                    "document_title": document_title,
-                    "filename": filename,
-                    "chunk_index": chunk.get("chunk_index", 0),
-                    "total_chunks": chunk.get("total_chunks", len(enriched_chunks)),
-                    "uploaded_by": user_id,
-                    "uploaded_at": timestamp,
-                },
-            })
+            chunk_meta = chunk.get("metadata") or {}
+            meta = {
+                "source": "manual_upload",
+                "document_type": extracted_metadata.get("document_type", "reference"),
+                "category": extracted_metadata.get("category", "общее"),
+                "tags": extracted_metadata.get("tags", []),
+                "keywords": extracted_metadata.get("keywords", []),
+                "document_title": document_title,
+                "filename": filename,
+                "chunk_index": chunk.get("chunk_index", 0),
+                "total_chunks": chunk.get("total_chunks", len(enriched_chunks)),
+                "uploaded_by": user_id,
+                "uploaded_at": timestamp,
+            }
+            for key in ("section_path", "section_id", "section_title", "chunk_id"):
+                if chunk_meta.get(key) is not None:
+                    meta[key] = chunk_meta[key]
+            chunks_with_metadata.append({"text": chunk.get("text", ""), "metadata": meta})
         
         # 7. Загрузка в Qdrant
         await bot.edit_message_text(

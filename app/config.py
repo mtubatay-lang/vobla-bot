@@ -97,6 +97,12 @@ CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
 SEMANTIC_CHUNK_MIN_SIZE = int(os.getenv("SEMANTIC_CHUNK_MIN_SIZE", "200"))
 SEMANTIC_CHUNK_MAX_SIZE = int(os.getenv("SEMANTIC_CHUNK_MAX_SIZE", "1500"))
 SEMANTIC_CHUNK_OVERLAP = int(os.getenv("SEMANTIC_CHUNK_OVERLAP", "150"))
+# Перекрытие по предложениям вместо символов (число предложений)
+CHUNK_OVERLAP_SENTENCES = int(os.getenv("CHUNK_OVERLAP_SENTENCES", "2"))
+# Structure-aware чанкинг (DOCX/MD иерархия разделов)
+USE_STRUCTURE_AWARE_CHUNKING = os.getenv("USE_STRUCTURE_AWARE_CHUNKING", "true").lower() == "true"
+# LLM-обогащение чанков: false = только префикс [Документ | Раздел], true = enrich_chunks_batch
+USE_LLM_CHUNK_ENRICHMENT = os.getenv("USE_LLM_CHUNK_ENRICHMENT", "false").lower() == "true"
 
 # Re-ranking Settings
 RERANK_TOP_K = int(os.getenv("RERANK_TOP_K", "10"))
@@ -106,6 +112,8 @@ MIN_SCORE_AFTER_RERANK = float(os.getenv("MIN_SCORE_AFTER_RERANK", "0.25"))
 # Cross-encoder reranker (Cohere): если True и задан COHERE_API_KEY — используем Cohere Rerank вместо LLM
 USE_CROSS_ENCODER_RERANK = os.getenv("USE_CROSS_ENCODER_RERANK", "false").lower() == "true"
 COHERE_API_KEY = os.getenv("COHERE_API_KEY", "")
+# Количество кандидатов для rerank: 28 для Cohere (дешевле, быстрее), 15 для LLM
+RERANK_CANDIDATES_LIMIT = int(os.getenv("RERANK_CANDIDATES_LIMIT", "28"))
 # Гибридный поиск: векторный + BM25 по кандидатам, объединение через RRF
 USE_HYBRID_BM25 = os.getenv("USE_HYBRID_BM25", "false").lower() == "true"
 # HyDE: генерировать гипотетический ответ, искать по нему в Qdrant, объединять с основным поиском через RRF

@@ -2,7 +2,7 @@
 
 import logging
 import io
-from typing import Optional
+from typing import Optional, Dict, Any, List
 
 try:
     from pypdf import PdfReader
@@ -155,3 +155,33 @@ def extract_text(file_bytes: bytes, filename: str) -> str:
         # Пробуем как TXT по умолчанию
         logger.warning(f"[DOC_PROCESSOR] Неизвестный формат файла {filename}, пробую как TXT")
         return extract_text_from_txt(file_bytes)
+
+
+def extract_text_with_structure(
+    file_bytes: bytes,
+    filename: str,
+) -> Dict[str, Any]:
+    """Извлекает текст и структуру документа (разделы, заголовки).
+    
+    Args:
+        file_bytes: Байты файла
+        filename: Имя файла (для определения формата)
+    
+    Returns:
+        {"text": str, "structure": List[{"section_path", "content"}]}
+        structure — плоский список блоков для structure_aware_chunk_text.
+        Для PDF structure пустой.
+    """
+    from app.services.document_structure_parser import (
+        parse_document_structure,
+        structure_to_flat_sections,
+    )
+
+    text = extract_text(file_bytes, filename)
+    raw_structure = parse_document_structure(file_bytes, filename, text=text)
+
+    if raw_structure:
+        flat_sections = structure_to_flat_sections(raw_structure)
+        return {"text": text, "structure": flat_sections}
+
+    return {"text": text, "structure": []}

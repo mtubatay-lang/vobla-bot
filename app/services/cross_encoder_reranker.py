@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 COHERE_RERANK_URL = "https://api.cohere.ai/v1/rerank"
 COHERE_RERANK_MODEL = "rerank-multilingual-v3.0"
 MAX_DOCS_COHERE = 100
-MAX_CHUNK_CHARS = 1000
+MAX_CHUNK_CHARS = 2000  # Cohere v3 supports ~4K tokens; avoid truncating long chunks
 
 
 def _call_cohere_rerank_sync(

@@ -17,7 +17,18 @@ from app.services.openai_client import create_embedding, client, CHAT_MODEL
 from app.services.openai_client import check_answer_grounding, generate_answer_from_full_document
 from app.services.metrics_service import alog_event
 from app.services.reranking_service import rerank_chunks_with_llm, select_best_chunks
-from app.config import MANAGER_USERNAMES, get_rag_test_chat_id, MAX_CLARIFICATION_ROUNDS, MIN_SCORE_AFTER_RERANK, USE_HYBRID_BM25, USE_HYDE, USE_FULL_FILE_CONTEXT
+from app.config import (
+    MANAGER_USERNAMES,
+    get_rag_test_chat_id,
+    MAX_CLARIFICATION_ROUNDS,
+    MIN_SCORE_AFTER_RERANK,
+    USE_HYBRID_BM25,
+    USE_HYDE,
+    USE_FULL_FILE_CONTEXT,
+    USE_CROSS_ENCODER_RERANK,
+    COHERE_API_KEY,
+    RERANK_CANDIDATES_LIMIT,
+)
 from app.handlers.qa_mode import _expand_query_for_search, detect_clarification_response_vs_new_question
 
 logger = logging.getLogger(__name__)
@@ -562,11 +573,13 @@ async def process_question_in_group_chat(message: Message) -> None:
                     if hyde_chunks:
                         all_found_chunks = merge_hyde_with_main(all_found_chunks, hyde_chunks, top_n=20)
             all_found_chunks.sort(key=lambda x: x.get("score", 0), reverse=True)
+            use_cohere_rerank = USE_CROSS_ENCODER_RERANK and bool(COHERE_API_KEY)
+            candidates_limit = RERANK_CANDIDATES_LIMIT if use_cohere_rerank else 15
             if USE_HYBRID_BM25 and all_found_chunks:
                 from app.services.bm25_search import hybrid_vector_bm25
-                initial_chunks = hybrid_vector_bm25(query_text, all_found_chunks, top_n=15)
+                initial_chunks = hybrid_vector_bm25(query_text, all_found_chunks, top_n=candidates_limit)
             else:
-                initial_chunks = all_found_chunks[:15]
+                initial_chunks = all_found_chunks[:candidates_limit]
             if initial_chunks:
                 await searching_msg.edit_text(f"🔍 Нашёл {len(initial_chunks)} фрагментов, анализирую релевантность...")
             if initial_chunks:

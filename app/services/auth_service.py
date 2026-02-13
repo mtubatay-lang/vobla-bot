@@ -147,4 +147,3 @@ def bind_telegram_id(user: User, telegram_id: int) -> None:
     ws.update_cell(user.row, 7, now_str)
 
     _users_cache.pop(_USERS_CACHE_KEY, None)
-

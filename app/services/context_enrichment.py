@@ -1,10 +1,12 @@
-"""Обогащение чанков контекстом через OpenAI API."""
+"""Обогащение чанков контекстом через OpenAI API или префикс."""
 
 import asyncio
 import logging
 from typing import Optional, List, Dict, Any
 
 from app.services.openai_client import client, CHAT_MODEL
+from app.services.chunking_service import format_chunk_with_context
+from app.config import USE_LLM_CHUNK_ENRICHMENT
 
 logger = logging.getLogger(__name__)
 
@@ -89,37 +91,57 @@ def enrich_chunk_with_context(
 async def enrich_chunks_batch(
     chunks: List[Dict[str, Any]],
     document_title: str,
+    section_paths: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
-    """Обогащает список чанков контекстом (асинхронно, батчами).
+    """Обогащает список чанков контекстом.
+    
+    Если USE_LLM_CHUNK_ENRICHMENT=false — использует только префикс [Документ | Раздел]
+    без вызова LLM. Иначе — enrich_chunk_with_context через OpenAI.
     
     Args:
         chunks: Список словарей с чанками (должны содержать поле "text")
         document_title: Название документа
+        section_paths: Опционально — список section_path для каждого чанка
     
     Returns:
         Список обогащенных чанков (с обновленным полем "text")
     """
     if not chunks:
         return chunks
-    
+
+    if not USE_LLM_CHUNK_ENRICHMENT:
+        # Префикс без LLM
+        enriched_chunks = []
+        for i, chunk in enumerate(chunks):
+            chunk_text = chunk.get("text", "")
+            if not chunk_text:
+                enriched_chunks.append(chunk)
+                continue
+            section_path = ""
+            if section_paths and i < len(section_paths):
+                section_path = section_paths[i] or ""
+            else:
+                meta = chunk.get("metadata") or {}
+                section_path = meta.get("section_path", "")
+            enriched_text = format_chunk_with_context(
+                chunk_text, document_title, section_path
+            )
+            enriched_chunk = chunk.copy()
+            enriched_chunk["text"] = enriched_text
+            enriched_chunks.append(enriched_chunk)
+        return enriched_chunks
+
+    # LLM enrichment
     enriched_chunks = []
-    
     for i, chunk in enumerate(chunks):
         chunk_text = chunk.get("text", "")
         if not chunk_text:
             enriched_chunks.append(chunk)
             continue
-        
-        # Получаем соседние чанки
-        previous_chunk = None
-        if i > 0:
-            previous_chunk = chunks[i - 1].get("text")
-        
-        next_chunk = None
-        if i < len(chunks) - 1:
-            next_chunk = chunks[i + 1].get("text")
-        
-        # Обогащаем в отдельном потоке, чтобы не блокировать event loop
+
+        previous_chunk = chunks[i - 1].get("text") if i > 0 else None
+        next_chunk = chunks[i + 1].get("text") if i < len(chunks) - 1 else None
+
         enriched_text = await asyncio.to_thread(
             enrich_chunk_with_context,
             chunk_text,
@@ -127,10 +149,9 @@ async def enrich_chunks_batch(
             previous_chunk,
             next_chunk,
         )
-        
-        # Создаем копию чанка с обновленным текстом
+
         enriched_chunk = chunk.copy()
         enriched_chunk["text"] = enriched_text
         enriched_chunks.append(enriched_chunk)
-    
+
     return enriched_chunks

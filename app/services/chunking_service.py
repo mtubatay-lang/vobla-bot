@@ -4,11 +4,13 @@ import re
 import logging
 from typing import List, Dict, Any, Optional
 from app.config import (
-    CHUNK_SIZE, 
+    CHUNK_SIZE,
     CHUNK_OVERLAP,
     SEMANTIC_CHUNK_MIN_SIZE,
     SEMANTIC_CHUNK_MAX_SIZE,
     SEMANTIC_CHUNK_OVERLAP,
+    CHUNK_OVERLAP_SENTENCES,
+    USE_STRUCTURE_AWARE_CHUNKING,
 )
 
 logger = logging.getLogger(__name__)
@@ -140,6 +142,57 @@ def chunk_text(text: str, chunk_size: int = None, overlap: int = None) -> List[D
     return chunks
 
 
+def format_chunk_with_context(
+    chunk_text: str,
+    document_title: str,
+    section_path: str = "",
+) -> str:
+    """Добавляет префикс контекста к чанку без LLM.
+    
+    Формат: [Документ: {title} | Раздел: {section_path}]\n\n{content}
+    
+    Args:
+        chunk_text: Текст чанка
+        document_title: Название документа
+        section_path: Путь раздела (например "3. Выбор помещения")
+    
+    Returns:
+        Обогащённый текст чанка
+    """
+    if not chunk_text or not chunk_text.strip():
+        return chunk_text
+    section_part = f" | Раздел: {section_path}" if section_path else ""
+    prefix = f"[Документ: {document_title}{section_part}]\n\n"
+    return prefix + chunk_text.strip()
+
+
+def _split_into_sentences(text: str) -> List[str]:
+    """Разбивает текст на предложения, сохраняя разделители."""
+    if not text or not text.strip():
+        return []
+    parts = re.split(r'([.!?]\s+|\.\n)', text)
+    merged = []
+    for i, p in enumerate(parts):
+        if i == 0:
+            merged.append(p)
+        elif re.match(r'^[.!?]\s*$', p):
+            if merged:
+                merged[-1] += p
+            else:
+                merged.append(p)
+        else:
+            merged.append(p)
+    return [s.strip() for s in merged if s.strip()]
+
+
+def _get_last_sentences(text: str, n: int = 2) -> str:
+    """Возвращает последние n предложений текста для перекрытия."""
+    sentences = _split_into_sentences(text)
+    if not sentences or n <= 0:
+        return ""
+    return " ".join(sentences[-n:])
+
+
 def detect_semantic_boundaries(text: str) -> List[int]:
     """Определяет границы смысловых блоков в тексте.
     
@@ -196,6 +249,149 @@ def detect_semantic_boundaries(text: str) -> List[int]:
     return sorted(set(boundaries))
 
 
+def detect_semantic_boundaries_v2(text: str) -> List[int]:
+    """Улучшенные смысловые границы: списки, процедуры, таблицы.
+    
+    Дополнительно к detect_semantic_boundaries распознаёт:
+    - Нумерованные списки (1., 2., 1), 2), 1.1., 2.1.)
+    - Маркированные списки (-, *, •)
+    - Паттерны процедур (Шаг 1, Этап 1, Пункт 1)
+    - Таблицы (строки с | или табуляцией)
+    
+    Returns:
+        Список позиций символов, где начинаются смысловые блоки
+    """
+    boundaries = detect_semantic_boundaries(text)
+    lines = text.split('\n')
+    current_pos = 0
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            current_pos += len(line) + 1
+            continue
+        # Процедуры: Шаг 1, Этап 1, Пункт 1
+        is_procedure = bool(re.match(r'^(Шаг|Этап|Пункт|Шаги?|Этапы?)\s+\d+[\.\)]?\s*', stripped, re.I))
+        # Таблица: содержит | или несколько табов
+        is_table = '|' in stripped or (stripped.count('\t') >= 2)
+        if is_procedure or is_table:
+            if current_pos not in boundaries:
+                boundaries.append(current_pos)
+        current_pos += len(line) + 1
+    return sorted(set(boundaries))
+
+
+def _parse_section_path_metadata(section_path: str) -> Dict[str, Any]:
+    """Извлекает section_id и section_title из section_path вида «РАЗДЕЛ N. Название» или «РАЗДЕЛ N. Название > ...»."""
+    if not section_path or not section_path.strip():
+        return {}
+    path = section_path.strip()
+    match = re.match(r"^РАЗДЕЛ\s+(\d+)\.\s*(.+?)(?:\s*>\s*|$)", path, re.DOTALL)
+    if not match:
+        return {}
+    try:
+        section_id = int(match.group(1))
+        title_part = match.group(2).strip()
+        section_title = title_part.split(" > ")[0].strip() if " > " in title_part else title_part
+        return {"section_id": section_id, "section_title": section_title}
+    except (ValueError, IndexError):
+        return {}
+
+
+def structure_aware_chunk_text(
+    text: str,
+    structure: Optional[List[Dict[str, Any]]] = None,
+    document_title: str = "",
+    min_size: int = None,
+    max_size: int = None,
+    overlap: int = None,
+) -> List[Dict[str, Any]]:
+    """Разбивает текст на чанки с учётом структуры документа.
+    
+    Если structure задана и USE_STRUCTURE_AWARE_CHUNKING — чанки по разделам.
+    Иначе — fallback на semantic_chunk_text.
+    
+    Args:
+        text: Текст для разбивки
+        structure: Список {"section_path", "content"} от document_structure_parser
+        document_title: Название документа (для section_path в метаданных)
+        min_size, max_size, overlap: Параметры чанкинга
+    
+    Returns:
+        Список чанков с полем section_path в metadata при наличии структуры
+    """
+    if min_size is None:
+        min_size = SEMANTIC_CHUNK_MIN_SIZE
+    if max_size is None:
+        max_size = SEMANTIC_CHUNK_MAX_SIZE
+    if overlap is None:
+        overlap = SEMANTIC_CHUNK_OVERLAP
+
+    if not USE_STRUCTURE_AWARE_CHUNKING or not structure:
+        chunks = semantic_chunk_text(text, min_size=min_size, max_size=max_size, overlap=overlap)
+        for c in chunks:
+            c.setdefault("metadata", {})["section_path"] = ""
+        return chunks
+
+    all_chunks: List[Dict[str, Any]] = []
+    start_char = 0
+    section_chunk_count: Dict[int, int] = {}
+
+    def make_metadata(section_path: str) -> Dict[str, Any]:
+        meta = {"section_path": section_path}
+        parsed = _parse_section_path_metadata(section_path)
+        if parsed:
+            sid = parsed.get("section_id")
+            meta["section_id"] = sid
+            if parsed.get("section_title") is not None:
+                meta["section_title"] = parsed["section_title"]
+            if sid is not None:
+                section_chunk_count[sid] = section_chunk_count.get(sid, 0) + 1
+                meta["chunk_id"] = f"VB_REG_{sid:02d}_{section_chunk_count[sid]:02d}"
+        return meta
+
+    for block in structure:
+        section_path = block.get("section_path", "")
+        content = block.get("content", "").strip()
+        if not content:
+            continue
+
+        if len(content) <= max_size:
+            end_char = start_char + len(content)
+            meta = make_metadata(section_path)
+            all_chunks.append({
+                "text": content,
+                "chunk_index": len(all_chunks),
+                "total_chunks": 0,
+                "start_char": start_char,
+                "end_char": end_char,
+                "metadata": meta,
+            })
+            start_char = end_char
+        else:
+            sub_chunks = semantic_chunk_text(
+                content, min_size=min_size, max_size=max_size, overlap=overlap
+            )
+            for sc in sub_chunks:
+                meta = make_metadata(section_path)
+                sc["metadata"] = sc.get("metadata") or {}
+                sc["metadata"].update(meta)
+                sc["start_char"] = start_char
+                sc["end_char"] = start_char + len(sc["text"])
+                sc["chunk_index"] = len(all_chunks)
+                all_chunks.append(sc)
+                start_char = sc["end_char"]
+
+    total = len(all_chunks)
+    for c in all_chunks:
+        c["total_chunks"] = total
+
+    logger.info(
+        f"[CHUNKING] Structure-aware: создано {total} чанков "
+        f"из {len(structure)} разделов"
+    )
+    return all_chunks
+
+
 def semantic_chunk_text(
     text: str,
     min_size: int = None,
@@ -248,24 +444,35 @@ def semantic_chunk_text(
     current_length = 0
     start_char = 0
     
+    # Паттерны пунктов списка (нумерованный и маркированный), чтобы не разрывать посередине
+    def _is_list_item(p: str) -> bool:
+        if not p or not p.strip():
+            return False
+        s = p.strip()
+        return (
+            bool(re.match(r'^\d+[\.\)]\s+', s)) or
+            bool(re.match(r'^[-*●•]\s+', s)) or
+            bool(re.match(r'^[ー]\s*', s))  # full-width hyphen (чек-листы в регламенте)
+        )
+
     for i, paragraph in enumerate(paragraphs):
         para_length = len(paragraph)
-        is_numbered_item = bool(re.match(r'^\d+[\.\)]\s+', paragraph))
+        is_list_item = _is_list_item(paragraph)
 
         # Проверяем, не является ли это границей смыслового блока
         # (упрощенная проверка - если абзац короткий и похож на заголовок)
         is_boundary = (
-            para_length < 100 and 
+            para_length < 100 and
             (paragraph.endswith(':') or paragraph.startswith('#') or
              re.match(r'^\d+[\.\)]\s+[А-ЯЁ]', paragraph))
         )
-        
-        # Не разрываем нумерованный список: если текущий чанк заканчивается на пункт списка и абзац — тоже пункт, не режем
-        last_is_numbered = (
+
+        # Не разрываем список (нумерованный, маркированный, чек-лист): если текущий чанк заканчивается на пункт и абзац — тоже пункт, не режем
+        last_is_list_item = (
             current_chunk_parts and
-            re.match(r'^\d+[\.\)]\s+', current_chunk_parts[-1])
+            _is_list_item(current_chunk_parts[-1])
         )
-        if last_is_numbered and is_numbered_item and (current_length + para_length > max_size):
+        if last_is_list_item and is_list_item and (current_length + para_length > max_size):
             # Превысили max_size, но оба — пункты списка: не режем, добавляем в текущий чанк (до разумного лимита)
             if current_length + para_length <= max_size * 2:
                 current_chunk_parts.append(paragraph)
@@ -286,9 +493,9 @@ def semantic_chunk_text(
                     "start_char": start_char,
                     "end_char": end_char,
                 })
-                start_char = end_char - overlap  # Перекрытие
-                # Начинаем новый чанк с перекрытия (последние N символов)
-                overlap_text = chunk_text[-overlap:] if len(chunk_text) > overlap else ""
+                start_char = end_char - overlap
+                # Перекрытие по предложениям вместо символов
+                overlap_text = _get_last_sentences(chunk_text, CHUNK_OVERLAP_SENTENCES)
                 if overlap_text:
                     current_chunk_parts = [overlap_text]
                     current_length = len(overlap_text)
@@ -372,7 +579,7 @@ def semantic_chunk_text(
                         "end_char": sub_start + len(sub_text),
                     })
                     sub_start = sub_start + len(sub_text) - overlap
-                    overlap_text = sub_text[-overlap:] if len(sub_text) > overlap else ""
+                    overlap_text = _get_last_sentences(sub_text, CHUNK_OVERLAP_SENTENCES)
                     sub_chunk_parts = [overlap_text] if overlap_text else []
                     sub_length = len(overlap_text)
                 

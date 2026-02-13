@@ -29,7 +29,16 @@ from app.services.chunk_analyzer_service import (
 )
 from app.services.conversation_phrases import get_phrases_examples
 from app.ui.keyboards import qa_kb, main_menu_kb
-from app.config import MAX_CLARIFICATION_ROUNDS, MIN_SCORE_AFTER_RERANK, USE_HYBRID_BM25, USE_HYDE, USE_FULL_FILE_CONTEXT
+from app.config import (
+    MAX_CLARIFICATION_ROUNDS,
+    MIN_SCORE_AFTER_RERANK,
+    USE_HYBRID_BM25,
+    USE_HYDE,
+    USE_FULL_FILE_CONTEXT,
+    USE_CROSS_ENCODER_RERANK,
+    COHERE_API_KEY,
+    RERANK_CANDIDATES_LIMIT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1598,13 +1607,15 @@ async def qa_handle_question(message: Message, state: FSMContext):
                 if hyde_chunks:
                     all_found_chunks = merge_hyde_with_main(all_found_chunks, hyde_chunks, top_n=20)
         
-        # Сортируем по score и берем топ-15 для re-ranking (опционально гибрид vector+BM25)
+        # Сортируем по score и берем топ-N для re-ranking (28 для Cohere, 15 для LLM)
         all_found_chunks.sort(key=lambda x: x.get("score", 0), reverse=True)
+        use_cohere_rerank = USE_CROSS_ENCODER_RERANK and bool(COHERE_API_KEY)
+        candidates_limit = RERANK_CANDIDATES_LIMIT if use_cohere_rerank else 15
         if USE_HYBRID_BM25 and all_found_chunks:
             from app.services.bm25_search import hybrid_vector_bm25
-            initial_chunks = hybrid_vector_bm25(query_text, all_found_chunks, top_n=15)
+            initial_chunks = hybrid_vector_bm25(query_text, all_found_chunks, top_n=candidates_limit)
         else:
-            initial_chunks = all_found_chunks[:15]
+            initial_chunks = all_found_chunks[:candidates_limit]
         
         # Re-ranking через LLM
         if initial_chunks:
