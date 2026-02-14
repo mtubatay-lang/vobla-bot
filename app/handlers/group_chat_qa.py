@@ -17,6 +17,7 @@ from app.services.openai_client import create_embedding, client, CHAT_MODEL
 from app.services.openai_client import check_answer_grounding, generate_answer_from_full_document
 from app.services.metrics_service import alog_event
 from app.services.reranking_service import rerank_chunks_with_llm, select_best_chunks
+from app.services.kilbil_service import get_article_urls_from_chunks
 from app.config import (
     MANAGER_USERNAMES,
     get_rag_test_chat_id,
@@ -654,6 +655,13 @@ async def process_question_in_group_chat(message: Message) -> None:
             await searching_msg.delete()
             await _tag_manager_in_chat(message, query_text)
             return
+
+        kilbil_urls = get_article_urls_from_chunks(found_chunks)
+        if kilbil_urls:
+            if len(kilbil_urls) == 1:
+                answer = answer + "\n\n📎 Подробнее: " + kilbil_urls[0]
+            else:
+                answer = answer + "\n\n📎 Подробнее:\n" + "\n".join(kilbil_urls)
 
         await searching_msg.delete()
         # Отправляем ответ

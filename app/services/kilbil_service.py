@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import re
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from app.services.openai_client import create_embedding
 from app.services.qdrant_service import get_qdrant_service
@@ -51,3 +51,18 @@ async def find_kilbil_answer(user_question: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         logger.exception(f"[KILBIL_SERVICE] Ошибка поиска: {e}")
         return None
+
+
+def get_article_urls_from_chunks(chunks: List[Dict[str, Any]]) -> List[str]:
+    """Собирает уникальные article_url из чанков с source=kilbil_help."""
+    seen = set()
+    urls = []
+    for ch in chunks or []:
+        meta = ch.get("metadata") or {}
+        if meta.get("source") != "kilbil_help":
+            continue
+        url = (meta.get("article_url") or "").strip()
+        if url and url not in seen:
+            seen.add(url)
+            urls.append(url)
+    return urls

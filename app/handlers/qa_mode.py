@@ -22,6 +22,7 @@ from app.services.qdrant_service import get_qdrant_service
 from app.services.pending_questions_service import create_ticket_and_notify_managers
 from app.services.qa_feedback_service import save_qa_feedback
 from app.services.reranking_service import rerank_chunks_with_llm, select_best_chunks
+from app.services.kilbil_service import get_article_urls_from_chunks
 from app.services.chunk_analyzer_service import (
     analyze_chunks_relevance,
     select_and_combine_chunks,
@@ -1488,6 +1489,7 @@ async def qa_handle_question(message: Message, state: FSMContext):
             except Exception:
                 pass
             # Дополняем документ kilbil (help.kilbil.ru), чтобы отвечать на вопросы по платформе
+            kilbil_match = None
             try:
                 from app.services.kilbil_service import find_kilbil_answer
                 kilbil_match = await find_kilbil_answer(q)
@@ -1520,6 +1522,8 @@ async def qa_handle_question(message: Message, state: FSMContext):
                 qa_found_chunks=[],
                 qa_last_answer_text=answer,
             )
+            if kilbil_match and kilbil_match.get("url"):
+                answer = answer + "\n\n📎 Подробнее: " + kilbil_match["url"]
             await message.answer(
                 answer + "\n\nЕсли есть ещё вопрос — просто напиши его 👇",
                 reply_markup=qa_kb(),
@@ -1828,6 +1832,13 @@ async def qa_handle_question(message: Message, state: FSMContext):
                         await searching_msg.delete()
                     except:
                         pass
+
+                    kilbil_urls = get_article_urls_from_chunks(all_chunks)
+                    if kilbil_urls:
+                        if len(kilbil_urls) == 1:
+                            answer = answer + "\n\n📎 Подробнее: " + kilbil_urls[0]
+                        else:
+                            answer = answer + "\n\n📎 Подробнее:\n" + "\n".join(kilbil_urls)
                     
                     await message.answer(
                         answer + "\n\nЕсли есть ещё вопрос — просто напиши его 👇",
