@@ -1427,7 +1427,8 @@ async def qa_handle_question(message: Message, state: FSMContext):
     # В режиме полного документа пропускаем проверку контекста — отвечаем сразу по документу без уточнений
     from app.services.full_file_context import get_full_file_context
     _full_doc = get_full_file_context() if USE_FULL_FILE_CONTEXT else None
-    if not (_full_doc and USE_FULL_FILE_CONTEXT):
+    # Уточняющие вопросы отключены (MAX_CLARIFICATION_ROUNDS=0) — идём сразу в поиск
+    if not (_full_doc and USE_FULL_FILE_CONTEXT) and MAX_CLARIFICATION_ROUNDS > 0:
         context_sufficient, missing_context = await check_question_context_sufficiency(
             q, history, is_topic_shift=is_topic_shift
         )
@@ -1849,8 +1850,8 @@ async def qa_handle_question(message: Message, state: FSMContext):
         if not found_chunks:
             logger.info("[QA_MODE] Чанки не найдены в RAG")
             
-            # Если тема сменилась и чанки не найдены, задаем уточняющий вопрос (считается одним раундом)
-            if is_topic_shift:
+            # Если тема сменилась и чанки не найдены, задаем уточняющий вопрос (если не отключено)
+            if is_topic_shift and MAX_CLARIFICATION_ROUNDS > 0:
                 logger.info(
                     f"[QA_MODE] Тема сменилась ({previous_topic}), чанки не найдены. "
                     f"Задаем уточняющий вопрос о новой теме."
