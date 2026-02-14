@@ -1486,6 +1486,14 @@ async def qa_handle_question(message: Message, state: FSMContext):
                 await searching_msg.edit_text(f"🔍 Ищу в документе, {user_name}...")
             except Exception:
                 pass
+            # Дополняем документ kilbil (help.kilbil.ru), чтобы отвечать на вопросы по платформе
+            try:
+                from app.services.kilbil_service import find_kilbil_answer
+                kilbil_match = await find_kilbil_answer(q)
+                if kilbil_match and kilbil_match.get("answer"):
+                    document = document + "\n\n--- База kilbil (help.kilbil.ru) ---\n" + kilbil_match["answer"]
+            except Exception as e:
+                logger.warning(f"[QA_MODE] Не удалось дополнить kilbil: {e}")
             answer = await asyncio.to_thread(
                 generate_answer_from_full_document,
                 q,
@@ -1555,6 +1563,7 @@ async def qa_handle_question(message: Message, state: FSMContext):
                 all_found_chunks.append(chunk)
                 seen_texts.add(chunk_text)
         
+        embedding_original = None
         # Поиск 2: Оригинальный запрос (если отличается от расширенного)
         if query_text != expanded_query and len(query_text.strip()) > 5:
             embedding_original = await asyncio.to_thread(create_embedding, query_text)
@@ -1594,11 +1603,13 @@ async def qa_handle_question(message: Message, state: FSMContext):
                         seen_texts.add(chunk_text)
         
         # Поиск 4: kilbil help (source=kilbil_help) — чтобы не терять релевантные ответы из help.kilbil.ru
+        # Для kilbil используем оригинальный запрос (точнее для «как настроить...»), иначе расширенный
+        embedding_for_kilbil = embedding_original if embedding_original is not None else embedding_expanded
         chunks_kilbil = qdrant_service.search_multi_level(
-            query_embedding=embedding_expanded,
+            query_embedding=embedding_for_kilbil,
             top_k=5,
-            initial_threshold=0.5,
-            fallback_thresholds=[0.3, 0.1],
+            initial_threshold=0.4,
+            fallback_thresholds=[0.25, 0.1],
             source_filter="kilbil_help",
         )
         for chunk in chunks_kilbil:
