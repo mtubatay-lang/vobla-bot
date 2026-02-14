@@ -1593,6 +1593,20 @@ async def qa_handle_question(message: Message, state: FSMContext):
                         all_found_chunks.append(chunk)
                         seen_texts.add(chunk_text)
         
+        # Поиск 4: kilbil help (source=kilbil_help) — чтобы не терять релевантные ответы из help.kilbil.ru
+        chunks_kilbil = qdrant_service.search_multi_level(
+            query_embedding=embedding_expanded,
+            top_k=5,
+            initial_threshold=0.5,
+            fallback_thresholds=[0.3, 0.1],
+            source_filter="kilbil_help",
+        )
+        for chunk in chunks_kilbil:
+            chunk_text = chunk.get("text", "")
+            if chunk_text and chunk_text not in seen_texts:
+                all_found_chunks.append(chunk)
+                seen_texts.add(chunk_text)
+        
         if USE_HYDE and query_text.strip():
             from app.services.hyde_search import generate_hypothetical_answer, merge_hyde_with_main
             hyde_text = await generate_hypothetical_answer(query_text)
