@@ -17,6 +17,7 @@ from app.handlers.help import router as help_router
 from app.handlers.auth_handler import auth_router
 from app.handlers.echo import router as echo_router
 from app.handlers.faq import router as faq_router
+from app.handlers.kilbil import router as kilbil_router
 from app.handlers.manager_reply import router as manager_router
 from app.handlers.qa_mode import router as qa_router
 from app.handlers.group_chat_qa import router as group_chat_qa_router
@@ -66,6 +67,7 @@ async def main() -> None:
             BotCommand(command="help", description="Помощь"),
             BotCommand(command="login", description="Авторизация"),
             BotCommand(command="ask", description="Задать вопрос"),
+            BotCommand(command="kilbil", description="Вопросы по kilbil"),
             BotCommand(command="kb_add", description="Пополнение базы знаний (админ)"),
             BotCommand(command="broadcast", description="Запуск рассылки (админ)"),
         ]
@@ -82,6 +84,7 @@ async def main() -> None:
     dp.include_router(broadcast_router)  # роутер рассылок
     dp.include_router(qa_router)  # роутер режима навыка
     dp.include_router(group_chat_qa_router)  # групповой чат RAG
+    dp.include_router(kilbil_router)  # kilbil RAG (перед faq)
     dp.include_router(faq_router)   # FAQ-роутер
     dp.include_router(echo_router)
     

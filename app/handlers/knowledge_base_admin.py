@@ -173,6 +173,68 @@ async def migrate_faq_async(
             pass
 
 
+@router.message(Command("kb_ingest_kilbil"))
+async def cmd_kb_ingest_kilbil(message: Message):
+    """Команда /kb_ingest_kilbil — индексация базы знаний help.kilbil.ru в Qdrant."""
+    if not await _require_admin(message):
+        return
+
+    status_msg = await message.answer("⏳ Запускаю индексацию kilbil (help.kilbil.ru) в Qdrant...")
+
+    asyncio.create_task(
+        _run_kilbil_ingest_async(
+            message.bot,
+            message.chat.id,
+            status_msg.message_id,
+        )
+    )
+
+
+async def _run_kilbil_ingest_async(bot, chat_id: int, status_msg_id: int):
+    """Фоновая индексация kilbil в Qdrant."""
+    try:
+        async def progress(stage: str, detail: str) -> None:
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=status_msg_id,
+                    text=f"⏳ <b>kilbil индексация</b>\n\n{stage}: {detail}",
+                )
+            except Exception:
+                pass
+
+        from app.services.kilbil_ingest_service import run_ingestion
+
+        result = await run_ingestion(fresh=False, progress_callback=progress)
+
+        if result["success"]:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=status_msg_id,
+                text=(
+                    f"✅ <b>Индексация kilbil завершена</b>\n\n"
+                    f"📊 Статей: {result['articles']}\n"
+                    f"📦 Чанков в Qdrant: {result['chunks']}"
+                ),
+            )
+        else:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=status_msg_id,
+                text=f"❌ <b>Ошибка</b>\n\n{result.get('error', 'Неизвестная ошибка')}",
+            )
+    except Exception as e:
+        logger.exception(f"[KB_ADMIN] Ошибка индексации kilbil: {e}")
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=status_msg_id,
+                text=f"❌ Ошибка: {str(e)}",
+            )
+        except Exception:
+            pass
+
+
 @router.message(Command("cancel"))
 async def cmd_cancel(message: Message, state: FSMContext):
     """Отмена текущей операции."""
@@ -561,4 +623,4 @@ async def save_manager_answer_to_qdrant(
 
 
 # Логирование при импорте модуля
-logger.info("[KB_ADMIN] Модуль загружен, обработчики команд: kb_add, kb_migrate, cancel")
+logger.info("[KB_ADMIN] Модуль загружен, обработчики команд: kb_add, kb_migrate, kb_ingest_kilbil, cancel")
