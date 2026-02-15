@@ -113,6 +113,7 @@ def create_scheduled_broadcast(
     mode_extra: str,
     schedule_type: str,
     schedule_config: Dict[str, Any],
+    title: str = "",
 ) -> str:
     """
     Создаёт запись плановой рассылки в SCHEDULED_BROADCASTS_TAB.
@@ -156,6 +157,8 @@ def create_scheduled_broadcast(
             row.append("1")
         elif header_clean == "last_run_iso":
             row.append("")
+        elif header_clean == "title":
+            row.append(title)
         else:
             row.append("")
 

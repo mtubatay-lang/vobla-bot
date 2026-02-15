@@ -417,3 +417,33 @@ def improve_broadcast_text(text: str) -> Dict[str, str]:
     except Exception:
         # При ошибке возвращаем оригинал
         return {"fixed": text, "suggested": text}
+
+
+def generate_broadcast_title(text: str) -> str:
+    """
+    Генерирует короткое название рассылки (3–7 слов) по тексту для отображения в списке плановых рассылок.
+    Возвращает обрезанную до 80 символов строку. При пустом text или ошибке — fallback.
+    """
+    FALLBACK = "Рассылка без текста"
+    if not text or not text.strip():
+        return FALLBACK
+    system_prompt = (
+        "Ты помощник корпоративного бота. По тексту рассылки сгенерируй короткое название (3–7 слов), "
+        "отражающее суть. Ответь только названием, без кавычек и точки в конце. Язык — русский."
+    )
+    user_prompt = f"Текст рассылки:\n\n{text[:2000]}\n\nКороткое название:"
+    try:
+        resp = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.3,
+        )
+        result = (resp.choices[0].message.content or "").strip().strip('."\'')
+        if not result:
+            return FALLBACK
+        return result[:80]
+    except Exception:
+        return FALLBACK

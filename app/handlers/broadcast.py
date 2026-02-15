@@ -36,7 +36,7 @@ from app.services.broadcast_service import (
     read_chats_by_regions,
 )
 from app.services.metrics_service import log_event
-from app.services.openai_client import improve_broadcast_text
+from app.services.openai_client import improve_broadcast_text, generate_broadcast_title
 from app.services.scheduled_broadcast_service import (
     compute_next_run_iso,
     create_scheduled_broadcast,
@@ -247,11 +247,13 @@ async def cmd_broadcast_scheduled(message: Message) -> None:
     lines = ["📋 <b>Плановые рассылки</b>\n"]
     buttons = []
     for i, rec in enumerate(items):
-        schedule_id = rec.get("schedule_id", "")[:12]
-        mode = rec.get("mode", "")
+        schedule_id = (rec.get("schedule_id") or "")[:12]
+        title = (rec.get("title") or "").strip()
+        if not title:
+            text_preview = (rec.get("text_final") or "").strip()
+            title = (text_preview[:50] + "…") if len(text_preview) > 50 else text_preview if text_preview else "Без названия"
         next_run = (rec.get("next_run_iso") or "")[:16]
-        created = (rec.get("created_at") or "")[:10]
-        lines.append(f"• {schedule_id} — {mode}, след. запуск: {next_run}")
+        lines.append(f"• <b>{title}</b> — след. запуск: {next_run}\n  ID: <code>{schedule_id}</code>")
         buttons.append([InlineKeyboardButton(text=f"🔴 Выключить {schedule_id}", callback_data=f"broadcast:scheduled_disable:{schedule_id}")])
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     await message.answer("\n".join(lines), reply_markup=keyboard, parse_mode=ParseMode.HTML)
@@ -1164,6 +1166,7 @@ async def handle_weekday(callback: CallbackQuery, state: FSMContext) -> None:
     created_by_user_id = callback.from_user.id if callback.from_user else 0
     created_by_username = callback.from_user.username if callback.from_user else None
     mode_extra_str = json.dumps(mode_extra, ensure_ascii=False) if mode_extra else "{}"
+    title = await asyncio.to_thread(generate_broadcast_title, text_final or "Рассылка без текста")
 
     schedule_id = await asyncio.to_thread(
         create_scheduled_broadcast,
@@ -1175,6 +1178,7 @@ async def handle_weekday(callback: CallbackQuery, state: FSMContext) -> None:
         mode_extra=mode_extra_str,
         schedule_type="weekly",
         schedule_config={"weekday": weekday},
+        title=title,
     )
     next_run = compute_next_run_iso("weekly", {"weekday": weekday})
     await callback.answer("✅ Плановая рассылка создана")
@@ -1218,6 +1222,7 @@ async def handle_month_day_message(message: Message, state: FSMContext) -> None:
     created_by_user_id = message.from_user.id if message.from_user else 0
     created_by_username = message.from_user.username if message.from_user else None
     mode_extra_str = json.dumps(mode_extra, ensure_ascii=False) if mode_extra else "{}"
+    title = await asyncio.to_thread(generate_broadcast_title, text_final or "Рассылка без текста")
 
     schedule_id = await asyncio.to_thread(
         create_scheduled_broadcast,
@@ -1229,6 +1234,7 @@ async def handle_month_day_message(message: Message, state: FSMContext) -> None:
         mode_extra=mode_extra_str,
         schedule_type="monthly",
         schedule_config={"day": day},
+        title=title,
     )
     next_run = compute_next_run_iso("monthly", {"day": day})
     await message.answer(
