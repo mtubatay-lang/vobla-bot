@@ -656,7 +656,7 @@ async def process_question_in_group_chat(message: Message) -> None:
             await _tag_manager_in_chat(message, query_text)
             return
 
-        kilbil_urls = get_article_urls_from_chunks(found_chunks)
+        kilbil_urls = get_article_urls_from_chunks(found_chunks, only_if_top_from_kilbil=True)
         if kilbil_urls:
             if len(kilbil_urls) == 1:
                 answer = answer + "\n\n📎 Подробнее: " + kilbil_urls[0]

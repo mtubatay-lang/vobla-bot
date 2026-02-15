@@ -53,8 +53,18 @@ async def find_kilbil_answer(user_question: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def get_article_urls_from_chunks(chunks: List[Dict[str, Any]]) -> List[str]:
-    """Собирает уникальные article_url из чанков с source=kilbil_help."""
+def get_article_urls_from_chunks(
+    chunks: List[Dict[str, Any]],
+    only_if_top_from_kilbil: bool = False,
+) -> List[str]:
+    """Собирает уникальные article_url из чанков с source=kilbil_help.
+    При only_if_top_from_kilbil=True возвращает ссылки только если первый чанк из kilbil_help."""
+    if not chunks:
+        return []
+    if only_if_top_from_kilbil:
+        top_meta = (chunks[0].get("metadata") or {})
+        if top_meta.get("source") != "kilbil_help":
+            return []
     seen = set()
     urls = []
     for ch in chunks or []:
