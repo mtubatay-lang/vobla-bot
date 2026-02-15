@@ -1,12 +1,16 @@
 """Сервис для работы с рассылками в Google Sheets."""
 
+import asyncio
 import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+from aiogram.enums import ParseMode
+from aiogram.types import InputMediaPhoto, InputMediaVideo
 
 from app.config import STATS_SHEET_ID, BROADCASTS_TAB, BROADCAST_LOGS_TAB, RECIPIENTS_USERS_TAB, RECIPIENTS_CHATS_TAB
 from app.services.sheets_client import get_sheets_client
@@ -608,4 +612,175 @@ def mark_chat_failed(chat_id: int, error_text: str) -> None:
             ws.update_cell(row_num, col, value)
     except Exception as e:
         logger.warning("[BROADCAST_SERVICE] mark_chat_failed: %s", e, exc_info=True)
+
+
+def get_broadcast_recipients(mode: str, mode_extra: Optional[Dict[str, Any]] = None) -> Tuple[List[int], List[int]]:
+    """
+    Возвращает (users, chats) для режима рассылки.
+    mode_extra: для selected_chats — {"chat_ids": [int, ...]}, для selected_regions — {"regions": [str, ...]}.
+    """
+    users: List[int] = []
+    chats: List[int] = []
+    if mode == "users":
+        users = read_active_recipients_users()
+    elif mode == "chats":
+        chats = read_active_recipients_chats()
+    elif mode == "users_chats":
+        users = read_active_recipients_users()
+        chats = read_active_recipients_chats()
+    elif mode == "selected_chats" and mode_extra:
+        chat_ids = mode_extra.get("chat_ids") or mode_extra.get("selected_chat_ids") or []
+        chats = [int(x) for x in chat_ids]
+    elif mode == "selected_regions" and mode_extra:
+        regions = mode_extra.get("regions") or mode_extra.get("selected_regions") or []
+        chats = read_chats_by_regions(regions)
+    return (users, chats)
+
+
+async def send_media_to_recipient(
+    bot, chat_id: int, attachments: List[Dict[str, Any]], text: str = ""
+) -> None:
+    """Отправляет текст и медиа получателю (user или chat)."""
+    photos = [att for att in attachments if att.get("type") == "photo"]
+    videos = [att for att in attachments if att.get("type") == "video"]
+    documents = [att for att in attachments if att.get("type") == "document"]
+
+    if text:
+        await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML)
+    for i in range(0, len(photos), 10):
+        batch = photos[i : i + 10]
+        media_group = []
+        for idx, att in enumerate(batch):
+            caption = att.get("caption", "") if idx == 0 and not text else None
+            media_group.append(
+                InputMediaPhoto(media=att["file_id"], caption=caption, parse_mode=ParseMode.HTML if caption else None)
+            )
+        if media_group:
+            await bot.send_media_group(chat_id=chat_id, media=media_group)
+    for i in range(0, len(videos), 10):
+        batch = videos[i : i + 10]
+        media_group = []
+        for idx, att in enumerate(batch):
+            caption = att.get("caption", "") if idx == 0 and not text else None
+            media_group.append(
+                InputMediaVideo(media=att["file_id"], caption=caption, parse_mode=ParseMode.HTML if caption else None)
+            )
+        if media_group:
+            await bot.send_media_group(chat_id=chat_id, media=media_group)
+    for att in documents:
+        caption = att.get("caption", "") if not text else None
+        await bot.send_document(
+            chat_id=chat_id,
+            document=att["file_id"],
+            caption=caption,
+            parse_mode=ParseMode.HTML if caption else None,
+        )
+
+
+async def execute_broadcast(
+    bot,
+    text_final: str,
+    media_json: str,
+    mode: str,
+    mode_extra: Optional[Dict[str, Any]] = None,
+    created_by_user_id: int = 0,
+    created_by_username: Optional[str] = None,
+    text_original: str = "",
+    selected_variant: str = "original",
+) -> Tuple[str, int, int]:
+    """
+    Выполняет рассылку: получает получателей, создаёт черновик, отправляет, финализирует.
+    Возвращает (broadcast_id, sent_ok, sent_fail).
+    """
+    from aiogram.exceptions import TelegramForbiddenError
+
+    mode_extra = mode_extra or {}
+    users, chats = await asyncio.to_thread(get_broadcast_recipients, mode, mode_extra)
+    users_count = len(users)
+    chats_count = len(chats)
+
+    broadcast_id = await asyncio.to_thread(
+        create_broadcast_draft,
+        created_by_user_id=created_by_user_id,
+        created_by_username=created_by_username,
+        text_original=text_original or text_final,
+        media_json=media_json,
+        users_count=users_count,
+        chats_count=chats_count,
+    )
+
+    attachments: List[Dict[str, Any]] = []
+    if media_json:
+        try:
+            attachments = json.loads(media_json)
+        except Exception as e:
+            logger.warning("[BROADCAST_SERVICE] execute_broadcast media_json parse: %s", e)
+
+    sent_ok = 0
+    sent_fail = 0
+    semaphore = asyncio.Semaphore(10)
+
+    async def send_to_user(user_id: int) -> None:
+        nonlocal sent_ok, sent_fail
+        async with semaphore:
+            try:
+                if text_final or attachments:
+                    if attachments:
+                        await send_media_to_recipient(bot, user_id, attachments, text_final)
+                    else:
+                        await bot.send_message(chat_id=user_id, text=text_final, parse_mode=ParseMode.HTML)
+                    await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "user", user_id, "ok")
+                    sent_ok += 1
+                else:
+                    await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "user", user_id, "fail", "empty message")
+                    sent_fail += 1
+            except TelegramForbiddenError:
+                await asyncio.to_thread(mark_user_failed, user_id, "blocked")
+                await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "user", user_id, "fail", "blocked")
+                sent_fail += 1
+            except Exception as e:
+                err = str(e)[:500]
+                await asyncio.to_thread(mark_user_failed, user_id, err)
+                await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "user", user_id, "fail", err)
+                sent_fail += 1
+
+    async def send_to_chat(chat_id: int) -> None:
+        nonlocal sent_ok, sent_fail
+        async with semaphore:
+            try:
+                if text_final or attachments:
+                    if attachments:
+                        await send_media_to_recipient(bot, chat_id, attachments, text_final)
+                    else:
+                        await bot.send_message(chat_id=chat_id, text=text_final, parse_mode=ParseMode.HTML)
+                    await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "ok")
+                    sent_ok += 1
+                else:
+                    await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "fail", "empty message")
+                    sent_fail += 1
+            except TelegramForbiddenError:
+                await asyncio.to_thread(mark_chat_failed, chat_id, "blocked")
+                await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "fail", "blocked")
+                sent_fail += 1
+            except Exception as e:
+                err = str(e)[:500]
+                await asyncio.to_thread(mark_chat_failed, chat_id, err)
+                await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "fail", err)
+                sent_fail += 1
+
+    tasks = [send_to_user(uid) for uid in users] + [send_to_chat(cid) for cid in chats]
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    await asyncio.to_thread(
+        finalize_broadcast,
+        broadcast_id=broadcast_id,
+        text_final=text_final,
+        status="sent",
+        sent_ok=sent_ok,
+        sent_fail=sent_fail,
+        selected_variant=selected_variant,
+        mode=mode,
+    )
+    return (broadcast_id, sent_ok, sent_fail)
 

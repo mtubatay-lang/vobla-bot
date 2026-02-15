@@ -77,6 +77,12 @@ RECIPIENTS_USERS_TAB = os.getenv("RECIPIENTS_USERS_TAB", "recipients_users")
 RECIPIENTS_CHATS_TAB = os.getenv("RECIPIENTS_CHATS_TAB", "recipients_chats")
 BROADCASTS_TAB = os.getenv("BROADCASTS_TAB", "broadcasts")
 BROADCAST_LOGS_TAB = os.getenv("BROADCAST_LOGS_TAB", "broadcast_logs")
+SCHEDULED_BROADCASTS_TAB = os.getenv("SCHEDULED_BROADCASTS_TAB", "scheduled_broadcasts")
+
+# Плановые рассылки: таймзона и фиксированное время 10:00 (не спрашиваем у пользователя)
+BROADCAST_SCHEDULE_TIMEZONE = os.getenv("BROADCAST_SCHEDULE_TIMEZONE", "Europe/Moscow")
+BROADCAST_SCHEDULE_HOUR = int(os.getenv("BROADCAST_SCHEDULE_HOUR", "10"))
+BROADCAST_SCHEDULE_MINUTE = int(os.getenv("BROADCAST_SCHEDULE_MINUTE", "0"))
 
 # --- OpenAI timeouts (seconds) ---
 OPENAI_TIMEOUT = float(os.getenv("OPENAI_TIMEOUT", "60"))

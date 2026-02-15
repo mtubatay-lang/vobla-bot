@@ -24,6 +24,7 @@ from aiogram.types import (
 from app.services.auth_service import find_user_by_telegram_id
 from app.services.broadcast_service import (
     create_broadcast_draft,
+    execute_broadcast,
     finalize_broadcast,
     log_broadcast_recipient,
     mark_chat_failed,
@@ -36,6 +37,12 @@ from app.services.broadcast_service import (
 )
 from app.services.metrics_service import log_event
 from app.services.openai_client import improve_broadcast_text
+from app.services.scheduled_broadcast_service import (
+    compute_next_run_iso,
+    create_scheduled_broadcast,
+    read_active_scheduled_broadcasts_for_list,
+    set_scheduled_broadcast_inactive,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +60,9 @@ class BroadcastState(StatesGroup):
     choosing_variant = State()  # Выбор варианта текста (оригинал/улучшенный)
     choosing_audience = State()  # Первичный выбор аудитории (с "тест себе")
     choosing_audience_final = State()  # Финальный выбор аудитории (после теста)
+    choosing_send_type = State()  # Отправить сейчас / раз в неделю / раз в месяц
+    choosing_weekday = State()  # День недели для еженедельной рассылки
+    choosing_month_day = State()  # Число месяца для ежемесячной рассылки
     selecting_chats = State()  # Выбор конкретных чатов
     choosing_segmentation_type = State()  # Выбор типа сегментации (По Регионам / По ИП)
     selecting_regions = State()  # Выбор регионов
@@ -212,7 +222,7 @@ async def cmd_broadcast(message: Message, state: FSMContext) -> None:
     """Команда /broadcast: начать процесс создания рассылки."""
     if not await _require_admin(message):
         return
-    
+
     owner_id = message.from_user.id if message.from_user else 0
     await state.update_data(owner_id=owner_id)
     await state.set_state(BroadcastState.waiting_text)
@@ -221,6 +231,49 @@ async def cmd_broadcast(message: Message, state: FSMContext) -> None:
         "Введите текст рассылки (можно написать \"-\" если без текста):",
         parse_mode=ParseMode.HTML
     )
+
+
+@router.message(Command("broadcast_scheduled"))
+async def cmd_broadcast_scheduled(message: Message) -> None:
+    """Команда /broadcast_scheduled: список активных плановых рассылок и отключение."""
+    if not await _require_admin(message):
+        return
+
+    items = await asyncio.to_thread(read_active_scheduled_broadcasts_for_list)
+    if not items:
+        await message.answer("📋 Нет активных плановых рассылок.")
+        return
+
+    lines = ["📋 <b>Плановые рассылки</b>\n"]
+    buttons = []
+    for i, rec in enumerate(items):
+        schedule_id = rec.get("schedule_id", "")[:12]
+        mode = rec.get("mode", "")
+        next_run = (rec.get("next_run_iso") or "")[:16]
+        created = (rec.get("created_at") or "")[:10]
+        lines.append(f"• {schedule_id} — {mode}, след. запуск: {next_run}")
+        buttons.append([InlineKeyboardButton(text=f"🔴 Выключить {schedule_id}", callback_data=f"broadcast:scheduled_disable:{schedule_id}")])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await message.answer("\n".join(lines), reply_markup=keyboard, parse_mode=ParseMode.HTML)
+
+
+@router.callback_query(F.data.startswith("broadcast:scheduled_disable:"))
+async def handle_scheduled_disable(callback: CallbackQuery) -> None:
+    """Отключение плановой рассылки (is_active=0)."""
+    if not await _require_admin(callback):
+        await callback.answer()
+        return
+    schedule_id = callback.data.replace("broadcast:scheduled_disable:", "").strip()
+    if not schedule_id:
+        await callback.answer("❌ Ошибка", show_alert=True)
+        return
+    ok = await asyncio.to_thread(set_scheduled_broadcast_inactive, schedule_id)
+    if ok:
+        await callback.answer("✅ Рассылка отключена")
+        if callback.message:
+            await callback.message.answer("✅ Плановая рассылка отключена.")
+    else:
+        await callback.answer("❌ Не удалось отключить", show_alert=True)
 
 
 @router.callback_query(F.data == "broadcast_start")
@@ -683,151 +736,28 @@ async def handle_send_selected_chats(callback: CallbackQuery, state: FSMContext)
         logger.warning("[BROADCAST] handle_send_selected_chats: no selected chats")
         await callback.answer("❌ Выберите хотя бы один чат", show_alert=True)
         return
-    
-    # Проверка наличия данных рассылки
-    broadcast_id = data.get("broadcast_id")
+
     text_final = data.get("text_final", "")
     media_json = data.get("media_json", "")
-    logger.info(f"[BROADCAST] handle_send_selected_chats: text_final={bool(text_final)}, media_json={bool(media_json)}")
-    
     if not text_final and not media_json:
-        logger.warning("[BROADCAST] handle_send_selected_chats: no broadcast data")
         await callback.answer("❌ Нет данных рассылки, начните заново /broadcast", show_alert=True)
         await state.clear()
         return
-    
-    logger.info("[BROADCAST] handle_send_selected_chats: starting broadcast")
-    await callback.answer("📤 Рассылка начата...")
-    
-    # Получаем данные
-    created_by_user_id = callback.from_user.id if callback.from_user else 0
-    created_by_username = callback.from_user.username if callback.from_user else None
-    text_original = data.get("text_original", "")
-    selected_variant = data.get("selected_variant", "original")
-    
-    # Используем только выбранные чаты
-    users = []
-    chats = selected_chat_ids
-    
-    users_count = len(users)
-    chats_count = len(chats)
-    
-    # Создаём черновик рассылки (если ещё не создан)
-    if not broadcast_id:
-        broadcast_id = await asyncio.to_thread(
-            create_broadcast_draft,
-            created_by_user_id=created_by_user_id,
-            created_by_username=created_by_username,
-            text_original=text_original,
-            media_json=media_json,
-            users_count=users_count,
-            chats_count=chats_count,
-        )
-        await state.update_data(broadcast_id=broadcast_id)
-        
-        # Логируем событие создания
-        await asyncio.to_thread(
-            log_event,
-            user_id=created_by_user_id,
-            username=created_by_username,
-            event="broadcast_created",
-            meta={"broadcast_id": broadcast_id, "mode": "selected_chats"},
-        )
-    
-    # Парсим медиа
-    attachments = []
-    if media_json:
-        try:
-            attachments = json.loads(media_json)
-        except Exception as e:
-            logger.warning("[BROADCAST] Парсинг media_json (send selected_chats): %s", e, exc_info=True)
-    
-    # Отправляем всем получателям
-    sent_ok = 0
-    sent_fail = 0
-    
-    # Семафор на 10 одновременных отправок
-    semaphore = asyncio.Semaphore(10)
-    
-    async def send_to_chat(chat_id: int) -> None:
-        nonlocal sent_ok, sent_fail
-        async with semaphore:
-            try:
-                if text_final or attachments:
-                    if attachments:
-                        await _send_media_to_recipient(callback.message.bot, chat_id, attachments, text_final)
-                    else:
-                        await callback.message.bot.send_message(chat_id=chat_id, text=text_final, parse_mode=ParseMode.HTML)
-                    
-                    await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "ok")
-                    sent_ok += 1
-                else:
-                    await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "fail", "empty message")
-                    sent_fail += 1
-            except TelegramForbiddenError as e:
-                error_text = "blocked"
-                await asyncio.to_thread(mark_chat_failed, chat_id, error_text)
-                await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "fail", error_text)
-                sent_fail += 1
-            except Exception as e:
-                error_text = str(e)[:500]
-                await asyncio.to_thread(mark_chat_failed, chat_id, error_text)
-                await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "fail", error_text)
-                sent_fail += 1
-    
-    # Создаём задачи для всех получателей
-    tasks = []
-    for chat_id in chats:
-        tasks.append(send_to_chat(chat_id))
-    
-    # Ждём завершения всех задач
-    logger.info(f"[BROADCAST] handle_send_selected_chats: sending to {len(tasks)} chats")
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
-    
-    total = sent_ok + sent_fail
-    logger.info(f"[BROADCAST] handle_send_selected_chats: completed. sent_ok={sent_ok}, sent_fail={sent_fail}")
-    
-    # Обновляем статус рассылки
-    await asyncio.to_thread(
-        finalize_broadcast,
-        broadcast_id=broadcast_id,
-        text_final=text_final,
-        status="sent",
-        sent_ok=sent_ok,
-        sent_fail=sent_fail,
-        selected_variant=selected_variant,
-        mode="selected_chats",
+
+    await callback.answer()
+    await state.update_data(pending_send_mode="selected_chats")
+    await state.set_state(BroadcastState.choosing_send_type)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📤 Отправить сейчас", callback_data="broadcast:send_now")],
+        [InlineKeyboardButton(text="📅 Раз в неделю (в 10:00)", callback_data="broadcast:schedule:weekly")],
+        [InlineKeyboardButton(text="📆 Раз в месяц (в 10:00)", callback_data="broadcast:schedule:monthly")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast:cancel_send")],
+    ])
+    await callback.message.answer(
+        "⏰ <b>Как отправить?</b>\n\nВремя для повторяющихся рассылок всегда 10:00 по таймзоне бота.",
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML,
     )
-    
-    # Логируем событие отправки
-    await asyncio.to_thread(
-        log_event,
-        user_id=created_by_user_id,
-        username=created_by_username,
-        event="broadcast_sent",
-        meta={
-            "broadcast_id": broadcast_id,
-            "mode": "selected_chats",
-            "variant": selected_variant,
-            "total": total,
-            "ok": sent_ok,
-            "fail": sent_fail,
-        },
-    )
-    
-    # Отвечаем админу
-    result_text = (
-        f"✅ <b>Рассылка отправлена</b>\n\n"
-        f"📊 Статистика:\n"
-        f"• Всего получателей: {total}\n"
-        f"• Успешно: {sent_ok}\n"
-        f"• Ошибок: {sent_fail}\n\n"
-        f"ID рассылки: <code>{broadcast_id}</code>"
-    )
-    
-    await callback.message.answer(result_text, parse_mode=ParseMode.HTML)
-    await state.clear()
 
 
 async def _show_regions_selection(
@@ -966,154 +896,28 @@ async def handle_send_selected_regions(callback: CallbackQuery, state: FSMContex
     if not chat_ids:
         await callback.answer("❌ В выбранных регионах нет активных чатов", show_alert=True)
         return
-    
-    # Проверка наличия данных рассылки
-    broadcast_id = data.get("broadcast_id")
+
     text_final = data.get("text_final", "")
     media_json = data.get("media_json", "")
-    logger.info(f"[BROADCAST] handle_send_selected_regions: text_final={bool(text_final)}, media_json={bool(media_json)}")
-    
     if not text_final and not media_json:
-        logger.warning("[BROADCAST] handle_send_selected_regions: no broadcast data")
         await callback.answer("❌ Нет данных рассылки, начните заново /broadcast", show_alert=True)
         await state.clear()
         return
-    
-    logger.info("[BROADCAST] handle_send_selected_regions: starting broadcast")
-    await callback.answer("📤 Рассылка начата...")
-    
-    # Получаем данные
-    created_by_user_id = callback.from_user.id if callback.from_user else 0
-    created_by_username = callback.from_user.username if callback.from_user else None
-    text_original = data.get("text_original", "")
-    selected_variant = data.get("selected_variant", "original")
-    
-    # Используем чаты из выбранных регионов
-    users = []
-    chats = chat_ids
-    
-    users_count = len(users)
-    chats_count = len(chats)
-    
-    # Создаём черновик рассылки (если ещё не создан)
-    if not broadcast_id:
-        broadcast_id = await asyncio.to_thread(
-            create_broadcast_draft,
-            created_by_user_id=created_by_user_id,
-            created_by_username=created_by_username,
-            text_original=text_original,
-            media_json=media_json,
-            users_count=users_count,
-            chats_count=chats_count,
-        )
-        await state.update_data(broadcast_id=broadcast_id)
-        
-        # Логируем событие создания
-        await asyncio.to_thread(
-            log_event,
-            user_id=created_by_user_id,
-            username=created_by_username,
-            event="broadcast_created",
-            meta={"broadcast_id": broadcast_id, "mode": "selected_regions", "regions": selected_regions},
-        )
-    
-    # Парсим медиа
-    attachments = []
-    if media_json:
-        try:
-            attachments = json.loads(media_json)
-        except Exception as e:
-            logger.warning("[BROADCAST] Парсинг media_json (send selected_regions): %s", e, exc_info=True)
-    
-    # Отправляем всем получателям
-    sent_ok = 0
-    sent_fail = 0
-    
-    # Семафор на 10 одновременных отправок
-    semaphore = asyncio.Semaphore(10)
-    
-    async def send_to_chat(chat_id: int) -> None:
-        nonlocal sent_ok, sent_fail
-        async with semaphore:
-            try:
-                if text_final or attachments:
-                    if attachments:
-                        await _send_media_to_recipient(callback.message.bot, chat_id, attachments, text_final)
-                    else:
-                        await callback.message.bot.send_message(chat_id=chat_id, text=text_final, parse_mode=ParseMode.HTML)
-                    
-                    await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "ok")
-                    sent_ok += 1
-                else:
-                    await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "fail", "empty message")
-                    sent_fail += 1
-            except TelegramForbiddenError as e:
-                error_text = "blocked"
-                await asyncio.to_thread(mark_chat_failed, chat_id, error_text)
-                await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "fail", error_text)
-                sent_fail += 1
-            except Exception as e:
-                error_text = str(e)[:500]
-                await asyncio.to_thread(mark_chat_failed, chat_id, error_text)
-                await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "fail", error_text)
-                sent_fail += 1
-    
-    # Создаём задачи для всех получателей
-    tasks = []
-    for chat_id in chats:
-        tasks.append(send_to_chat(chat_id))
-    
-    # Ждём завершения всех задач
-    logger.info(f"[BROADCAST] handle_send_selected_regions: sending to {len(tasks)} chats")
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
-    
-    total = sent_ok + sent_fail
-    logger.info(f"[BROADCAST] handle_send_selected_regions: completed. sent_ok={sent_ok}, sent_fail={sent_fail}")
-    
-    # Обновляем статус рассылки
-    await asyncio.to_thread(
-        finalize_broadcast,
-        broadcast_id=broadcast_id,
-        text_final=text_final,
-        status="sent",
-        sent_ok=sent_ok,
-        sent_fail=sent_fail,
-        selected_variant=selected_variant,
-        mode="selected_regions",
+
+    await callback.answer()
+    await state.update_data(pending_send_mode="selected_regions")
+    await state.set_state(BroadcastState.choosing_send_type)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📤 Отправить сейчас", callback_data="broadcast:send_now")],
+        [InlineKeyboardButton(text="📅 Раз в неделю (в 10:00)", callback_data="broadcast:schedule:weekly")],
+        [InlineKeyboardButton(text="📆 Раз в месяц (в 10:00)", callback_data="broadcast:schedule:monthly")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast:cancel_send")],
+    ])
+    await callback.message.answer(
+        "⏰ <b>Как отправить?</b>\n\nВремя для повторяющихся рассылок всегда 10:00 по таймзоне бота.",
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML,
     )
-    
-    # Логируем событие отправки
-    await asyncio.to_thread(
-        log_event,
-        user_id=created_by_user_id,
-        username=created_by_username,
-        event="broadcast_sent",
-        meta={
-            "broadcast_id": broadcast_id,
-            "mode": "selected_regions",
-            "regions": selected_regions,
-            "variant": selected_variant,
-            "total": total,
-            "ok": sent_ok,
-            "fail": sent_fail,
-        },
-    )
-    
-    # Отвечаем админу
-    regions_str = ", ".join(selected_regions)
-    result_text = (
-        f"✅ <b>Рассылка отправлена</b>\n\n"
-        f"📊 Статистика:\n"
-        f"• Регионы: {regions_str}\n"
-        f"• Всего получателей: {total}\n"
-        f"• Успешно: {sent_ok}\n"
-        f"• Ошибок: {sent_fail}\n\n"
-        f"ID рассылки: <code>{broadcast_id}</code>"
-    )
-    
-    await callback.message.answer(result_text, parse_mode=ParseMode.HTML)
-    await state.clear()
 
 
 @router.callback_query(F.data.startswith("broadcast:send:"))
@@ -1157,7 +961,6 @@ async def handle_send_broadcast(callback: CallbackQuery, state: FSMContext) -> N
         await callback.answer("❌ Нужно ввести хотя бы текст или прикрепить медиа", show_alert=True)
         return
     
-    # Определяем режим отправки (без self, так как он обрабатывается отдельно)
     if callback.data == "broadcast:send:users":
         mode = "users"
     elif callback.data == "broadcast:send:chats":
@@ -1167,176 +970,21 @@ async def handle_send_broadcast(callback: CallbackQuery, state: FSMContext) -> N
     else:
         await callback.answer("❌ Неизвестная команда")
         return
-    
-    await callback.answer("📤 Рассылка начата...")
-    
-    # Получаем данные
-    created_by_user_id = callback.from_user.id if callback.from_user else 0
-    created_by_username = callback.from_user.username if callback.from_user else None
-    text_original = data.get("text_original", "")
-    selected_variant = data.get("selected_variant", "original")
-    
-    # Получаем списки получателей в зависимости от режима (без self, так как он обрабатывается отдельно)
-    users = []
-    chats = []
-    
-    if mode == "users":
-        users = await asyncio.to_thread(read_active_recipients_users)
-        chats = []
-    elif mode == "chats":
-        users = []
-        chats = await asyncio.to_thread(read_active_recipients_chats)
-    elif mode == "users_chats":
-        users_list = await asyncio.to_thread(read_active_recipients_users)
-        chats_list = await asyncio.to_thread(read_active_recipients_chats)
-        users = users_list
-        chats = chats_list
-    
-    users_count = len(users)
-    chats_count = len(chats)
-    
-    # Создаём черновик рассылки (если ещё не создан)
-    if not broadcast_id:
-        broadcast_id = await asyncio.to_thread(
-            create_broadcast_draft,
-            created_by_user_id=created_by_user_id,
-            created_by_username=created_by_username,
-            text_original=text_original,
-            media_json=media_json,
-            users_count=users_count,
-            chats_count=chats_count,
-        )
-        await state.update_data(broadcast_id=broadcast_id)
-        
-        # Логируем событие создания
-        await asyncio.to_thread(
-            log_event,
-            user_id=created_by_user_id,
-            username=created_by_username,
-            event="broadcast_created",
-            meta={"broadcast_id": broadcast_id, "mode": mode},
-        )
-    
-    # Парсим медиа
-    attachments = []
-    if media_json:
-        try:
-            attachments = json.loads(media_json)
-        except Exception as e:
-            logger.warning("[BROADCAST] Парсинг media_json (send users/chats): %s", e, exc_info=True)
-    
-    # Отправляем всем получателям
-    sent_ok = 0
-    sent_fail = 0
-    
-    # Семафор на 10 одновременных отправок
-    semaphore = asyncio.Semaphore(10)
-    
-    async def send_to_user(user_id: int) -> None:
-        nonlocal sent_ok, sent_fail
-        async with semaphore:
-            try:
-                if text_final or attachments:
-                    if attachments:
-                        await _send_media_to_recipient(callback.message.bot, user_id, attachments, text_final)
-                    else:
-                        await callback.message.bot.send_message(chat_id=user_id, text=text_final, parse_mode=ParseMode.HTML)
-                    
-                    await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "user", user_id, "ok")
-                    sent_ok += 1
-                else:
-                    await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "user", user_id, "fail", "empty message")
-                    sent_fail += 1
-            except TelegramForbiddenError as e:
-                error_text = "blocked"
-                await asyncio.to_thread(mark_user_failed, user_id, error_text)
-                await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "user", user_id, "fail", error_text)
-                sent_fail += 1
-            except Exception as e:
-                error_text = str(e)[:500]
-                await asyncio.to_thread(mark_user_failed, user_id, error_text)
-                await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "user", user_id, "fail", error_text)
-                sent_fail += 1
-    
-    async def send_to_chat(chat_id: int) -> None:
-        nonlocal sent_ok, sent_fail
-        async with semaphore:
-            try:
-                if text_final or attachments:
-                    if attachments:
-                        await _send_media_to_recipient(callback.message.bot, chat_id, attachments, text_final)
-                    else:
-                        await callback.message.bot.send_message(chat_id=chat_id, text=text_final, parse_mode=ParseMode.HTML)
-                    
-                    await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "ok")
-                    sent_ok += 1
-                else:
-                    await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "fail", "empty message")
-                    sent_fail += 1
-            except TelegramForbiddenError as e:
-                error_text = "blocked"
-                await asyncio.to_thread(mark_chat_failed, chat_id, error_text)
-                await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "fail", error_text)
-                sent_fail += 1
-            except Exception as e:
-                error_text = str(e)[:500]
-                await asyncio.to_thread(mark_chat_failed, chat_id, error_text)
-                await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "fail", error_text)
-                sent_fail += 1
-    
-    # Создаём задачи для всех получателей
-    tasks = []
-    for user_id in users:
-        tasks.append(send_to_user(user_id))
-    for chat_id in chats:
-        tasks.append(send_to_chat(chat_id))
-    
-    # Ждём завершения всех задач
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
-    
-    total = sent_ok + sent_fail
-    
-    # Обновляем статус рассылки
-    await asyncio.to_thread(
-        finalize_broadcast,
-        broadcast_id=broadcast_id,
-        text_final=text_final,
-        status="sent",
-        sent_ok=sent_ok,
-        sent_fail=sent_fail,
-        selected_variant=selected_variant,
-        mode=mode,
+
+    await callback.answer()
+    await state.update_data(pending_send_mode=mode)
+    await state.set_state(BroadcastState.choosing_send_type)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📤 Отправить сейчас", callback_data="broadcast:send_now")],
+        [InlineKeyboardButton(text="📅 Раз в неделю (в 10:00)", callback_data="broadcast:schedule:weekly")],
+        [InlineKeyboardButton(text="📆 Раз в месяц (в 10:00)", callback_data="broadcast:schedule:monthly")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast:cancel_send")],
+    ])
+    await callback.message.answer(
+        "⏰ <b>Как отправить?</b>\n\nВремя для повторяющихся рассылок всегда 10:00 по таймзоне бота.",
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML,
     )
-    
-    # Логируем событие отправки
-    await asyncio.to_thread(
-        log_event,
-        user_id=created_by_user_id,
-        username=created_by_username,
-        event="broadcast_sent",
-        meta={
-            "broadcast_id": broadcast_id,
-            "mode": mode,
-            "variant": selected_variant,
-            "total": total,
-            "ok": sent_ok,
-            "fail": sent_fail,
-        },
-    )
-    
-    # Отвечаем админу
-    result_text = (
-        f"✅ <b>Рассылка отправлена</b>\n\n"
-        f"📊 Статистика:\n"
-        f"• Всего получателей: {total}\n"
-        f"• Успешно: {sent_ok}\n"
-        f"• Ошибок: {sent_fail}\n\n"
-        f"ID рассылки: <code>{broadcast_id}</code>"
-    )
-    
-    await callback.message.answer(result_text, parse_mode=ParseMode.HTML)
-    await state.clear()
 
 
 @router.callback_query(F.data == "broadcast:cancel_send")
@@ -1371,6 +1019,223 @@ async def handle_cancel_send(callback: CallbackQuery, state: FSMContext) -> None
     
     await state.clear()
     await callback.message.answer("❌ Рассылка отменена")
+
+
+def _get_mode_extra_from_state(data: Dict[str, Any], mode: str) -> Optional[Dict[str, Any]]:
+    if mode == "selected_chats":
+        ids = data.get("selected_chat_ids", [])
+        return {"chat_ids": ids} if ids else None
+    if mode == "selected_regions":
+        regions = data.get("selected_regions", [])
+        return {"regions": regions} if regions else None
+    return None
+
+
+@router.callback_query(F.data == "broadcast:send_now")
+async def handle_send_now(callback: CallbackQuery, state: FSMContext) -> None:
+    """Отправить рассылку сейчас (без расписания)."""
+    if not callback.message:
+        await callback.answer()
+        return
+    if not await _require_admin(callback):
+        await callback.answer()
+        return
+    if not await _check_user_owns_broadcast(callback, state):
+        return
+
+    data = await state.get_data()
+    mode = data.get("pending_send_mode")
+    if not mode:
+        await callback.answer("❌ Нет выбранного режима, начните заново /broadcast", show_alert=True)
+        await state.clear()
+        return
+
+    text_final = data.get("text_final", "")
+    media_json = data.get("media_json", "")
+    if not text_final and not media_json:
+        await callback.answer("❌ Нет данных рассылки", show_alert=True)
+        await state.clear()
+        return
+
+    mode_extra = _get_mode_extra_from_state(data, mode)
+    created_by_user_id = callback.from_user.id if callback.from_user else 0
+    created_by_username = callback.from_user.username if callback.from_user else None
+    text_original = data.get("text_original", "")
+    selected_variant = data.get("selected_variant", "original")
+
+    await callback.answer("📤 Рассылка начата...")
+    broadcast_id, sent_ok, sent_fail = await execute_broadcast(
+        callback.message.bot,
+        text_final=text_final,
+        media_json=media_json,
+        mode=mode,
+        mode_extra=mode_extra,
+        created_by_user_id=created_by_user_id,
+        created_by_username=created_by_username,
+        text_original=text_original,
+        selected_variant=selected_variant,
+    )
+    total = sent_ok + sent_fail
+    await asyncio.to_thread(
+        log_event,
+        user_id=created_by_user_id,
+        username=created_by_username,
+        event="broadcast_sent",
+        meta={"broadcast_id": broadcast_id, "mode": mode, "total": total, "ok": sent_ok, "fail": sent_fail},
+    )
+    await callback.message.answer(
+        f"✅ <b>Рассылка отправлена</b>\n\n📊 Всего: {total}, успешно: {sent_ok}, ошибок: {sent_fail}\n\nID: <code>{broadcast_id}</code>",
+        parse_mode=ParseMode.HTML,
+    )
+    await state.clear()
+
+
+@router.callback_query(F.data == "broadcast:schedule:weekly")
+async def handle_schedule_weekly(callback: CallbackQuery, state: FSMContext) -> None:
+    """Выбор дня недели для еженедельной рассылки."""
+    if not callback.message:
+        await callback.answer()
+        return
+    if not await _require_admin(callback):
+        await callback.answer()
+        return
+    if not await _check_user_owns_broadcast(callback, state):
+        return
+    await callback.answer()
+    await state.set_state(BroadcastState.choosing_weekday)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Пн", callback_data="broadcast:weekday:0"), InlineKeyboardButton(text="Вт", callback_data="broadcast:weekday:1"), InlineKeyboardButton(text="Ср", callback_data="broadcast:weekday:2")],
+        [InlineKeyboardButton(text="Чт", callback_data="broadcast:weekday:3"), InlineKeyboardButton(text="Пт", callback_data="broadcast:weekday:4"), InlineKeyboardButton(text="Сб", callback_data="broadcast:weekday:5"), InlineKeyboardButton(text="Вс", callback_data="broadcast:weekday:6")],
+    ])
+    await callback.message.answer("📅 Выберите день недели (рассылка в 10:00):", reply_markup=keyboard)
+
+
+@router.callback_query(F.data == "broadcast:schedule:monthly")
+async def handle_schedule_monthly(callback: CallbackQuery, state: FSMContext) -> None:
+    """Запрос числа месяца для ежемесячной рассылки."""
+    if not callback.message:
+        await callback.answer()
+        return
+    if not await _require_admin(callback):
+        await callback.answer()
+        return
+    if not await _check_user_owns_broadcast(callback, state):
+        return
+    await callback.answer()
+    await state.set_state(BroadcastState.choosing_month_day)
+    await callback.message.answer("📆 Введите число месяца (1–31), когда отправлять рассылку (в 10:00):")
+
+
+@router.callback_query(F.data.startswith("broadcast:weekday:"))
+async def handle_weekday(callback: CallbackQuery, state: FSMContext) -> None:
+    """Сохранение еженедельной плановой рассылки."""
+    if not callback.message:
+        await callback.answer()
+        return
+    if not await _require_admin(callback):
+        await callback.answer()
+        return
+    if not await _check_user_owns_broadcast(callback, state):
+        return
+
+    try:
+        weekday = int(callback.data.split(":")[-1])
+    except (ValueError, IndexError):
+        await callback.answer("❌ Ошибка", show_alert=True)
+        return
+    if weekday < 0 or weekday > 6:
+        await callback.answer("❌ Неверный день", show_alert=True)
+        return
+
+    data = await state.get_data()
+    text_final = data.get("text_final", "")
+    media_json = data.get("media_json", "")
+    mode = data.get("pending_send_mode", "chats")
+    if not text_final and not media_json:
+        await callback.answer("❌ Нет данных рассылки", show_alert=True)
+        await state.clear()
+        return
+
+    mode_extra = _get_mode_extra_from_state(data, mode)
+    if mode in ("selected_chats", "selected_regions") and not mode_extra:
+        await callback.answer("❌ Нет выбранной аудитории", show_alert=True)
+        return
+
+    created_by_user_id = callback.from_user.id if callback.from_user else 0
+    created_by_username = callback.from_user.username if callback.from_user else None
+    mode_extra_str = json.dumps(mode_extra, ensure_ascii=False) if mode_extra else "{}"
+
+    schedule_id = await asyncio.to_thread(
+        create_scheduled_broadcast,
+        created_by_user_id=created_by_user_id,
+        created_by_username=created_by_username,
+        text_final=text_final,
+        media_json=media_json,
+        mode=mode,
+        mode_extra=mode_extra_str,
+        schedule_type="weekly",
+        schedule_config={"weekday": weekday},
+    )
+    next_run = compute_next_run_iso("weekly", {"weekday": weekday})
+    await callback.answer("✅ Плановая рассылка создана")
+    await callback.message.answer(
+        f"✅ <b>Плановая рассылка создана</b>\n\nСледующая отправка: {next_run[:16].replace('T', ' ')} UTC\n\nID: <code>{schedule_id}</code>",
+        parse_mode=ParseMode.HTML,
+    )
+    await state.clear()
+
+
+@router.message(BroadcastState.choosing_month_day, F.text)
+async def handle_month_day_message(message: Message, state: FSMContext) -> None:
+    """Ввод числа месяца для ежемесячной рассылки."""
+    if not await _require_admin(message):
+        return
+    text = (message.text or "").strip()
+    try:
+        day = int(text)
+    except ValueError:
+        await message.answer("Введите число от 1 до 31.")
+        return
+    if day < 1 or day > 31:
+        await message.answer("Введите число от 1 до 31.")
+        return
+
+    data = await state.get_data()
+    text_final = data.get("text_final", "")
+    media_json = data.get("media_json", "")
+    mode = data.get("pending_send_mode", "chats")
+    if not text_final and not media_json:
+        await message.answer("❌ Нет данных рассылки. Начните заново /broadcast")
+        await state.clear()
+        return
+
+    mode_extra = _get_mode_extra_from_state(data, mode)
+    if mode in ("selected_chats", "selected_regions") and not mode_extra:
+        await message.answer("❌ Нет выбранной аудитории")
+        await state.clear()
+        return
+
+    created_by_user_id = message.from_user.id if message.from_user else 0
+    created_by_username = message.from_user.username if message.from_user else None
+    mode_extra_str = json.dumps(mode_extra, ensure_ascii=False) if mode_extra else "{}"
+
+    schedule_id = await asyncio.to_thread(
+        create_scheduled_broadcast,
+        created_by_user_id=created_by_user_id,
+        created_by_username=created_by_username,
+        text_final=text_final,
+        media_json=media_json,
+        mode=mode,
+        mode_extra=mode_extra_str,
+        schedule_type="monthly",
+        schedule_config={"day": day},
+    )
+    next_run = compute_next_run_iso("monthly", {"day": day})
+    await message.answer(
+        f"✅ <b>Плановая рассылка создана</b>\n\nСледующая отправка: {next_run[:16].replace('T', ' ')} UTC\n\nID: <code>{schedule_id}</code>",
+        parse_mode=ParseMode.HTML,
+    )
+    await state.clear()
 
 
 @router.callback_query(F.data == "broadcast:select_chats")
