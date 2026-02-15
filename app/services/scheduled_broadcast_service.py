@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Optional
 
 from zoneinfo import ZoneInfo
 
+from gspread.exceptions import WorksheetNotFound
+
 from app.config import (
     STATS_SHEET_ID,
     SCHEDULED_BROADCASTS_TAB,
@@ -30,7 +32,13 @@ def _get_ws(tab_name: str):
         raise RuntimeError("STATS_SHEET_ID не задан")
     client = get_sheets_client()
     sh = client.open_by_key(STATS_SHEET_ID)
-    return sh.worksheet(tab_name)
+    try:
+        return sh.worksheet(tab_name)
+    except WorksheetNotFound:
+        raise RuntimeError(
+            f"Лист «{tab_name}» не найден в таблице (STATS_SHEET_ID). "
+            f"Добавьте лист с именем «{tab_name}» в Google Таблицу или задайте SCHEDULED_BROADCASTS_TAB в настройках."
+        ) from None
 
 
 def _get_headers(ws) -> Dict[str, int]:

@@ -77,7 +77,7 @@ RECIPIENTS_USERS_TAB = os.getenv("RECIPIENTS_USERS_TAB", "recipients_users")
 RECIPIENTS_CHATS_TAB = os.getenv("RECIPIENTS_CHATS_TAB", "recipients_chats")
 BROADCASTS_TAB = os.getenv("BROADCASTS_TAB", "broadcasts")
 BROADCAST_LOGS_TAB = os.getenv("BROADCAST_LOGS_TAB", "broadcast_logs")
-SCHEDULED_BROADCASTS_TAB = os.getenv("SCHEDULED_BROADCASTS_TAB", "scheduled_broadcasts")
+SCHEDULED_BROADCASTS_TAB = os.getenv("SCHEDULED_BROADCASTS_TAB", "SCHEDULED_BROADCASTS_TAB")
 
 # Плановые рассылки: таймзона и фиксированное время 10:00 (не спрашиваем у пользователя)
 BROADCAST_SCHEDULE_TIMEZONE = os.getenv("BROADCAST_SCHEDULE_TIMEZONE", "Europe/Moscow")
