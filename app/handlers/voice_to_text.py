@@ -7,8 +7,8 @@ from io import BytesIO
 from aiogram import Router, F
 from aiogram.types import Message
 
-from app.config import VOICE_TO_TEXT_ENABLED, WHISPER_MAX_FILE_BYTES
-from app.services.voice_transcription_service import transcribe_voice
+from app.config import VOICE_TO_TEXT_ENABLED, VOICE_STRUCTURE_OUTPUT, WHISPER_MAX_FILE_BYTES
+from app.services.voice_transcription_service import transcribe_voice, structure_transcript
 
 logger = logging.getLogger(__name__)
 
@@ -55,4 +55,17 @@ async def on_voice(message: Message) -> None:
         await message.answer("Текст не распознан.")
         return
 
-    await message.answer(text)
+    if VOICE_STRUCTURE_OUTPUT:
+        try:
+            text = await asyncio.to_thread(structure_transcript, text)
+        except Exception as e:
+            logger.warning("[VOICE_TO_TEXT] Ошибка структурирования, отправляю сырой текст: %s", e)
+
+    # Telegram лимит ~4096 символов на сообщение
+    MAX_MESSAGE_LENGTH = 4090
+    if len(text) <= MAX_MESSAGE_LENGTH:
+        await message.answer(text)
+    else:
+        for i in range(0, len(text), MAX_MESSAGE_LENGTH):
+            chunk = text[i : i + MAX_MESSAGE_LENGTH]
+            await message.answer(chunk)

@@ -92,6 +92,8 @@ VOICE_TO_TEXT_ENABLED = os.getenv("VOICE_TO_TEXT_ENABLED", "true").lower() == "t
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")
 # Лимит размера голосового файла для Whisper (25 MB)
 WHISPER_MAX_FILE_BYTES = 25 * 1024 * 1024
+# Структурировать расшифровку через LLM (резюме, блоки, задачи, чеклист)
+VOICE_STRUCTURE_OUTPUT = os.getenv("VOICE_STRUCTURE_OUTPUT", "true").lower() == "true"
 
 # --- Qdrant Vector Database ---
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
