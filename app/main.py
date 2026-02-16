@@ -24,6 +24,7 @@ from app.handlers.group_chat_qa import router as group_chat_qa_router
 from app.handlers.knowledge_base_admin import router as kb_admin_router
 from app.handlers.broadcast import router as broadcast_router
 from app.handlers.recipients_collector import router as recipients_collector_router
+from app.handlers.voice_to_text import router as voice_to_text_router
 
 
 async def main() -> None:
@@ -79,6 +80,7 @@ async def main() -> None:
     dp.include_router(recipients_collector_router)  # сбор получателей (чаты/юзеры) для рассылки
     dp.include_router(start_router)
     dp.include_router(help_router)  # роутер помощи
+    dp.include_router(voice_to_text_router)  # голос → текст (до echo и qa)
     dp.include_router(auth_router)  # роутер авторизации
     dp.include_router(kb_admin_router)  # админ-панель для базы знаний (перемещен выше)
     dp.include_router(manager_router)  # роутер для менеджеров

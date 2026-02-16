@@ -87,6 +87,12 @@ BROADCAST_SCHEDULE_MINUTE = int(os.getenv("BROADCAST_SCHEDULE_MINUTE", "0"))
 # --- OpenAI timeouts (seconds) ---
 OPENAI_TIMEOUT = float(os.getenv("OPENAI_TIMEOUT", "60"))
 
+# --- Голос в текст (Whisper) ---
+VOICE_TO_TEXT_ENABLED = os.getenv("VOICE_TO_TEXT_ENABLED", "true").lower() == "true"
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")
+# Лимит размера голосового файла для Whisper (25 MB)
+WHISPER_MAX_FILE_BYTES = 25 * 1024 * 1024
+
 # --- Qdrant Vector Database ---
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", "")

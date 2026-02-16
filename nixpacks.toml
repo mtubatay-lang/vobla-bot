@@ -1,0 +1,3 @@
+# Nixpacks config for Railway: install ffmpeg for pydub (voice → text).
+[phases.setup]
+nixPkgs = ["python312", "ffmpeg"]
