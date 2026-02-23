@@ -89,6 +89,13 @@ def _update_user_context(chat_id: int, user_id: int, updates: Dict[str, Any]) ->
         context["conversation_history"] = context["conversation_history"][-10:]
 
 
+def _is_top_score_sufficient_for_answer(found_chunks: List[Dict[str, Any]], min_score: float) -> bool:
+    """True если лучший score среди чанков >= min_score. Иначе False (в т.ч. при пустом списке)."""
+    if not found_chunks:
+        return False
+    return max((c.get("score", 0) for c in found_chunks), default=0) >= min_score
+
+
 async def _is_question(message_text: str) -> bool:
     """Определяет через AI, является ли сообщение вопросом, требующим ответа от поддержки/базы знаний."""
     try:
@@ -663,7 +670,7 @@ async def process_question_in_group_chat(message: Message, question_text_overrid
         
         # Порог уверенности: отвечаем только если лучший чанк выше MIN_TOP_SCORE_FOR_ANSWER
         top_score = max((c.get("score", 0) for c in found_chunks), default=0)
-        if top_score < MIN_TOP_SCORE_FOR_ANSWER:
+        if not _is_top_score_sufficient_for_answer(found_chunks, MIN_TOP_SCORE_FOR_ANSWER):
             logger.info("[GROUP_CHAT_QA] Топ score %.3f < MIN_TOP_SCORE_FOR_ANSWER, молчим", top_score)
             await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": question_hash, "outcome": "no_answer_silent", "top_score": top_score})
             await _maybe_send_no_answer_reply(message)

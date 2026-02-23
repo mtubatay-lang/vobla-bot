@@ -20,3 +20,8 @@
 ## Мониторинг
 
 В логах сервиса ищутся события `rag_pipeline`, `kb_search_performed`, `kb_answer_generated`. В `rag_pipeline` при outcome `no_answer_silent` передаётся `top_score` (и при необходимости `reason`), чтобы анализировать, из‑за чего бот не ответил (низкий score, недостаточно данных, grounding и т.д.).
+
+## Тесты и сценарии
+
+- **Ручные сценарии:** чек-лист вопросов и ожиданий (ответ / молчит) — [tests/manual/group_chat_qa_scenarios.md](../tests/manual/group_chat_qa_scenarios.md). Прогон: по одному вопросу в тестовый чат (MCP Telegram, entity 3377597100), пауза 15–20 сек, проверка ответа через `get_messages`; при необходимости — логи Railway (`get-logs`). В том же файле — таблица результатов и раздел «План улучшений» для заполнения после теста.
+- **Юнит-тесты:** `pytest tests/ -v` (нужны зависимости из `requirements-dev.txt`: pytest, pytest-asyncio). Покрыты извлечение текста из сообщения, порог по score чанков, классификация «это вопрос» (с моком OpenAI).
