@@ -160,6 +160,8 @@ KB_MANAGERS_CHAT_ID = int(os.getenv("KB_MANAGERS_CHAT_ID", "-1003243490449"))
 # --- RAG Test Chat Settings (для ограничения работы только в тестовом чате) ---
 # RAG_TEST_CHAT_ID: не задана — дефолт -1003377597100 (тестовый чат); пустая строка — все чаты
 RAG_TEST_CHAT_ID_DEFAULT = -1003377597100
+# При true бот в группе при отсутствии ответа в базе отправляет короткое сообщение («Пока не нашёл ответ в базе...»)
+RAG_SEND_NO_ANSWER_REPLY = os.getenv("RAG_SEND_NO_ANSWER_REPLY", "false").lower() == "true"
 
 
 def get_rag_test_chat_id() -> int | None:

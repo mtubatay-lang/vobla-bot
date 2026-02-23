@@ -33,6 +33,7 @@ from app.config import (
     USE_CROSS_ENCODER_RERANK,
     COHERE_API_KEY,
     RERANK_CANDIDATES_LIMIT,
+    RAG_SEND_NO_ANSWER_REPLY,
 )
 from app.handlers.qa_mode import _expand_query_for_search, detect_clarification_response_vs_new_question
 
@@ -94,8 +95,10 @@ async def _is_question(message_text: str) -> bool:
         prompt = (
             "Является ли это сообщение вопросом, на который ожидается ответ от поддержки или базы знаний "
             "(франшиза, касса, регламент, лояльность, документы, процедуры и т.п.)?\n"
-            "НЕ считай вопросом: приветствия, благодарности, «готово», «проверьте», «мин через 5», "
-            "короткие согласия, запросы контактов или конкретных людей.\n"
+            "Считай вопросом в том числе короткие формулировки: «какой документ подписать?», «касса у кого заказывать?», "
+            "«где регламент?», «когда открывать ип?» — это вопросы.\n"
+            "НЕ считай вопросом только: приветствия (привет, добрый день), благодарности (спасибо), «готово», «проверьте», "
+            "«мин через 5», короткие согласия без вопросительной интонации, запросы контактов или конкретных людей по имени.\n"
             "Ответь только 'yes' или 'no'.\n\n"
             f"Сообщение: {message_text}"
         )
@@ -103,7 +106,7 @@ async def _is_question(message_text: str) -> bool:
             client.chat.completions.create,
             model=CHAT_MODEL,
             messages=[
-                {"role": "system", "content": "Ты помощник. Определяешь, ждёт ли пользователь ответа от базы знаний/поддержки. Отвечай только 'yes' или 'no'."},
+                {"role": "system", "content": "Ты помощник. Определяешь, ждёт ли пользователь ответа от базы знаний/поддержки. Короткие вопросы по документам, регламенту, кассе, ИП — это вопросы. Отвечай только 'yes' или 'no'."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.0,
@@ -367,6 +370,16 @@ def _add_awaiting_answer(chat_id: int, message_id: int, question_text: str) -> N
     logger.info("[GROUP_CHAT_QA] Вопрос без ответа добавлен в кэш awaiting_answer: chat_id=%s message_id=%s", chat_id, message_id)
 
 
+async def _maybe_send_no_answer_reply(message: Message) -> None:
+    """Если включено RAG_SEND_NO_ANSWER_REPLY, отправляет короткое сообщение о том, что ответ в базе не найден."""
+    if not RAG_SEND_NO_ANSWER_REPLY:
+        return
+    try:
+        await message.answer("Пока не нашёл ответ в базе. Менеджер может ответить позже.")
+    except Exception as e:
+        logger.warning("[GROUP_CHAT_QA] Не удалось отправить no_answer_reply: %s", e)
+
+
 def _get_awaiting_answer(chat_id: int, message_id: int) -> Optional[Dict[str, Any]]:
     """Возвращает данные по сообщению из кэша «ожидающих ответа» или None."""
     key = (chat_id, message_id)
@@ -540,6 +553,7 @@ async def process_question_in_group_chat(message: Message, question_text_overrid
                 logger.info("[GROUP_CHAT_QA] Кэш: нет чанков выше MIN_SCORE_AFTER_RERANK, молчим")
                 _qh = str(hash(query_text.strip().lower()[:200])) if query_text else ""
                 await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": _qh, "chunks_found": 0, "outcome": "no_answer_silent", "from_cache": True})
+                await _maybe_send_no_answer_reply(message)
                 _add_awaiting_answer(chat_id, message.message_id, query_text)
                 return
             question_hash = str(hash(query_text.strip().lower()[:200])) if query_text else ""
@@ -628,6 +642,7 @@ async def process_question_in_group_chat(message: Message, question_text_overrid
                 logger.info("[GROUP_CHAT_QA] Нет чанков выше MIN_SCORE_AFTER_RERANK, молчим")
                 _qh = str(hash(query_text.strip().lower()[:200])) if query_text else ""
                 await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": _qh, "chunks_found": 0, "outcome": "no_answer_silent"})
+                await _maybe_send_no_answer_reply(message)
                 _add_awaiting_answer(chat_id, message.message_id, query_text)
                 return
             set_cached_chunks(query_text, found_chunks)
@@ -649,6 +664,7 @@ async def process_question_in_group_chat(message: Message, question_text_overrid
         if top_score < MIN_TOP_SCORE_FOR_ANSWER:
             logger.info("[GROUP_CHAT_QA] Топ score %.3f < MIN_TOP_SCORE_FOR_ANSWER, молчим", top_score)
             await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": question_hash, "outcome": "no_answer_silent", "top_score": top_score})
+            await _maybe_send_no_answer_reply(message)
             _add_awaiting_answer(chat_id, message.message_id, query_text)
             return
 
@@ -657,6 +673,8 @@ async def process_question_in_group_chat(message: Message, question_text_overrid
         
         # Проверяем, нужно ли эскалировать менеджеру (при «молчании» — не тегаем, только кэш)
         if await _should_escalate_to_manager(found_chunks, (sufficient, missing_info)):
+            await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": question_hash, "outcome": "no_answer_silent", "top_score": top_score, "reason": "escalate"})
+            await _maybe_send_no_answer_reply(message)
             _add_awaiting_answer(chat_id, message.message_id, query_text)
             return
 
@@ -667,6 +685,8 @@ async def process_question_in_group_chat(message: Message, question_text_overrid
                 sufficient = True
                 missing_info = None
             else:
+                await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": question_hash, "outcome": "no_answer_silent", "top_score": top_score, "reason": "insufficient_data"})
+                await _maybe_send_no_answer_reply(message)
                 _add_awaiting_answer(chat_id, message.message_id, query_text)
                 return
 
@@ -683,6 +703,8 @@ async def process_question_in_group_chat(message: Message, question_text_overrid
         grounded = await check_answer_grounding(answer, found_chunks)
         if not grounded:
             logger.warning("[GROUP_CHAT_QA] Ответ не обоснован фрагментами (grounding), молчим")
+            await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": question_hash, "outcome": "no_answer_silent", "top_score": top_score, "reason": "grounding_fail"})
+            await _maybe_send_no_answer_reply(message)
             _add_awaiting_answer(chat_id, message.message_id, query_text)
             return
 

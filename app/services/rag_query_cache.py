@@ -30,7 +30,7 @@ def get_cached_chunks(query: str) -> Optional[List[Dict[str, Any]]]:
 
 
 def set_cached_chunks(query: str, chunks: List[Dict[str, Any]]) -> None:
-    """Сохраняет found_chunks в кэш по запросу."""
+    """Сохраняет found_chunks в кэш по запросу. Пустой результат не кэшируем — чтобы повторный запрос снова пошёл в поиск (TTL для 0 чанков не нужен)."""
     if not RAG_QUERY_CACHE_ENABLED or not chunks:
         return
     _cache[_key(query)] = chunks
