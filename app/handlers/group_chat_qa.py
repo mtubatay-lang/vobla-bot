@@ -8,8 +8,10 @@ from typing import List, Dict, Any, Optional
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from cachetools import TTLCache
+import hashlib
+import time
 
 from app.services.auth_service import find_user_by_telegram_id
 from app.services.qdrant_service import get_qdrant_service
@@ -23,6 +25,8 @@ from app.config import (
     get_rag_test_chat_id,
     MAX_CLARIFICATION_ROUNDS,
     MIN_SCORE_AFTER_RERANK,
+    MIN_TOP_SCORE_FOR_ANSWER,
+    KB_MANAGERS_CHAT_ID,
     USE_HYBRID_BM25,
     USE_HYDE,
     USE_FULL_FILE_CONTEXT,
@@ -45,6 +49,13 @@ class GroupChatQAState(StatesGroup):
 
 # Хранилище контекста диалогов: (chat_id, user_id) -> данные. LRU + TTL 1 час, макс. 1000 ключей.
 _conversation_contexts: TTLCache = TTLCache(maxsize=1000, ttl=3600)
+
+# Сообщения, по которым бот не нашёл ответа: (chat_id, message_id) -> {question_text, timestamp}. TTL 2 часа.
+# Используется для связки с ответом менеджера (reply) и предложения записать в базу.
+_awaiting_answer_cache: TTLCache = TTLCache(maxsize=2000, ttl=7200)
+
+# Ожидающие подтверждения записи (для callback): question_hash -> {question, answer, chat_id, ...}. TTL 1 час.
+_kb_confirm_pending: TTLCache = TTLCache(maxsize=500, ttl=3600)
 
 
 def _get_context_key(chat_id: int, user_id: int) -> tuple[int, int]:
@@ -78,29 +89,29 @@ def _update_user_context(chat_id: int, user_id: int, updates: Dict[str, Any]) ->
 
 
 async def _is_question(message_text: str) -> bool:
-    """Определяет через AI, является ли сообщение вопросом."""
+    """Определяет через AI, является ли сообщение вопросом, требующим ответа от поддержки/базы знаний."""
     try:
         prompt = (
-            "Определи, является ли это сообщение вопросом, требующим ответа.\n"
+            "Является ли это сообщение вопросом, на который ожидается ответ от поддержки или базы знаний "
+            "(франшиза, касса, регламент, лояльность, документы, процедуры и т.п.)?\n"
+            "НЕ считай вопросом: приветствия, благодарности, «готово», «проверьте», «мин через 5», "
+            "короткие согласия, запросы контактов или конкретных людей.\n"
             "Ответь только 'yes' или 'no'.\n\n"
             f"Сообщение: {message_text}"
         )
-        
         resp = await asyncio.to_thread(
             client.chat.completions.create,
             model=CHAT_MODEL,
             messages=[
-                {"role": "system", "content": "Ты помощник для определения, является ли сообщение вопросом. Отвечай только 'yes' или 'no'."},
+                {"role": "system", "content": "Ты помощник. Определяешь, ждёт ли пользователь ответа от базы знаний/поддержки. Отвечай только 'yes' или 'no'."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.0,
         )
-        
         answer = (resp.choices[0].message.content or "").strip().lower()
         return answer.startswith("yes")
     except Exception as e:
         logger.exception(f"[GROUP_CHAT_QA] Ошибка определения вопроса: {e}")
-        # Fallback: считаем вопросом, если есть знак вопроса
         return "?" in message_text
 
 
@@ -349,8 +360,34 @@ async def _should_escalate_to_manager(
     return False
 
 
+def _add_awaiting_answer(chat_id: int, message_id: int, question_text: str) -> None:
+    """Регистрирует сообщение как «вопрос без ответа» для последующей связки с ответом менеджера."""
+    key = (chat_id, message_id)
+    _awaiting_answer_cache[key] = {"question_text": question_text, "timestamp": time.time()}
+    logger.info("[GROUP_CHAT_QA] Вопрос без ответа добавлен в кэш awaiting_answer: chat_id=%s message_id=%s", chat_id, message_id)
+
+
+def _get_awaiting_answer(chat_id: int, message_id: int) -> Optional[Dict[str, Any]]:
+    """Возвращает данные по сообщению из кэша «ожидающих ответа» или None."""
+    key = (chat_id, message_id)
+    try:
+        return _awaiting_answer_cache[key]
+    except KeyError:
+        return None
+
+
+def _pop_awaiting_answer(chat_id: int, message_id: int) -> Optional[Dict[str, Any]]:
+    """Извлекает и удаляет запись из кэша «ожидающих ответа»."""
+    key = (chat_id, message_id)
+    try:
+        data = _awaiting_answer_cache.pop(key)
+        return data
+    except KeyError:
+        return None
+
+
 async def _tag_manager_in_chat(message: Message, question: str) -> None:
-    """Тегирует менеджеров в чате."""
+    """Тегирует менеджеров в чате (не используется при «молчании» — оставлено на случай отката)."""
     username = message.from_user.username if message.from_user else None
     user_name = message.from_user.full_name if message.from_user else "Пользователь"
     
@@ -381,14 +418,16 @@ async def _tag_manager_in_chat(message: Message, question: str) -> None:
     )
 
 
-async def process_question_in_group_chat(message: Message) -> None:
-    """Обрабатывает вопрос в групповом чате."""
+async def process_question_in_group_chat(message: Message, question_text_override: Optional[str] = None) -> None:
+    """Обрабатывает вопрос в групповом чате. question_text_override: текст вопроса (для голоса/фото с подписью)."""
     if not message.from_user:
         return
     
     chat_id = message.chat.id
     user_id = message.from_user.id
-    question = message.text.strip()
+    question = (question_text_override or (message.text or "")).strip()
+    if not question:
+        return
     
     # Получаем контекст диалога
     context = _get_user_context(chat_id, user_id)
@@ -448,7 +487,7 @@ async def process_question_in_group_chat(message: Message) -> None:
         # Новый вопрос — сбрасываем счётчик раундов уточнений
         _update_user_context(chat_id, user_id, {"clarification_rounds": 0})
     
-    searching_msg = None
+    # Анализ выполняем молча: ничего не отправляем в группу до итогового ответа.
     try:
         # Определяем запрос для поиска (при ответе на уточнение уже задан query_text)
         if query_text is None:
@@ -466,14 +505,10 @@ async def process_question_in_group_chat(message: Message) -> None:
                 # Новый вопрос — ищем только по текущему сообщению, без контекста прошлых ответов
                 query_text = question
 
-        # Промежуточное сообщение о поиске (как в приватном чате)
-        searching_msg = await message.answer("🔍 Ищу в базе знаний...")
-
         # Режим «полный файл в контексте»: ответ по одному документу без RAG
         from app.services.full_file_context import get_full_file_context
         document = get_full_file_context()
         if USE_FULL_FILE_CONTEXT and document:
-            await searching_msg.edit_text("🔍 Ищу в документе...")
             is_first_turn = not any(m.get("role") == "assistant" for m in conversation_history)
             user_name = (message.from_user.first_name or "пользователь") if message.from_user else "пользователь"
             answer = await asyncio.to_thread(
@@ -484,7 +519,6 @@ async def process_question_in_group_chat(message: Message) -> None:
                 user_name=user_name,
                 is_first_turn=is_first_turn,
             )
-            await searching_msg.delete()
             await message.answer(answer)
             conversation_history.append({"role": "assistant", "text": answer})
             _update_user_context(chat_id, user_id, {"conversation_history": conversation_history})
@@ -503,11 +537,10 @@ async def process_question_in_group_chat(message: Message) -> None:
         if cached is not None:
             found_chunks = [c for c in cached if c.get("score", 0) >= MIN_SCORE_AFTER_RERANK]
             if not found_chunks:
-                logger.info("[GROUP_CHAT_QA] Кэш: нет чанков выше MIN_SCORE_AFTER_RERANK, эскалация")
-                await searching_msg.delete()
+                logger.info("[GROUP_CHAT_QA] Кэш: нет чанков выше MIN_SCORE_AFTER_RERANK, молчим")
                 _qh = str(hash(query_text.strip().lower()[:200])) if query_text else ""
-                await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": _qh, "chunks_found": 0, "outcome": "escalation", "from_cache": True})
-                await _tag_manager_in_chat(message, query_text)
+                await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": _qh, "chunks_found": 0, "outcome": "no_answer_silent", "from_cache": True})
+                _add_awaiting_answer(chat_id, message.message_id, query_text)
                 return
             question_hash = str(hash(query_text.strip().lower()[:200])) if query_text else ""
             await alog_event(user_id=user_id, username=message.from_user.username, event="kb_search_performed", meta={"question_hash": question_hash, "chunks_found": len(found_chunks), "top_scores": [round(c.get("score", 0), 3) for c in found_chunks[:3]], "top_sources": [str((c.get("metadata") or {}).get("source", ""))[:50] for c in found_chunks[:3]], "from_cache": True})
@@ -582,8 +615,6 @@ async def process_question_in_group_chat(message: Message) -> None:
             else:
                 initial_chunks = all_found_chunks[:candidates_limit]
             if initial_chunks:
-                await searching_msg.edit_text(f"🔍 Нашёл {len(initial_chunks)} фрагментов, анализирую релевантность...")
-            if initial_chunks:
                 try:
                     reranked_chunks = await rerank_chunks_with_llm(query_text, initial_chunks, top_k=8)
                     found_chunks = select_best_chunks(reranked_chunks, max_chunks=5, min_score=0.1)
@@ -594,11 +625,10 @@ async def process_question_in_group_chat(message: Message) -> None:
             else:
                 found_chunks = []
             if not found_chunks:
-                logger.info("[GROUP_CHAT_QA] Нет чанков выше MIN_SCORE_AFTER_RERANK, эскалация")
-                await searching_msg.delete()
+                logger.info("[GROUP_CHAT_QA] Нет чанков выше MIN_SCORE_AFTER_RERANK, молчим")
                 _qh = str(hash(query_text.strip().lower()[:200])) if query_text else ""
-                await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": _qh, "chunks_found": 0, "outcome": "escalation"})
-                await _tag_manager_in_chat(message, query_text)
+                await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": _qh, "chunks_found": 0, "outcome": "no_answer_silent"})
+                _add_awaiting_answer(chat_id, message.message_id, query_text)
                 return
             set_cached_chunks(query_text, found_chunks)
             question_hash = str(hash(query_text.strip().lower()[:200])) if query_text else ""
@@ -614,30 +644,31 @@ async def process_question_in_group_chat(message: Message) -> None:
                 },
             )
         
+        # Порог уверенности: отвечаем только если лучший чанк выше MIN_TOP_SCORE_FOR_ANSWER
+        top_score = max((c.get("score", 0) for c in found_chunks), default=0)
+        if top_score < MIN_TOP_SCORE_FOR_ANSWER:
+            logger.info("[GROUP_CHAT_QA] Топ score %.3f < MIN_TOP_SCORE_FOR_ANSWER, молчим", top_score)
+            await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": question_hash, "outcome": "no_answer_silent", "top_score": top_score})
+            _add_awaiting_answer(chat_id, message.message_id, query_text)
+            return
+
         # Проверка достаточности данных (используем эффективный вопрос: объединённый при ответе на уточнение)
         sufficient, missing_info = await _check_sufficient_data(query_text, found_chunks)
         
-        # Проверяем, нужно ли эскалировать менеджеру
+        # Проверяем, нужно ли эскалировать менеджеру (при «молчании» — не тегаем, только кэш)
         if await _should_escalate_to_manager(found_chunks, (sufficient, missing_info)):
-            await searching_msg.delete()
-            await _tag_manager_in_chat(message, query_text)
+            _add_awaiting_answer(chat_id, message.message_id, query_text)
             return
 
-        # Если данных недостаточно — задаем уточняющий вопрос, но не более MAX_CLARIFICATION_ROUNDS раундов
+        # Если данных недостаточно — не задаём уточняющий вопрос в группе (молчим), считаем что нет ответа
         clarification_rounds = context.get("clarification_rounds", 0)
         if not sufficient and missing_info:
             if clarification_rounds >= MAX_CLARIFICATION_ROUNDS:
-                # Лимит раундов: больше не спрашиваем, отвечаем по лучшему что есть
                 sufficient = True
                 missing_info = None
             else:
-                await searching_msg.delete()
-                await _ask_clarification_question(message, query_text, found_chunks, missing_info)
-                _update_user_context(chat_id, user_id, {"clarification_rounds": clarification_rounds + 1})
+                _add_awaiting_answer(chat_id, message.message_id, query_text)
                 return
-
-        # Формирую ответ...
-        await searching_msg.edit_text("✍️ Формирую ответ на основе найденной информации...")
 
         # Первое обращение в диалоге — приветствие в ответе
         is_first_turn = not any(m.get("role") == "assistant" for m in conversation_history)
@@ -651,9 +682,8 @@ async def process_question_in_group_chat(message: Message) -> None:
         )
         grounded = await check_answer_grounding(answer, found_chunks)
         if not grounded:
-            logger.warning("[GROUP_CHAT_QA] Ответ не обоснован фрагментами (grounding), эскалация")
-            await searching_msg.delete()
-            await _tag_manager_in_chat(message, query_text)
+            logger.warning("[GROUP_CHAT_QA] Ответ не обоснован фрагментами (grounding), молчим")
+            _add_awaiting_answer(chat_id, message.message_id, query_text)
             return
 
         kilbil_urls = get_article_urls_from_chunks(found_chunks, only_if_top_from_kilbil=True)
@@ -663,8 +693,7 @@ async def process_question_in_group_chat(message: Message) -> None:
             else:
                 answer = answer + "\n\n📎 Подробнее:\n" + "\n".join(kilbil_urls)
 
-        await searching_msg.delete()
-        # Отправляем ответ
+        # Отправляем ответ (единственное сообщение в группу при успехе)
         await message.answer(answer)
         
         # Добавляем ответ в историю
@@ -684,48 +713,136 @@ async def process_question_in_group_chat(message: Message) -> None:
         
     except Exception as e:
         logger.exception(f"[GROUP_CHAT_QA] Ошибка обработки вопроса: {e}")
-        if searching_msg is not None:
-            try:
-                await searching_msg.delete()
-            except Exception:
-                pass
-        await message.answer("Извините, произошла ошибка при обработке вопроса.")
+        # Молчим: не отправляем сообщение об ошибке в группу
+
+
+async def _get_question_text_from_message(message: Message) -> Optional[str]:
+    """Извлекает текст вопроса из сообщения: текст, голосовое (→ транскрипция) или подпись к фото. Фото без подписи → None."""
+    if message.text and message.text.strip():
+        return message.text.strip()
+    if message.voice:
+        try:
+            from io import BytesIO
+            from app.services.voice_transcription_service import transcribe_voice
+            from app.config import WHISPER_MAX_FILE_BYTES
+            voice = message.voice
+            file_size = getattr(voice, "file_size", None) or 0
+            if file_size > WHISPER_MAX_FILE_BYTES:
+                logger.warning("[GROUP_CHAT_QA] Голосовое слишком большое, пропускаем")
+                return None
+            buffer = BytesIO()
+            await message.bot.download(voice.file_id, buffer)
+            buffer.seek(0)
+            voice_bytes = buffer.read()
+            text = await asyncio.to_thread(transcribe_voice, voice_bytes, "audio/ogg")
+            return (text or "").strip() or None
+        except Exception as e:
+            logger.exception("[GROUP_CHAT_QA] Ошибка транскрипции голоса: %s", e)
+            return None
+    if message.photo:
+        if not message.caption or not message.caption.strip():
+            return None
+        return message.caption.strip()
+    return None
 
 
 @router.message(F.chat.type.in_(["group", "supergroup"]))
 async def handle_group_chat_message(message: Message):
-    """Обрабатывает сообщения в групповых чатах."""
-    # Игнорируем сообщения от бота
+    """Обрабатывает сообщения в групповых чатах: текст, голосовое (→ текст) или фото с подписью."""
     if message.from_user and message.from_user.is_bot:
         return
-    
-    # Игнорируем команды
     if message.text and message.text.startswith("/"):
         return
-    
-    # Игнорируем сообщения без текста
-    if not message.text or not message.text.strip():
+
+    question_text = await _get_question_text_from_message(message)
+    if not question_text:
         return
 
-    # Если задан тестовый чат, обрабатываем только его
     rag_test_chat_id = get_rag_test_chat_id()
     if rag_test_chat_id is not None and message.chat.id != rag_test_chat_id:
         return
-    
-    # Если пользователь отвечает на уточняющий вопрос — всегда обрабатываем (не проверяем is_question)
+
     context = _get_user_context(message.chat.id, message.from_user.id if message.from_user else 0)
     if context.get("pending_clarification") is None:
-        is_question = await _is_question(message.text)
+        is_question = await _is_question(question_text)
         if not is_question:
             return
 
-    # Обрабатываем вопрос
-    await process_question_in_group_chat(message)
+    await process_question_in_group_chat(message, question_text_override=question_text)
+
+
+def _is_manager_message(message: Message) -> bool:
+    """Проверяет, является ли отправитель менеджером."""
+    if not message.from_user:
+        return False
+    username = message.from_user.username
+    user_id = message.from_user.id
+    if username and username in MANAGER_USERNAMES:
+        return True
+    user = find_user_by_telegram_id(user_id)
+    if user:
+        role = getattr(user, "role", "").strip().lower()
+        if role in ("admin", "manager"):
+            return True
+    return False
+
+
+async def _send_kb_proposal_to_managers(question: str, answer: str, payload: str, bot) -> None:
+    """Отправляет в группу менеджеров предложение записать в базу с кнопками."""
+    q_short = question[:500] + ("…" if len(question) > 500 else "")
+    a_short = answer[:500] + ("…" if len(answer) > 500 else "")
+    text = f"Собираюсь записать в базу знаний:\n\nВопрос: {q_short}\n\nОтвет: {a_short}"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Записать в базу", callback_data=f"kb_confirm_add:{payload}")],
+        [InlineKeyboardButton(text="Изменить ответ", callback_data=f"kb_edit_answer:{payload}")],
+    ])
+    await bot.send_message(KB_MANAGERS_CHAT_ID, text, reply_markup=keyboard)
+
+
+# Кэш: message_id (в чате менеджеров) -> payload; для обработки «Изменить ответ» (ответ на это сообщение).
+_kb_waiting_edit: TTLCache = TTLCache(maxsize=300, ttl=3600)
+
+
+@router.message(F.chat.type.in_(["group", "supergroup"]), F.reply_to_message)
+async def handle_manager_reply_to_user_question(message: Message):
+    """Менеджер ответил на сообщение пользователя (по которому бот не нашёл ответа) — отправляем в группу менеджеров предложение записать в базу."""
+    rag_test_chat_id = get_rag_test_chat_id()
+    if rag_test_chat_id is not None and message.chat.id != rag_test_chat_id:
+        return
+    if message.from_user and message.from_user.is_bot:
+        return
+    if not _is_manager_message(message):
+        return
+    reply_to = message.reply_to_message
+    if not reply_to or not reply_to.from_user or reply_to.from_user.is_bot:
+        return
+    # Ответ на сообщение пользователя (не бота)
+    data = _pop_awaiting_answer(message.chat.id, reply_to.message_id)
+    if not data:
+        return
+    question_text = data.get("question_text", "").strip()
+    answer_text = (message.text or "").strip()
+    if not answer_text:
+        _add_awaiting_answer(message.chat.id, reply_to.message_id, question_text)
+        return
+    payload = hashlib.sha256((question_text + "|" + answer_text + "|" + str(time.time())).encode()).hexdigest()[:16]
+    _kb_confirm_pending[payload] = {
+        "question": question_text,
+        "answer": answer_text,
+        "source_chat_id": message.chat.id,
+    }
+    await _send_kb_proposal_to_managers(question_text, answer_text, payload, message.bot)
+    await alog_event(
+        user_id=message.from_user.id if message.from_user else None,
+        username=message.from_user.username if message.from_user else None,
+        event="kb_proposal_sent_to_managers",
+        meta={"question": question_text[:200], "chat_id": message.chat.id},
+    )
 
 
 @router.message(F.chat.type.in_(["group", "supergroup"]), F.reply_to_message)
 async def handle_manager_reply_in_group_chat(message: Message):
-    """Перехватывает ответы менеджеров на вопросы в групповых чатах."""
+    """Перехватывает ответы менеджеров на вопросы в групповых чатах (reply на сообщение бота с тегом «Не нашел ответа»)."""
     # Если указан тестовый чат, обрабатываем только его
     rag_test_chat_id = get_rag_test_chat_id()
     if rag_test_chat_id is not None and message.chat.id != rag_test_chat_id:
@@ -735,21 +852,7 @@ async def handle_manager_reply_in_group_chat(message: Message):
     if message.from_user and message.from_user.is_bot:
         return
     
-    # Проверяем, является ли отправитель менеджером
-    user_id = message.from_user.id if message.from_user else 0
-    username = message.from_user.username if message.from_user else None
-    
-    # Проверяем по username
-    is_manager = username and username in MANAGER_USERNAMES
-    
-    # Проверяем по роли в базе
-    if not is_manager:
-        user = find_user_by_telegram_id(user_id)
-        if user:
-            role = getattr(user, "role", "").strip().lower()
-            is_manager = role in ("admin", "manager")
-    
-    if not is_manager:
+    if not _is_manager_message(message):
         return
     
     # Проверяем, является ли reply_to_message от бота с тегом менеджера
@@ -861,3 +964,75 @@ async def handle_manager_reply_in_group_chat(message: Message):
     except Exception as e:
         logger.exception(f"[GROUP_CHAT_QA] Ошибка сохранения ответа менеджера: {e}")
         await message.answer("❌ Ошибка при сохранении ответа в базу знаний")
+
+
+@router.callback_query(F.data.startswith("kb_confirm_add:"))
+async def on_kb_confirm_add(callback: CallbackQuery):
+    """Кнопка «Записать в базу» — сохраняем вопрос/ответ в FAQ и Qdrant."""
+    payload = callback.data.replace("kb_confirm_add:", "").strip()
+    try:
+        pending = _kb_confirm_pending.pop(payload)
+    except KeyError:
+        await callback.answer("Истекло время. Запрос уже обработан или устарел.")
+        return
+    question = pending.get("question", "")
+    answer = pending.get("answer", "")
+    if not question or not answer:
+        await callback.answer("Нет данных для записи.")
+        return
+    try:
+        from app.services.faq_service import add_faq_entry_to_cache
+        await add_faq_entry_to_cache(question, answer, "")
+        await callback.answer("Записано")
+        await callback.bot.send_message(KB_MANAGERS_CHAT_ID, "✅ Записано в базу знаний.")
+        await alog_event(
+            user_id=callback.from_user.id if callback.from_user else None,
+            username=callback.from_user.username if callback.from_user else None,
+            event="kb_confirmed_add_from_chat",
+            meta={"question": question[:200]},
+        )
+    except Exception as e:
+        logger.exception(f"[GROUP_CHAT_QA] Ошибка записи в базу по кнопке: {e}")
+        await callback.answer("Ошибка при записи.")
+        await callback.bot.send_message(KB_MANAGERS_CHAT_ID, "❌ Ошибка при записи в базу знаний.")
+
+
+@router.callback_query(F.data.startswith("kb_edit_answer:"))
+async def on_kb_edit_answer(callback: CallbackQuery):
+    """Кнопка «Изменить ответ» — просим написать исправленный ответ ответом на сообщение."""
+    payload = callback.data.replace("kb_edit_answer:", "").strip()
+    try:
+        pending = _kb_confirm_pending[payload]
+    except KeyError:
+        await callback.answer("Истекло время.")
+        return
+    msg = await callback.bot.send_message(
+        KB_MANAGERS_CHAT_ID,
+        "Напишите исправленный ответ ответом на это сообщение.",
+    )
+    _kb_waiting_edit[msg.message_id] = payload
+    await callback.answer("Ожидаю исправленный ответ...")
+
+
+@router.message(F.chat.id == KB_MANAGERS_CHAT_ID, F.reply_to_message)
+async def handle_managers_chat_edit_reply(message: Message):
+    """В группе менеджеров пришёл ответ на «Напишите исправленный ответ» — обновляем ответ и снова показываем кнопки."""
+    if message.from_user and message.from_user.is_bot:
+        return
+    reply_to = message.reply_to_message
+    if not reply_to or not reply_to.from_user or not reply_to.from_user.is_bot:
+        return
+    try:
+        payload = _kb_waiting_edit.pop(reply_to.message_id)
+    except KeyError:
+        return
+    try:
+        pending = _kb_confirm_pending[payload]
+    except KeyError:
+        return
+    new_answer = (message.text or "").strip()
+    if not new_answer:
+        _kb_waiting_edit[reply_to.message_id] = payload
+        return
+    pending["answer"] = new_answer
+    await _send_kb_proposal_to_managers(pending["question"], new_answer, payload, message.bot)
