@@ -373,11 +373,20 @@ async def _should_escalate_to_manager(
     return False
 
 
-def _add_awaiting_answer(chat_id: int, message_id: int, question_text: str) -> None:
+def _add_awaiting_answer(
+    chat_id: int,
+    message_id: int,
+    question_text: str,
+    top_score: Optional[float] = None,
+    reason: Optional[str] = None,
+) -> None:
     """Регистрирует сообщение как «вопрос без ответа» для последующей связки с ответом менеджера."""
     key = (chat_id, message_id)
     _awaiting_answer_cache[key] = {"question_text": question_text, "timestamp": time.time()}
-    logger.info("[GROUP_CHAT_QA] Вопрос без ответа добавлен в кэш awaiting_answer: chat_id=%s message_id=%s", chat_id, message_id)
+    logger.info(
+        "[GROUP_CHAT_QA] Вопрос без ответа добавлен в кэш awaiting_answer: chat_id=%s message_id=%s top_score=%s reason=%s",
+        chat_id, message_id, top_score, reason,
+    )
 
 
 async def _maybe_send_no_answer_reply(message: Message) -> None:
@@ -564,7 +573,7 @@ async def process_question_in_group_chat(message: Message, question_text_overrid
                 _qh = str(hash(query_text.strip().lower()[:200])) if query_text else ""
                 await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": _qh, "chunks_found": 0, "outcome": "no_answer_silent", "from_cache": True})
                 await _maybe_send_no_answer_reply(message)
-                _add_awaiting_answer(chat_id, message.message_id, query_text)
+                _add_awaiting_answer(chat_id, message.message_id, query_text, reason="from_cache_no_chunks")
                 return
             question_hash = str(hash(query_text.strip().lower()[:200])) if query_text else ""
             await alog_event(user_id=user_id, username=message.from_user.username, event="kb_search_performed", meta={"question_hash": question_hash, "chunks_found": len(found_chunks), "top_scores": [round(c.get("score", 0), 3) for c in found_chunks[:3]], "top_sources": [str((c.get("metadata") or {}).get("source", ""))[:50] for c in found_chunks[:3]], "from_cache": True})
@@ -653,7 +662,7 @@ async def process_question_in_group_chat(message: Message, question_text_overrid
                 _qh = str(hash(query_text.strip().lower()[:200])) if query_text else ""
                 await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": _qh, "chunks_found": 0, "outcome": "no_answer_silent"})
                 await _maybe_send_no_answer_reply(message)
-                _add_awaiting_answer(chat_id, message.message_id, query_text)
+                _add_awaiting_answer(chat_id, message.message_id, query_text, reason="no_chunks_after_rerank")
                 return
             set_cached_chunks(query_text, found_chunks)
             question_hash = str(hash(query_text.strip().lower()[:200])) if query_text else ""
@@ -675,7 +684,7 @@ async def process_question_in_group_chat(message: Message, question_text_overrid
             logger.info("[GROUP_CHAT_QA] Топ score %.3f < MIN_TOP_SCORE_FOR_ANSWER, молчим", top_score)
             await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": question_hash, "outcome": "no_answer_silent", "top_score": top_score})
             await _maybe_send_no_answer_reply(message)
-            _add_awaiting_answer(chat_id, message.message_id, query_text)
+            _add_awaiting_answer(chat_id, message.message_id, query_text, top_score=top_score, reason="low_top_score")
             return
 
         # Проверка достаточности данных (используем эффективный вопрос: объединённый при ответе на уточнение)
@@ -685,7 +694,7 @@ async def process_question_in_group_chat(message: Message, question_text_overrid
         if await _should_escalate_to_manager(found_chunks, (sufficient, missing_info)):
             await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": question_hash, "outcome": "no_answer_silent", "top_score": top_score, "reason": "escalate"})
             await _maybe_send_no_answer_reply(message)
-            _add_awaiting_answer(chat_id, message.message_id, query_text)
+            _add_awaiting_answer(chat_id, message.message_id, query_text, top_score=top_score, reason="escalate")
             return
 
         # Если данных недостаточно — не задаём уточняющий вопрос в группе (молчим), считаем что нет ответа
@@ -697,7 +706,7 @@ async def process_question_in_group_chat(message: Message, question_text_overrid
             else:
                 await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": question_hash, "outcome": "no_answer_silent", "top_score": top_score, "reason": "insufficient_data"})
                 await _maybe_send_no_answer_reply(message)
-                _add_awaiting_answer(chat_id, message.message_id, query_text)
+                _add_awaiting_answer(chat_id, message.message_id, query_text, top_score=top_score, reason="insufficient_data")
                 return
 
         # Первое обращение в диалоге — приветствие в ответе
@@ -715,7 +724,7 @@ async def process_question_in_group_chat(message: Message, question_text_overrid
             logger.warning("[GROUP_CHAT_QA] Ответ не обоснован фрагментами (grounding), молчим")
             await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": question_hash, "outcome": "no_answer_silent", "top_score": top_score, "reason": "grounding_fail"})
             await _maybe_send_no_answer_reply(message)
-            _add_awaiting_answer(chat_id, message.message_id, query_text)
+            _add_awaiting_answer(chat_id, message.message_id, query_text, top_score=top_score, reason="grounding_fail")
             return
 
         kilbil_urls = get_article_urls_from_chunks(found_chunks, only_if_top_from_kilbil=True)

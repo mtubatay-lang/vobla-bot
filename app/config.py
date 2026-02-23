@@ -124,7 +124,7 @@ RERANK_USE_LLM = os.getenv("RERANK_USE_LLM", "true").lower() == "true"
 # Минимальный score после rerank: чанки ниже порога не отдаются в генерацию; если все ниже — эскалация
 MIN_SCORE_AFTER_RERANK = float(os.getenv("MIN_SCORE_AFTER_RERANK", "0.25"))
 # Минимальный score лучшего (топ-1) чанка для ответа в группе; ниже — молчим, не отвечаем
-MIN_TOP_SCORE_FOR_ANSWER = float(os.getenv("MIN_TOP_SCORE_FOR_ANSWER", "0.45"))
+MIN_TOP_SCORE_FOR_ANSWER = float(os.getenv("MIN_TOP_SCORE_FOR_ANSWER", "0.42"))
 # Cross-encoder reranker (Cohere): если True и задан COHERE_API_KEY — используем Cohere Rerank вместо LLM
 USE_CROSS_ENCODER_RERANK = os.getenv("USE_CROSS_ENCODER_RERANK", "false").lower() == "true"
 COHERE_API_KEY = os.getenv("COHERE_API_KEY", "")
