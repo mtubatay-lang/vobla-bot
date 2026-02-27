@@ -220,6 +220,9 @@ async def _check_sufficient_data(
 CLARIFICATION_MAX_CHUNKS = 5
 CLARIFICATION_CHUNK_CHARS = 400
 
+# Максимум повторов поиска при промахе (1 retry = 2 попытки всего)
+MAX_SILENT_RETRIES = 1
+
 
 async def _ask_clarification_question(
     message: Message,
@@ -435,6 +438,37 @@ async def _maybe_send_no_answer_reply(message: Message) -> None:
         logger.warning("[GROUP_CHAT_QA] Не удалось отправить no_answer_reply: %s", e)
 
 
+async def _reformulate_question_for_retry(original_query: str) -> Optional[str]:
+    """Переформулирует вопрос для повторного поиска (другая формулировка, более поисковая)."""
+    if not original_query or not original_query.strip():
+        return None
+    try:
+        prompt = (
+            "Переформулируй вопрос пользователя в более полный и «стандартный» вид для поиска в базе знаний. "
+            "Сохрани смысл, но перепиши как типичный запрос к поддержке: «Подскажите, где...», «Как оформить...», "
+            "«Какие документы нужны...», «Где взять...» и т.п. Добавь уточняющие слова, если вопрос короткий. "
+            "Ответь только текстом переформулированного вопроса, без пояснений.\n\n"
+            f"Вопрос: {original_query}"
+        )
+        resp = await asyncio.to_thread(
+            client.chat.completions.create,
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": "Ты помощник. Перефразируй вопрос для поиска в базе знаний. Ответь только текстом вопроса."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+            max_tokens=150,
+        )
+        reformulated = (resp.choices[0].message.content or "").strip()
+        if not reformulated or reformulated.lower().strip() == original_query.lower().strip():
+            return None
+        return reformulated
+    except Exception as e:
+        logger.exception(f"[GROUP_CHAT_QA] Ошибка переформулировки вопроса для retry: {e}")
+        return None
+
+
 def _get_awaiting_answer(chat_id: int, message_id: int) -> Optional[Dict[str, Any]]:
     """Возвращает данные по сообщению из кэша «ожидающих ответа» или None."""
     key = (chat_id, message_id)
@@ -601,193 +635,235 @@ async def process_question_in_group_chat(message: Message, question_text_overrid
 
         # Усиленный RAG: расширение запроса, несколько поисков, re-ranking (как в приватном чате)
         from app.services.rag_query_cache import get_cached_chunks, set_cached_chunks
-        cached = get_cached_chunks(query_text)
-        if cached is not None:
-            found_chunks = [c for c in cached if c.get("score", 0) >= MIN_SCORE_AFTER_RERANK]
-            if not found_chunks:
-                logger.info("[GROUP_CHAT_QA] Кэш: нет чанков выше MIN_SCORE_AFTER_RERANK, молчим")
-                _qh = str(hash(query_text.strip().lower()[:200])) if query_text else ""
-                await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": _qh, "chunks_found": 0, "outcome": "no_answer_silent", "from_cache": True})
-                await _maybe_send_no_answer_reply(message)
-                _add_awaiting_answer(chat_id, message.message_id, query_text, reason="from_cache_no_chunks")
-                return
-            question_hash = str(hash(query_text.strip().lower()[:200])) if query_text else ""
-            await alog_event(user_id=user_id, username=message.from_user.username, event="kb_search_performed", meta={"question_hash": question_hash, "chunks_found": len(found_chunks), "top_scores": [round(c.get("score", 0), 3) for c in found_chunks[:3]], "top_sources": [str((c.get("metadata") or {}).get("source", ""))[:50] for c in found_chunks[:3]], "from_cache": True})
-        else:
-            expanded_query = await _expand_query_for_search(query_text)
-            qdrant_service = get_qdrant_service()
-            all_found_chunks = []
-            seen_texts = set()
-            # Поиск 1: расширенный запрос
-            embedding_expanded = await asyncio.to_thread(create_embedding, expanded_query)
-            chunks_expanded = qdrant_service.search_multi_level(
-                query_embedding=embedding_expanded,
-                top_k=5,
-                initial_threshold=0.5,
-                fallback_thresholds=[0.3, 0.1],
-            )
-            for chunk in chunks_expanded:
-                t = chunk.get("text", "")
-                if t and t not in seen_texts:
-                    all_found_chunks.append(chunk)
-                    seen_texts.add(t)
-            # Поиск 2: оригинальный запрос (если отличается)
-            if query_text.strip() != expanded_query.strip() and len(query_text.strip()) > 5:
-                embedding_original = await asyncio.to_thread(create_embedding, query_text)
-                chunks_original = qdrant_service.search_multi_level(
-                    query_embedding=embedding_original,
+        last_no_answer_top_score: Optional[float] = None
+        last_no_answer_reason: Optional[str] = None
+        for attempt in range(MAX_SILENT_RETRIES + 1):
+            if attempt == 1:
+                reformulated = await _reformulate_question_for_retry(query_text)
+                if not reformulated or reformulated.strip().lower() == query_text.strip().lower():
+                    logger.info("[GROUP_CHAT_QA] Переформулировка не дала отличий, пропускаем retry")
+                    await _maybe_send_no_answer_reply(message)
+                    _add_awaiting_answer(chat_id, message.message_id, query_text, top_score=last_no_answer_top_score, reason=last_no_answer_reason or "reformulate_failed")
+                    return
+                current_query = reformulated
+                logger.info("[GROUP_CHAT_QA] No answer (attempt 1), retry with reformulated query: %s", current_query[:80])
+            else:
+                current_query = query_text
+
+            cached = get_cached_chunks(current_query)
+            if cached is not None:
+                found_chunks = [c for c in cached if c.get("score", 0) >= MIN_SCORE_AFTER_RERANK]
+                if not found_chunks:
+                    logger.info("[GROUP_CHAT_QA] Кэш: нет чанков выше MIN_SCORE_AFTER_RERANK, молчим")
+                    last_no_answer_top_score = None
+                    last_no_answer_reason = "from_cache_no_chunks"
+                    _qh = str(hash(current_query.strip().lower()[:200])) if current_query else ""
+                    await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": _qh, "chunks_found": 0, "outcome": "no_answer_silent", "from_cache": True, "retry_attempt": attempt})
+                    if attempt < MAX_SILENT_RETRIES:
+                        continue
+                    await _maybe_send_no_answer_reply(message)
+                    _add_awaiting_answer(chat_id, message.message_id, query_text, reason=last_no_answer_reason)
+                    return
+                question_hash = str(hash(current_query.strip().lower()[:200])) if current_query else ""
+                await alog_event(user_id=user_id, username=message.from_user.username, event="kb_search_performed", meta={"question_hash": question_hash, "chunks_found": len(found_chunks), "top_scores": [round(c.get("score", 0), 3) for c in found_chunks[:3]], "top_sources": [str((c.get("metadata") or {}).get("source", ""))[:50] for c in found_chunks[:3]], "from_cache": True, "retry_attempt": attempt})
+            else:
+                expanded_query = await _expand_query_for_search(current_query)
+                qdrant_service = get_qdrant_service()
+                all_found_chunks = []
+                seen_texts = set()
+                # Поиск 1: расширенный запрос
+                embedding_expanded = await asyncio.to_thread(create_embedding, expanded_query)
+                chunks_expanded = qdrant_service.search_multi_level(
+                    query_embedding=embedding_expanded,
                     top_k=5,
                     initial_threshold=0.5,
                     fallback_thresholds=[0.3, 0.1],
                 )
-                for chunk in chunks_original:
+                for chunk in chunks_expanded:
                     t = chunk.get("text", "")
                     if t and t not in seen_texts:
                         all_found_chunks.append(chunk)
                         seen_texts.add(t)
-            # Поиск 3: ключевые слова из вопроса
-            keywords = re.findall(r"\b\w{4,}\b", query_text.lower())
-            if keywords and len(keywords) >= 2:
-                keywords_query = " ".join(keywords[:5])
-                if keywords_query != query_text.lower() and len(keywords_query) > 5:
-                    embedding_kw = await asyncio.to_thread(create_embedding, keywords_query)
-                    chunks_kw = qdrant_service.search_multi_level(
-                        query_embedding=embedding_kw,
-                        top_k=3,
-                        initial_threshold=0.4,
-                        fallback_thresholds=[0.2, 0.1],
+                # Поиск 2: оригинальный запрос (если отличается)
+                if current_query.strip() != expanded_query.strip() and len(current_query.strip()) > 5:
+                    embedding_original = await asyncio.to_thread(create_embedding, current_query)
+                    chunks_original = qdrant_service.search_multi_level(
+                        query_embedding=embedding_original,
+                        top_k=5,
+                        initial_threshold=0.5,
+                        fallback_thresholds=[0.3, 0.1],
                     )
-                    for chunk in chunks_kw:
+                    for chunk in chunks_original:
                         t = chunk.get("text", "")
                         if t and t not in seen_texts:
                             all_found_chunks.append(chunk)
                             seen_texts.add(t)
-            if USE_HYDE and query_text.strip():
-                from app.services.hyde_search import generate_hypothetical_answer, merge_hyde_with_main
-                hyde_text = await generate_hypothetical_answer(query_text)
-                if hyde_text:
-                    embedding_hyde = await asyncio.to_thread(create_embedding, hyde_text)
-                    hyde_chunks = qdrant_service.search_multi_level(
-                        query_embedding=embedding_hyde,
-                        top_k=10,
-                        initial_threshold=0.3,
-                        fallback_thresholds=[0.2, 0.1],
-                    )
-                    if hyde_chunks:
-                        all_found_chunks = merge_hyde_with_main(all_found_chunks, hyde_chunks, top_n=20)
-            all_found_chunks.sort(key=lambda x: x.get("score", 0), reverse=True)
-            use_cohere_rerank = USE_CROSS_ENCODER_RERANK and bool(COHERE_API_KEY)
-            candidates_limit = RERANK_CANDIDATES_LIMIT if use_cohere_rerank else 15
-            if USE_HYBRID_BM25 and all_found_chunks:
-                from app.services.bm25_search import hybrid_vector_bm25
-                initial_chunks = hybrid_vector_bm25(query_text, all_found_chunks, top_n=candidates_limit)
-            else:
-                initial_chunks = all_found_chunks[:candidates_limit]
-            if initial_chunks:
-                try:
-                    reranked_chunks = await rerank_chunks_with_llm(query_text, initial_chunks, top_k=8)
-                    found_chunks = select_best_chunks(reranked_chunks, max_chunks=5, min_score=0.1)
-                    found_chunks = [c for c in found_chunks if c.get("score", 0) >= MIN_SCORE_AFTER_RERANK]
-                except Exception as e:
-                    logger.exception(f"[GROUP_CHAT_QA] Ошибка re-ranking: {e}")
-                    found_chunks = [c for c in initial_chunks[:5] if c.get("score", 0) >= MIN_SCORE_AFTER_RERANK]
-            else:
-                found_chunks = []
-            if not found_chunks:
-                logger.info("[GROUP_CHAT_QA] Нет чанков выше MIN_SCORE_AFTER_RERANK, молчим")
-                _qh = str(hash(query_text.strip().lower()[:200])) if query_text else ""
-                await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": _qh, "chunks_found": 0, "outcome": "no_answer_silent"})
+                # Поиск 3: ключевые слова из вопроса
+                keywords = re.findall(r"\b\w{4,}\b", current_query.lower())
+                if keywords and len(keywords) >= 2:
+                    keywords_query = " ".join(keywords[:5])
+                    if keywords_query != current_query.lower() and len(keywords_query) > 5:
+                        embedding_kw = await asyncio.to_thread(create_embedding, keywords_query)
+                        chunks_kw = qdrant_service.search_multi_level(
+                            query_embedding=embedding_kw,
+                            top_k=3,
+                            initial_threshold=0.4,
+                            fallback_thresholds=[0.2, 0.1],
+                        )
+                        for chunk in chunks_kw:
+                            t = chunk.get("text", "")
+                            if t and t not in seen_texts:
+                                all_found_chunks.append(chunk)
+                                seen_texts.add(t)
+                if USE_HYDE and current_query.strip():
+                    from app.services.hyde_search import generate_hypothetical_answer, merge_hyde_with_main
+                    hyde_text = await generate_hypothetical_answer(current_query)
+                    if hyde_text:
+                        embedding_hyde = await asyncio.to_thread(create_embedding, hyde_text)
+                        hyde_chunks = qdrant_service.search_multi_level(
+                            query_embedding=embedding_hyde,
+                            top_k=10,
+                            initial_threshold=0.3,
+                            fallback_thresholds=[0.2, 0.1],
+                        )
+                        if hyde_chunks:
+                            all_found_chunks = merge_hyde_with_main(all_found_chunks, hyde_chunks, top_n=20)
+                all_found_chunks.sort(key=lambda x: x.get("score", 0), reverse=True)
+                use_cohere_rerank = USE_CROSS_ENCODER_RERANK and bool(COHERE_API_KEY)
+                candidates_limit = RERANK_CANDIDATES_LIMIT if use_cohere_rerank else 15
+                if USE_HYBRID_BM25 and all_found_chunks:
+                    from app.services.bm25_search import hybrid_vector_bm25
+                    initial_chunks = hybrid_vector_bm25(current_query, all_found_chunks, top_n=candidates_limit)
+                else:
+                    initial_chunks = all_found_chunks[:candidates_limit]
+                if initial_chunks:
+                    try:
+                        reranked_chunks = await rerank_chunks_with_llm(current_query, initial_chunks, top_k=8)
+                        found_chunks = select_best_chunks(reranked_chunks, max_chunks=5, min_score=0.1)
+                        found_chunks = [c for c in found_chunks if c.get("score", 0) >= MIN_SCORE_AFTER_RERANK]
+                    except Exception as e:
+                        logger.exception(f"[GROUP_CHAT_QA] Ошибка re-ranking: {e}")
+                        found_chunks = [c for c in initial_chunks[:5] if c.get("score", 0) >= MIN_SCORE_AFTER_RERANK]
+                else:
+                    found_chunks = []
+                if not found_chunks:
+                    logger.info("[GROUP_CHAT_QA] Нет чанков выше MIN_SCORE_AFTER_RERANK, молчим")
+                    last_no_answer_top_score = None
+                    last_no_answer_reason = "no_chunks_after_rerank"
+                    _qh = str(hash(current_query.strip().lower()[:200])) if current_query else ""
+                    await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": _qh, "chunks_found": 0, "outcome": "no_answer_silent", "retry_attempt": attempt})
+                    if attempt < MAX_SILENT_RETRIES:
+                        continue
+                    await _maybe_send_no_answer_reply(message)
+                    _add_awaiting_answer(chat_id, message.message_id, query_text, reason=last_no_answer_reason)
+                    return
+                set_cached_chunks(current_query, found_chunks)
+                question_hash = str(hash(current_query.strip().lower()[:200])) if current_query else ""
+                await alog_event(
+                    user_id=user_id,
+                    username=message.from_user.username,
+                    event="kb_search_performed",
+                    meta={
+                        "question_hash": question_hash,
+                        "chunks_found": len(found_chunks),
+                        "top_scores": [round(c.get("score", 0), 3) for c in found_chunks[:3]],
+                        "top_sources": [str((c.get("metadata") or {}).get("source", ""))[:50] for c in found_chunks[:3]],
+                        "retry_attempt": attempt,
+                    },
+                )
+
+            # Порог уверенности: отвечаем только если лучший чанк выше MIN_TOP_SCORE_FOR_ANSWER
+            top_score = max((c.get("score", 0) for c in found_chunks), default=0)
+            if not _is_top_score_sufficient_for_answer(found_chunks, MIN_TOP_SCORE_FOR_ANSWER):
+                logger.info("[GROUP_CHAT_QA] Топ score %.3f < MIN_TOP_SCORE_FOR_ANSWER, молчим", top_score)
+                last_no_answer_top_score = top_score
+                last_no_answer_reason = "low_top_score"
+                await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": question_hash, "outcome": "no_answer_silent", "top_score": top_score, "retry_attempt": attempt})
+                if attempt < MAX_SILENT_RETRIES:
+                    continue
                 await _maybe_send_no_answer_reply(message)
-                _add_awaiting_answer(chat_id, message.message_id, query_text, reason="no_chunks_after_rerank")
+                _add_awaiting_answer(chat_id, message.message_id, query_text, top_score=top_score, reason="low_top_score")
                 return
-            set_cached_chunks(query_text, found_chunks)
-            question_hash = str(hash(query_text.strip().lower()[:200])) if query_text else ""
+
+            # Проверка достаточности данных (используем эффективный вопрос: объединённый при ответе на уточнение)
+            sufficient, missing_info = await _check_sufficient_data(current_query, found_chunks)
+
+            # Проверяем, нужно ли эскалировать менеджеру (при «молчании» — не тегаем, только кэш)
+            if await _should_escalate_to_manager(found_chunks, (sufficient, missing_info)):
+                last_no_answer_top_score = top_score
+                last_no_answer_reason = "escalate"
+                await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": question_hash, "outcome": "no_answer_silent", "top_score": top_score, "reason": "escalate", "retry_attempt": attempt})
+                if attempt < MAX_SILENT_RETRIES:
+                    continue
+                await _maybe_send_no_answer_reply(message)
+                _add_awaiting_answer(chat_id, message.message_id, query_text, top_score=top_score, reason="escalate")
+                return
+
+            # Если данных недостаточно — не задаём уточняющий вопрос в группе (молчим), считаем что нет ответа
+            clarification_rounds = context.get("clarification_rounds", 0)
+            if not sufficient and missing_info:
+                if clarification_rounds >= MAX_CLARIFICATION_ROUNDS:
+                    sufficient = True
+                    missing_info = None
+                else:
+                    last_no_answer_top_score = top_score
+                    last_no_answer_reason = "insufficient_data"
+                    await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": question_hash, "outcome": "no_answer_silent", "top_score": top_score, "reason": "insufficient_data", "retry_attempt": attempt})
+                    if attempt < MAX_SILENT_RETRIES:
+                        continue
+                    await _maybe_send_no_answer_reply(message)
+                    _add_awaiting_answer(chat_id, message.message_id, query_text, top_score=top_score, reason="insufficient_data")
+                    return
+
+            # Первое обращение в диалоге — приветствие в ответе
+            is_first_turn = not any(m.get("role") == "assistant" for m in conversation_history)
+            user_name = (message.from_user.first_name or "пользователь") if message.from_user else "пользователь"
+
+            # Генерируем ответ (используем эффективный вопрос)
+            answer = await _generate_answer_from_chunks(
+                current_query, found_chunks, conversation_history,
+                is_first_turn=is_first_turn,
+                user_name=user_name,
+            )
+            grounded = await check_answer_grounding(answer, found_chunks)
+            if not grounded:
+                logger.warning("[GROUP_CHAT_QA] Ответ не обоснован фрагментами (grounding), молчим")
+                last_no_answer_top_score = top_score
+                last_no_answer_reason = "grounding_fail"
+                await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": question_hash, "outcome": "no_answer_silent", "top_score": top_score, "reason": "grounding_fail", "retry_attempt": attempt})
+                if attempt < MAX_SILENT_RETRIES:
+                    continue
+                await _maybe_send_no_answer_reply(message)
+                _add_awaiting_answer(chat_id, message.message_id, query_text, top_score=top_score, reason="grounding_fail")
+                return
+
+            kilbil_urls = get_article_urls_from_chunks(found_chunks, only_if_top_from_kilbil=True)
+            if kilbil_urls:
+                if len(kilbil_urls) == 1:
+                    answer = answer + "\n\n📎 Подробнее: " + kilbil_urls[0]
+                else:
+                    answer = answer + "\n\n📎 Подробнее:\n" + "\n".join(kilbil_urls)
+
+            # Отправляем ответ (единственное сообщение в группу при успехе)
+            await message.answer(answer)
+
+            # Добавляем ответ в историю
+            conversation_history.append({"role": "assistant", "text": answer})
+            _update_user_context(chat_id, user_id, {"conversation_history": conversation_history})
+
             await alog_event(
                 user_id=user_id,
                 username=message.from_user.username,
-                event="kb_search_performed",
+                event="kb_answer_generated",
                 meta={
                     "question_hash": question_hash,
-                    "chunks_found": len(found_chunks),
-                    "top_scores": [round(c.get("score", 0), 3) for c in found_chunks[:3]],
-                    "top_sources": [str((c.get("metadata") or {}).get("source", ""))[:50] for c in found_chunks[:3]],
+                    "chunks_used": len(found_chunks),
+                    "outcome": "answer",
+                    "retry_attempt": attempt,
                 },
             )
-        
-        # Порог уверенности: отвечаем только если лучший чанк выше MIN_TOP_SCORE_FOR_ANSWER
-        top_score = max((c.get("score", 0) for c in found_chunks), default=0)
-        if not _is_top_score_sufficient_for_answer(found_chunks, MIN_TOP_SCORE_FOR_ANSWER):
-            logger.info("[GROUP_CHAT_QA] Топ score %.3f < MIN_TOP_SCORE_FOR_ANSWER, молчим", top_score)
-            await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": question_hash, "outcome": "no_answer_silent", "top_score": top_score})
-            await _maybe_send_no_answer_reply(message)
-            _add_awaiting_answer(chat_id, message.message_id, query_text, top_score=top_score, reason="low_top_score")
-            return
+            return  # success — выходим из process_question_in_group_chat
 
-        # Проверка достаточности данных (используем эффективный вопрос: объединённый при ответе на уточнение)
-        sufficient, missing_info = await _check_sufficient_data(query_text, found_chunks)
-        
-        # Проверяем, нужно ли эскалировать менеджеру (при «молчании» — не тегаем, только кэш)
-        if await _should_escalate_to_manager(found_chunks, (sufficient, missing_info)):
-            await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": question_hash, "outcome": "no_answer_silent", "top_score": top_score, "reason": "escalate"})
-            await _maybe_send_no_answer_reply(message)
-            _add_awaiting_answer(chat_id, message.message_id, query_text, top_score=top_score, reason="escalate")
-            return
-
-        # Если данных недостаточно — не задаём уточняющий вопрос в группе (молчим), считаем что нет ответа
-        clarification_rounds = context.get("clarification_rounds", 0)
-        if not sufficient and missing_info:
-            if clarification_rounds >= MAX_CLARIFICATION_ROUNDS:
-                sufficient = True
-                missing_info = None
-            else:
-                await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": question_hash, "outcome": "no_answer_silent", "top_score": top_score, "reason": "insufficient_data"})
-                await _maybe_send_no_answer_reply(message)
-                _add_awaiting_answer(chat_id, message.message_id, query_text, top_score=top_score, reason="insufficient_data")
-                return
-
-        # Первое обращение в диалоге — приветствие в ответе
-        is_first_turn = not any(m.get("role") == "assistant" for m in conversation_history)
-        user_name = (message.from_user.first_name or "пользователь") if message.from_user else "пользователь"
-
-        # Генерируем ответ (используем эффективный вопрос)
-        answer = await _generate_answer_from_chunks(
-            query_text, found_chunks, conversation_history,
-            is_first_turn=is_first_turn,
-            user_name=user_name,
-        )
-        grounded = await check_answer_grounding(answer, found_chunks)
-        if not grounded:
-            logger.warning("[GROUP_CHAT_QA] Ответ не обоснован фрагментами (grounding), молчим")
-            await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": question_hash, "outcome": "no_answer_silent", "top_score": top_score, "reason": "grounding_fail"})
-            await _maybe_send_no_answer_reply(message)
-            _add_awaiting_answer(chat_id, message.message_id, query_text, top_score=top_score, reason="grounding_fail")
-            return
-
-        kilbil_urls = get_article_urls_from_chunks(found_chunks, only_if_top_from_kilbil=True)
-        if kilbil_urls:
-            if len(kilbil_urls) == 1:
-                answer = answer + "\n\n📎 Подробнее: " + kilbil_urls[0]
-            else:
-                answer = answer + "\n\n📎 Подробнее:\n" + "\n".join(kilbil_urls)
-
-        # Отправляем ответ (единственное сообщение в группу при успехе)
-        await message.answer(answer)
-        
-        # Добавляем ответ в историю
-        conversation_history.append({"role": "assistant", "text": answer})
-        _update_user_context(chat_id, user_id, {"conversation_history": conversation_history})
-        
-        await alog_event(
-            user_id=user_id,
-            username=message.from_user.username,
-            event="kb_answer_generated",
-            meta={
-                "question_hash": question_hash,
-                "chunks_used": len(found_chunks),
-                "outcome": "answer",
-            },
-        )
-        
     except Exception as e:
         logger.exception(f"[GROUP_CHAT_QA] Ошибка обработки вопроса: {e}")
         # Молчим: не отправляем сообщение об ошибке в группу
