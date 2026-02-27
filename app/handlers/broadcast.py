@@ -43,6 +43,7 @@ from app.services.scheduled_broadcast_service import (
     read_active_scheduled_broadcasts_for_list,
     set_scheduled_broadcast_inactive,
 )
+from app.core.callbacks import ADMIN_SCHEDULED
 
 logger = logging.getLogger(__name__)
 
@@ -217,6 +218,42 @@ async def _check_user_owns_broadcast(callback: CallbackQuery, state: FSMContext)
     return True
 
 
+async def _build_scheduled_list() -> tuple[str, InlineKeyboardMarkup | None]:
+    """Формирует текст и клавиатуру списка плановых рассылок. При отсутствии записей клавиатура None."""
+    items = await asyncio.to_thread(read_active_scheduled_broadcasts_for_list)
+    if not items:
+        return "📋 Нет активных плановых рассылок.", None
+    lines = ["📋 <b>Плановые рассылки</b>\n"]
+    buttons = []
+    for rec in items:
+        schedule_id = (rec.get("schedule_id") or "")[:12]
+        title = (rec.get("title") or "").strip()
+        if not title:
+            text_preview = (rec.get("text_final") or "").strip()
+            title = (text_preview[:50] + "…") if len(text_preview) > 50 else text_preview if text_preview else "Без названия"
+        next_run = (rec.get("next_run_iso") or "")[:16]
+        lines.append(f"• <b>{title}</b> — след. запуск: {next_run}\n  ID: <code>{schedule_id}</code>")
+        buttons.append([InlineKeyboardButton(text=f"🔴 Выключить {schedule_id}", callback_data=f"broadcast:scheduled_disable:{schedule_id}")])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    return "\n".join(lines), keyboard
+
+
+@router.message(Command("admin"))
+async def cmd_admin(message: Message) -> None:
+    """Команда /admin: раздел администраторов — выбор функции (рассылка, плановые рассылки, база знаний)."""
+    if not await _require_admin(message):
+        return
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Запуск рассылки", callback_data="broadcast_start")],
+        [InlineKeyboardButton(text="📅 Плановые рассылки", callback_data=ADMIN_SCHEDULED)],
+        [InlineKeyboardButton(text="📚 Пополнение базы знаний", callback_data="kb_add")],
+    ])
+    await message.answer(
+        "Выберите необходимую функцию:",
+        reply_markup=keyboard,
+    )
+
+
 @router.message(Command("broadcast"))
 async def cmd_broadcast(message: Message, state: FSMContext) -> None:
     """Команда /broadcast: начать процесс создания рассылки."""
@@ -239,24 +276,26 @@ async def cmd_broadcast_scheduled(message: Message) -> None:
     if not await _require_admin(message):
         return
 
-    items = await asyncio.to_thread(read_active_scheduled_broadcasts_for_list)
-    if not items:
-        await message.answer("📋 Нет активных плановых рассылок.")
-        return
+    text, keyboard = await _build_scheduled_list()
+    if keyboard is None:
+        await message.answer(text)
+    else:
+        await message.answer(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
 
-    lines = ["📋 <b>Плановые рассылки</b>\n"]
-    buttons = []
-    for i, rec in enumerate(items):
-        schedule_id = (rec.get("schedule_id") or "")[:12]
-        title = (rec.get("title") or "").strip()
-        if not title:
-            text_preview = (rec.get("text_final") or "").strip()
-            title = (text_preview[:50] + "…") if len(text_preview) > 50 else text_preview if text_preview else "Без названия"
-        next_run = (rec.get("next_run_iso") or "")[:16]
-        lines.append(f"• <b>{title}</b> — след. запуск: {next_run}\n  ID: <code>{schedule_id}</code>")
-        buttons.append([InlineKeyboardButton(text=f"🔴 Выключить {schedule_id}", callback_data=f"broadcast:scheduled_disable:{schedule_id}")])
-    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-    await message.answer("\n".join(lines), reply_markup=keyboard, parse_mode=ParseMode.HTML)
+
+@router.callback_query(F.data == ADMIN_SCHEDULED)
+async def admin_scheduled_callback(callback: CallbackQuery) -> None:
+    """Кнопка «Плановые рассылки» в разделе администраторов."""
+    if not await _require_admin(callback):
+        await callback.answer()
+        return
+    await callback.answer()
+    text, keyboard = await _build_scheduled_list()
+    if callback.message:
+        if keyboard is None:
+            await callback.message.answer(text)
+        else:
+            await callback.message.answer(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
 
 
 @router.callback_query(F.data.startswith("broadcast:scheduled_disable:"))

@@ -69,9 +69,7 @@ async def main() -> None:
             BotCommand(command="login", description="Авторизация"),
             BotCommand(command="ask", description="Задать вопрос"),
             BotCommand(command="kilbil", description="Вопросы по kilbil"),
-            BotCommand(command="kb_add", description="Пополнение базы знаний (админ)"),
-            BotCommand(command="broadcast", description="Запуск рассылки (админ)"),
-            BotCommand(command="broadcast_scheduled", description="Плановые рассылки (админ)"),
+            BotCommand(command="admin", description="Раздел администраторов"),
         ]
     )
 

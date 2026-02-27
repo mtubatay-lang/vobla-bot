@@ -37,6 +37,9 @@ BROADCAST_CHAT_TOGGLE_PREFIX = "broadcast:chat_toggle:"
 BROADCAST_CHATS_PAGE_PREFIX = "broadcast:chats_page:"
 BROADCAST_SCHEDULED_DISABLE_PREFIX = "broadcast:scheduled_disable:"
 
+# --- admin section (menu) ---
+ADMIN_SCHEDULED = "admin:scheduled"
+
 # --- knowledge_base_admin ---
 KB_ADD = "kb_add"
 
