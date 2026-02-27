@@ -163,6 +163,12 @@ RAG_TEST_CHAT_ID_DEFAULT = -1003377597100
 # При true бот в группе при отсутствии ответа в базе отправляет короткое сообщение («Пока не нашёл ответ в базе...»)
 RAG_SEND_NO_ANSWER_REPLY = os.getenv("RAG_SEND_NO_ANSWER_REPLY", "false").lower() == "true"
 
+# --- MAX messenger (опционально) ---
+ENABLE_MAX = os.getenv("ENABLE_MAX", "false").lower() == "true"
+MAX_BOT_TOKEN = os.getenv("MAX_BOT_TOKEN", "")
+MAX_API_BASE_URL = os.getenv("MAX_API_BASE_URL", "https://platform-api.max.ru").rstrip("/")
+MAX_WEBHOOK_PATH = os.getenv("MAX_WEBHOOK_PATH", "/webhook/max")
+
 
 def get_rag_test_chat_id() -> int | None:
     """Возвращает ID тестового чата для RAG или None (все чаты).

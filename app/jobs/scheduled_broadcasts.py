@@ -1,4 +1,9 @@
-"""Job: выполнение плановых рассылок (запускать по cron каждые 15–60 мин)."""
+"""Job: выполнение плановых рассылок (запускать по cron каждые 15–60 мин).
+
+Использует execute_broadcast(bot, ...), который внутри вызывает execute_broadcast_multi
+с Telegram-адаптером. Получатели берутся из Sheets (пока только platform=telegram).
+При появлении получателей MAX их можно будет включить в рассылку через get_broadcast_recipients_list.
+"""
 
 import asyncio
 import json

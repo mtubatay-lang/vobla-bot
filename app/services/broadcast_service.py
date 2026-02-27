@@ -14,6 +14,9 @@ from aiogram.types import InputMediaPhoto, InputMediaVideo
 
 from app.config import STATS_SHEET_ID, BROADCASTS_TAB, BROADCAST_LOGS_TAB, RECIPIENTS_USERS_TAB, RECIPIENTS_CHATS_TAB
 from app.services.sheets_client import get_sheets_client
+from app.core.types import Recipient, Platform, OutgoingMessage
+
+logger = logging.getLogger(__name__)
 
 
 def _utc_now_iso() -> str:
@@ -637,6 +640,44 @@ def get_broadcast_recipients(mode: str, mode_extra: Optional[Dict[str, Any]] = N
     return (users, chats)
 
 
+def get_broadcast_recipients_list(
+    mode: str,
+    mode_extra: Optional[Dict[str, Any]] = None,
+    platform_filter: Optional[Platform] = None,
+) -> List[Recipient]:
+    """
+    Возвращает список получателей рассылки с указанием платформы.
+    Если колонка platform в таблицах отсутствует — считаем всех telegram.
+    platform_filter: если задан, возвращать только получателей этой платформы.
+    """
+    users, chats = get_broadcast_recipients(mode, mode_extra)
+    result: List[Recipient] = []
+    # Пока все получатели из Sheets — telegram
+    for uid in users:
+        result.append(Recipient(platform="telegram", chat_or_user_id=uid, is_chat=False))
+    for cid in chats:
+        result.append(Recipient(platform="telegram", chat_or_user_id=cid, is_chat=True))
+    if platform_filter:
+        result = [r for r in result if r.platform == platform_filter]
+    return result
+
+
+def mark_recipient_failed(
+    platform: Platform,
+    recipient_id: int | str,
+    error_text: str,
+    is_chat: bool = False,
+) -> None:
+    """Помечает получателя как неактивного при ошибке отправки."""
+    if platform == "telegram":
+        rid = int(recipient_id) if isinstance(recipient_id, str) else recipient_id
+        if is_chat:
+            mark_chat_failed(rid, error_text)
+        else:
+            mark_user_failed(rid, error_text)
+    # Для MAX при появлении таблиц/колонки platform — обновить поиск по (platform, id)
+
+
 async def send_media_to_recipient(
     bot, chat_id: int, attachments: List[Dict[str, Any]], text: str = ""
 ) -> None:
@@ -689,15 +730,46 @@ async def execute_broadcast(
     selected_variant: str = "original",
 ) -> Tuple[str, int, int]:
     """
-    Выполняет рассылку: получает получателей, создаёт черновик, отправляет, финализирует.
+    Выполняет рассылку (обратная совместимость: принимает aiogram Bot).
+    Строит список получателей и вызывает execute_broadcast_multi с Telegram-адаптером.
     Возвращает (broadcast_id, sent_ok, sent_fail).
     """
-    from aiogram.exceptions import TelegramForbiddenError
+    from app.platforms.telegram import TelegramAdapter
 
     mode_extra = mode_extra or {}
-    users, chats = await asyncio.to_thread(get_broadcast_recipients, mode, mode_extra)
-    users_count = len(users)
-    chats_count = len(chats)
+    recipients = await asyncio.to_thread(get_broadcast_recipients_list, mode, mode_extra)
+    adapters: Dict[Platform, Any] = {"telegram": TelegramAdapter(bot)}
+    return await execute_broadcast_multi(
+        adapters,
+        recipients,
+        text_final,
+        media_json,
+        created_by_user_id=created_by_user_id,
+        created_by_username=created_by_username,
+        text_original=text_original,
+        selected_variant=selected_variant,
+        mode=mode,
+    )
+
+
+async def execute_broadcast_multi(
+    adapters: Dict[Platform, Any],
+    recipients: List[Recipient],
+    text_final: str,
+    media_json: str,
+    created_by_user_id: int = 0,
+    created_by_username: Optional[str] = None,
+    text_original: str = "",
+    selected_variant: str = "original",
+    mode: str = "",
+) -> Tuple[str, int, int]:
+    """
+    Выполняет рассылку по списку получателей с указанием платформы.
+    adapters: словарь platform -> MessengerAdapter (TelegramAdapter, MaxAdapter).
+    Возвращает (broadcast_id, sent_ok, sent_fail).
+    """
+    users_count = sum(1 for r in recipients if not r.is_chat)
+    chats_count = sum(1 for r in recipients if r.is_chat)
 
     broadcast_id = await asyncio.to_thread(
         create_broadcast_draft,
@@ -714,63 +786,83 @@ async def execute_broadcast(
         try:
             attachments = json.loads(media_json)
         except Exception as e:
-            logger.warning("[BROADCAST_SERVICE] execute_broadcast media_json parse: %s", e)
+            logger.warning("[BROADCAST_SERVICE] execute_broadcast_multi media_json parse: %s", e)
 
     sent_ok = 0
     sent_fail = 0
     semaphore = asyncio.Semaphore(10)
 
-    async def send_to_user(user_id: int) -> None:
+    async def send_to_recipient(r: Recipient) -> None:
         nonlocal sent_ok, sent_fail
+        adapter = adapters.get(r.platform)
+        if not adapter:
+            logger.warning("[BROADCAST_SERVICE] No adapter for platform %s", r.platform)
+            await asyncio.to_thread(
+                log_broadcast_recipient,
+                broadcast_id,
+                "user" if not r.is_chat else "chat",
+                r.chat_or_user_id,
+                "fail",
+                "no adapter",
+            )
+            sent_fail += 1
+            return
         async with semaphore:
             try:
                 if text_final or attachments:
                     if attachments:
-                        await send_media_to_recipient(bot, user_id, attachments, text_final)
+                        await adapter.send_media(
+                            r.chat_or_user_id,
+                            attachments,
+                            caption=text_final,
+                        )
                     else:
-                        await bot.send_message(chat_id=user_id, text=text_final, parse_mode=ParseMode.HTML)
-                    await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "user", user_id, "ok")
+                        await adapter.send_message(
+                            OutgoingMessage(
+                                chat_id=r.chat_or_user_id,
+                                platform=r.platform,
+                                text=text_final,
+                            )
+                        )
+                    await asyncio.to_thread(
+                        log_broadcast_recipient,
+                        broadcast_id,
+                        "user" if not r.is_chat else "chat",
+                        r.chat_or_user_id,
+                        "ok",
+                    )
                     sent_ok += 1
                 else:
-                    await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "user", user_id, "fail", "empty message")
+                    await asyncio.to_thread(
+                        log_broadcast_recipient,
+                        broadcast_id,
+                        "user" if not r.is_chat else "chat",
+                        r.chat_or_user_id,
+                        "fail",
+                        "empty message",
+                    )
                     sent_fail += 1
-            except TelegramForbiddenError:
-                await asyncio.to_thread(mark_user_failed, user_id, "blocked")
-                await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "user", user_id, "fail", "blocked")
-                sent_fail += 1
             except Exception as e:
                 err = str(e)[:500]
-                await asyncio.to_thread(mark_user_failed, user_id, err)
-                await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "user", user_id, "fail", err)
+                await asyncio.to_thread(
+                    mark_recipient_failed,
+                    r.platform,
+                    r.chat_or_user_id,
+                    err,
+                    r.is_chat,
+                )
+                await asyncio.to_thread(
+                    log_broadcast_recipient,
+                    broadcast_id,
+                    "user" if not r.is_chat else "chat",
+                    r.chat_or_user_id,
+                    "fail",
+                    err,
+                )
                 sent_fail += 1
 
-    async def send_to_chat(chat_id: int) -> None:
-        nonlocal sent_ok, sent_fail
-        async with semaphore:
-            try:
-                if text_final or attachments:
-                    if attachments:
-                        await send_media_to_recipient(bot, chat_id, attachments, text_final)
-                    else:
-                        await bot.send_message(chat_id=chat_id, text=text_final, parse_mode=ParseMode.HTML)
-                    await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "ok")
-                    sent_ok += 1
-                else:
-                    await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "fail", "empty message")
-                    sent_fail += 1
-            except TelegramForbiddenError:
-                await asyncio.to_thread(mark_chat_failed, chat_id, "blocked")
-                await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "fail", "blocked")
-                sent_fail += 1
-            except Exception as e:
-                err = str(e)[:500]
-                await asyncio.to_thread(mark_chat_failed, chat_id, err)
-                await asyncio.to_thread(log_broadcast_recipient, broadcast_id, "chat", chat_id, "fail", err)
-                sent_fail += 1
-
-    tasks = [send_to_user(uid) for uid in users] + [send_to_chat(cid) for cid in chats]
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
+    if recipients:
+        await asyncio.gather(*[send_to_recipient(r) for r in recipients], return_exceptions=True)
 
     await asyncio.to_thread(
         finalize_broadcast,

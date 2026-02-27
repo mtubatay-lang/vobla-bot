@@ -4,8 +4,10 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
+from app.core.types import OutgoingMessage
 from app.services.auth_service import find_user_by_telegram_id
-from app.ui.keyboards import main_menu_kb
+from app.ui.keyboards import main_menu_rows
+from app.platforms.telegram import TelegramAdapter
 
 router = Router()
 
@@ -36,12 +38,23 @@ def _help_text_unauthorized() -> str:
 
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
+    adapter = TelegramAdapter(message.bot)
     tg_id = message.from_user.id if message.from_user else 0
     user = find_user_by_telegram_id(tg_id)
 
     if user:
-        await message.answer(_help_text_authorized(), reply_markup=main_menu_kb(), parse_mode="HTML")
+        msg = OutgoingMessage(
+            chat_id=message.chat.id,
+            platform="telegram",
+            text=_help_text_authorized(),
+            keyboard_rows=main_menu_rows(),
+        )
+        await adapter.send_message(msg)
     else:
-        await message.answer(_help_text_unauthorized())
+        await adapter.send_message(OutgoingMessage(
+            chat_id=message.chat.id,
+            platform="telegram",
+            text=_help_text_unauthorized(),
+        ))
 
 

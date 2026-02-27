@@ -2,7 +2,7 @@
 Сервис авторизации пользователей для корпоративного бота Воблабир.
 
 Работает с листом "Пользователи" в Google Sheets:
-name | phone | code | role | telegram_id | is_active | used_at | юр. лицо
+name | phone | code | role | telegram_id | is_active | used_at | юр. лицо | max_user_id (опционально)
 """
 
 from __future__ import annotations
@@ -14,11 +14,12 @@ from typing import Optional, List
 from cachetools import TTLCache
 
 from app.config import USERS_SHEET_ID
+from app.core.types import Platform
 from app.services.sheets_client import get_sheets_client  # уже есть в проекте
 
 USERS_SHEET_NAME = "Пользователи"
 
-# Кэш списка пользователей: TTL 5 минут, при bind_telegram_id инвалидируется
+# Кэш списка пользователей: TTL 5 минут, при bind_* инвалидируется
 _users_cache: TTLCache = TTLCache(maxsize=1, ttl=300)
 _USERS_CACHE_KEY = "users"
 
@@ -35,6 +36,7 @@ class User:
     is_active: bool
     used_at: str
     legal_entity: str  # юр. лицо
+    max_user_id: Optional[int] = None  # ID пользователя в MAX
 
 
 def _get_worksheet():
@@ -45,6 +47,12 @@ def _get_worksheet():
     client = get_sheets_client()
     spreadsheet = client.open_by_key(USERS_SHEET_ID)
     return spreadsheet.worksheet(USERS_SHEET_NAME)
+
+
+def _get_headers(ws) -> dict:
+    """Возвращает маппинг имя колонки -> 1-based индекс."""
+    row = ws.row_values(1)
+    return {str(h).strip(): i + 1 for i, h in enumerate(row) if str(h).strip()}
 
 
 def _parse_bool(value) -> bool:
@@ -75,14 +83,13 @@ def load_users() -> List[User]:
         pass
 
     ws = _get_worksheet()
+    headers = _get_headers(ws)
 
     # get_all_records читает всю таблицу, первая строка — заголовки
     records = ws.get_all_records()
 
     users: List[User] = []
     for idx, rec in enumerate(records):
-        # индекс в листе = номер строки + 1 (заголовки) + 1 (смещение)
-        # т.е. первая запись (idx=0) находится в строке 2
         row_number = idx + 2
 
         raw_telegram_id = str(rec.get("telegram_id", "")).strip()
@@ -95,6 +102,14 @@ def load_users() -> List[User]:
         else:
             telegram_id = None
 
+        raw_max_user_id = str(rec.get("max_user_id", "")).strip()
+        max_user_id: Optional[int] = None
+        if raw_max_user_id and raw_max_user_id != "0":
+            try:
+                max_user_id = int(raw_max_user_id)
+            except ValueError:
+                pass
+
         user = User(
             row=row_number,
             name=str(rec.get("name", "")).strip(),
@@ -105,6 +120,7 @@ def load_users() -> List[User]:
             is_active=_parse_bool(rec.get("is_active")),
             used_at=str(rec.get("used_at", "")).strip(),
             legal_entity=str(rec.get("юр. лицо", "")).strip(),
+            max_user_id=max_user_id,
         )
         users.append(user)
 
@@ -112,12 +128,20 @@ def load_users() -> List[User]:
     return users
 
 
-def find_user_by_telegram_id(telegram_id: int) -> Optional[User]:
-    """Ищет пользователя по telegram_id. Возвращает User или None."""
+def find_user_by_platform_id(platform: Platform, user_id: int | str) -> Optional[User]:
+    """Ищет пользователя по ID на указанной платформе. Возвращает User или None."""
+    uid = int(user_id) if isinstance(user_id, str) else user_id
     for user in load_users():
-        if user.telegram_id == telegram_id:
+        if platform == "telegram" and user.telegram_id == uid:
+            return user
+        if platform == "max" and user.max_user_id is not None and user.max_user_id == uid:
             return user
     return None
+
+
+def find_user_by_telegram_id(telegram_id: int) -> Optional[User]:
+    """Ищет пользователя по telegram_id. Обратная совместимость: обёртка над find_user_by_platform_id."""
+    return find_user_by_platform_id("telegram", telegram_id)
 
 
 def find_user_by_code(code: str) -> Optional[User]:
@@ -132,18 +156,36 @@ def find_user_by_code(code: str) -> Optional[User]:
     return None
 
 
-def bind_telegram_id(user: User, telegram_id: int) -> None:
+def bind_platform_id(user: User, platform: Platform, platform_user_id: int | str) -> None:
     """
-    Привязывает telegram_id к пользователю и проставляет used_at (дата/время).
-    Инвалидирует кэш пользователей, чтобы при следующем запросе подтянуть свежие данные.
+    Привязывает ID пользователя на платформе (telegram или max) и проставляет used_at.
+    Инвалидирует кэш пользователей.
     """
     ws = _get_worksheet()
+    headers = _get_headers(ws)
+    pid = int(platform_user_id) if isinstance(platform_user_id, str) else platform_user_id
 
-    # колонка 5 — telegram_id
-    ws.update_cell(user.row, 5, str(telegram_id))
+    if platform == "telegram":
+        col = headers.get("telegram_id", 5)
+        ws.update_cell(user.row, col, str(pid))
+    elif platform == "max":
+        col = headers.get("max_user_id")
+        if col is None:
+            # Колонка может отсутствовать — добавляем в конец (после последней известной)
+            last_col = max(headers.values()) if headers else 8
+            col = last_col + 1
+            # Опционально: можно записать заголовок в ячейку (1, col), но лучше добавить колонку вручную в таблице
+            ws.update_cell(user.row, col, str(pid))
+        else:
+            ws.update_cell(user.row, col, str(pid))
 
-    # колонка 7 — used_at
+    used_at_col = headers.get("used_at", 7)
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    ws.update_cell(user.row, 7, now_str)
+    ws.update_cell(user.row, used_at_col, now_str)
 
     _users_cache.pop(_USERS_CACHE_KEY, None)
+
+
+def bind_telegram_id(user: User, telegram_id: int) -> None:
+    """Привязывает telegram_id к пользователю. Обратная совместимость: обёртка над bind_platform_id."""
+    bind_platform_id(user, "telegram", telegram_id)
