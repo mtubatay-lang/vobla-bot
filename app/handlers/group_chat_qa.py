@@ -99,7 +99,7 @@ def _is_top_score_sufficient_for_answer(found_chunks: List[Dict[str, Any]], min_
 # Ключевые слова тем базы знаний: короткое сообщение без "?" с одним из них считаем вопросом
 _TOPIC_KEYWORDS = (
     "регламент", "документ", "касс", "открыти", "ип", "егаис", "ноу-хау", "честн", "меркури",
-    "франшиз", "лицензи", "акт", "оборудован", "расчетн", "счет", "роспотреб", "вывеск",
+    "франшиз", "лицензи", "акт", "оборудован", "холодильник", "витрин", "расчетн", "счет", "роспотреб", "вывеск",
 )
 # Короткие фразы, которые не вопрос (приветствия, благодарности, согласия)
 _NOT_QUESTION_PHRASES = frozenset(
@@ -118,11 +118,29 @@ def _is_short_topic_question(text: str) -> bool:
     return any(kw in lower for kw in _TOPIC_KEYWORDS)
 
 
+def _is_obvious_question(text: str) -> bool:
+    """Эвристика: явный вопрос с «?» и типичными формулировками — сразу yes, без LLM."""
+    t = (text or "").strip()
+    if not t or "?" not in t:
+        return False
+    lower = t.lower()
+    prefixes = ("подскажите", "подскажи", "расскажите", "расскажи", "хочу узнать", "хотел бы узнать")
+    if any(lower.startswith(p) or f" {p}" in lower for p in prefixes):
+        return True
+    if lower.startswith(("как ", "что ", "где ", "какой ", "какая ", "какие ", "кто ", "почему ", "зачем ")):
+        return True
+    return False
+
+
 async def _is_question(message_text: str) -> bool:
     """Определяет через AI, является ли сообщение вопросом, требующим ответа от поддержки/базы знаний."""
     text = (message_text or "").strip()
     if not text:
         return False
+    # Очевидные вопросы («Подскажите…?», «Как…?» и т.п.) — сразу yes
+    if _is_obvious_question(text):
+        logger.debug("[GROUP_CHAT_QA] Очевидный вопрос по эвристике: %s", text[:50])
+        return True
     # Короткие формулировки по теме базы без «?» — сразу вопрос (эвристика)
     if _is_short_topic_question(text):
         logger.debug("[GROUP_CHAT_QA] Короткий запрос по теме распознан эвристикой как вопрос: %s", text[:50])
@@ -130,7 +148,7 @@ async def _is_question(message_text: str) -> bool:
     try:
         prompt = (
             "Является ли это сообщение вопросом или запросом информации, на который ожидается ответ от поддержки или базы знаний "
-            "(франшиза, касса, регламент, лояльность, документы, процедуры, ИП, ЕГАИС и т.п.)?\n"
+            "(франшиза, касса, регламент, лояльность, документы, процедуры, ИП, ЕГАИС, оборудование, холодильники, витрины и т.п.)?\n"
             "Считай вопросом/запросом:\n"
             "- с вопросительным знаком: «какой документ подписать?», «касса у кого заказывать?», «где регламент?»;\n"
             "- без знака вопроса: «Подскажите какой документ подписать», «Кто помогает с ЕГАИС», «Нужна информация когда открывать ИП и счет», «Хочу уточнить про регламент»;\n"
@@ -158,7 +176,10 @@ async def _is_question(message_text: str) -> bool:
             temperature=0.0,
         )
         answer = (resp.choices[0].message.content or "").strip().lower()
-        return answer.startswith("yes")
+        is_q = answer.startswith("yes")
+        if not is_q:
+            logger.info("[GROUP_CHAT_QA] LLM: не вопрос, пропускаем: %s", text[:80])
+        return is_q
     except Exception as e:
         logger.exception(f"[GROUP_CHAT_QA] Ошибка определения вопроса: {e}")
         return "?" in text
