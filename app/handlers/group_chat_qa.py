@@ -22,6 +22,7 @@ from app.services.reranking_service import rerank_chunks_with_llm, select_best_c
 from app.services.kilbil_service import get_article_urls_from_chunks
 from app.config import (
     MANAGER_USERNAMES,
+    RAG_SKIP_SENDER_IDS,
     get_rag_test_chat_id,
     MAX_CLARIFICATION_ROUNDS,
     MIN_SCORE_AFTER_RERANK,
@@ -924,6 +925,8 @@ async def _get_question_text_from_message(message: Message) -> Optional[str]:
 async def handle_group_chat_message(message: Message):
     """Обрабатывает сообщения в групповых чатах: текст, голосовое (→ текст) или фото с подписью."""
     if message.from_user and message.from_user.is_bot:
+        return
+    if message.from_user and message.from_user.id in RAG_SKIP_SENDER_IDS:
         return
     if message.text and message.text.startswith("/"):
         return

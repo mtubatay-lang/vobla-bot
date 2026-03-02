@@ -162,6 +162,15 @@ KB_MANAGERS_CHAT_ID = int(os.getenv("KB_MANAGERS_CHAT_ID", "-1003243490449"))
 RAG_TEST_CHAT_ID_DEFAULT = -1003377597100
 # При true бот в группе при отсутствии ответа в базе отправляет короткое сообщение («Пока не нашёл ответ в базе...»)
 RAG_SEND_NO_ANSWER_REPLY = os.getenv("RAG_SEND_NO_ANSWER_REPLY", "false").lower() == "true"
+# RAG в группе: не считать вопросами сообщения от этих Telegram user_id (через запятую)
+_rag_skip_sender_ids_raw = os.getenv("RAG_SKIP_SENDER_IDS", "")
+_rag_skip_ids = []
+for x in _rag_skip_sender_ids_raw.split(",") if _rag_skip_sender_ids_raw else []:
+    try:
+        _rag_skip_ids.append(int(x.strip()))
+    except (ValueError, TypeError):
+        pass
+RAG_SKIP_SENDER_IDS = frozenset(_rag_skip_ids)
 
 # --- MAX messenger (опционально) ---
 ENABLE_MAX = os.getenv("ENABLE_MAX", "false").lower() == "true"
