@@ -43,7 +43,7 @@ from app.services.scheduled_broadcast_service import (
     read_active_scheduled_broadcasts_for_list,
     set_scheduled_broadcast_inactive,
 )
-from app.core.callbacks import ADMIN_SCHEDULED
+from app.core.callbacks import ADMIN_SCHEDULED, DOC_GEN_START
 
 logger = logging.getLogger(__name__)
 
@@ -247,6 +247,7 @@ async def cmd_admin(message: Message) -> None:
         [InlineKeyboardButton(text="📢 Запуск рассылки", callback_data="broadcast_start")],
         [InlineKeyboardButton(text="📅 Плановые рассылки", callback_data=ADMIN_SCHEDULED)],
         [InlineKeyboardButton(text="📚 Пополнение базы знаний", callback_data="kb_add")],
+        [InlineKeyboardButton(text="📝 Создать документ", callback_data=DOC_GEN_START)],
     ])
     await message.answer(
         "Выберите необходимую функцию:",

@@ -1,6 +1,7 @@
 """Конфигурация приложения Vobla Bot."""
 
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
 # Загружаем переменные окружения из .env (локально) и из окружения (Railway)
@@ -177,6 +178,11 @@ ENABLE_MAX = os.getenv("ENABLE_MAX", "false").lower() == "true"
 MAX_BOT_TOKEN = os.getenv("MAX_BOT_TOKEN", "")
 MAX_API_BASE_URL = os.getenv("MAX_API_BASE_URL", "https://platform-api.max.ru").rstrip("/")
 MAX_WEBHOOK_PATH = os.getenv("MAX_WEBHOOK_PATH", "/webhook/max")
+
+# --- Document templates (генерация документов из шаблонов) ---
+# Папка с DOCX-шаблонами и config.json (относительно корня проекта)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+TEMPLATES_DIR = Path(os.getenv("TEMPLATES_DIR", str(_PROJECT_ROOT / "templates")))
 
 
 def get_rag_test_chat_id() -> int | None:

@@ -1,0 +1,26 @@
+{
+  "templates": [
+    {
+      "id": "accounting_contract",
+      "name": "Договор на бухгалтерские услуги",
+      "filename": "accounting_contract_template.docx",
+      "fields": [
+        {"key": "contract_number", "label": "Номер договора", "example": "015-2508"},
+        {"key": "contract_date", "label": "Дата договора", "example": "22 февраля 2026"},
+        {"key": "customer_details", "label": "Реквизиты Заказчика (ФИО/название ИП, ИНН, адрес, р/с, БИК)"},
+        {"key": "contract_end_date", "label": "Срок действия договора (до какой даты)", "example": "31 декабря 2026"}
+      ]
+    },
+    {
+      "id": "marketing_contract",
+      "name": "Договор на маркетинговые услуги",
+      "filename": "marketing_contract_template.docx",
+      "fields": [
+        {"key": "contract_number", "label": "Номер договора", "example": "ДК 026/2602"},
+        {"key": "contract_date", "label": "Дата договора", "example": "01 марта 2026"},
+        {"key": "customer_details", "label": "Реквизиты Заказчика (ФИО/название ИП, ИНН, адрес, р/с, БИК)"},
+        {"key": "contract_end_date", "label": "Срок действия договора (до какой даты)"}
+      ]
+    }
+  ]
+}

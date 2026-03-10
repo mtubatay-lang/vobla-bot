@@ -43,6 +43,14 @@ ADMIN_SCHEDULED = "admin:scheduled"
 # --- knowledge_base_admin ---
 KB_ADD = "kb_add"
 
+# --- document_generator ---
+DOC_GEN_START = "doc_gen_start"
+DOC_GEN_TEMPLATE_PREFIX = "doc_gen_template:"  # doc_gen_template:{template_id}
+DOC_GEN_CONFIRM = "doc_gen_confirm"
+DOC_GEN_CANCEL = "doc_gen_cancel"
+DOC_GEN_RETRY = "doc_gen_retry"
+DOC_GEN_UPLOAD = "doc_gen_upload"
+
 # --- group_chat_qa ---
 KB_CONFIRM_ADD_PREFIX = "kb_confirm_add:"
 KB_EDIT_ANSWER_PREFIX = "kb_edit_answer:"

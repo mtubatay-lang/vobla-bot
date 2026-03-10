@@ -23,6 +23,7 @@ from app.handlers.qa_mode import router as qa_router
 from app.handlers.group_chat_qa import router as group_chat_qa_router
 from app.handlers.knowledge_base_admin import router as kb_admin_router
 from app.handlers.broadcast import router as broadcast_router
+from app.handlers.document_generator import router as document_generator_router
 from app.handlers.recipients_collector import router as recipients_collector_router
 from app.handlers.voice_to_text import router as voice_to_text_router
 
@@ -83,6 +84,7 @@ async def main() -> None:
     dp.include_router(kb_admin_router)  # админ-панель для базы знаний (перемещен выше)
     dp.include_router(manager_router)  # роутер для менеджеров
     dp.include_router(broadcast_router)  # роутер рассылок
+    dp.include_router(document_generator_router)  # создание документов из шаблонов
     dp.include_router(qa_router)  # роутер режима навыка
     dp.include_router(group_chat_qa_router)  # групповой чат RAG
     dp.include_router(kilbil_router)  # kilbil RAG (перед faq)
