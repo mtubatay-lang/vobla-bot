@@ -37,6 +37,17 @@ logger = logging.getLogger(__name__)
 
 router = Router()
 
+# Порядок пошагового ввода полей при создании документа
+DOC_GEN_FIELD_ORDER = ["contract_number", "contract_date", "contract_end_date", "customer_details"]
+
+# Тексты запросов по шагам (индекс 0..3)
+DOC_GEN_PROMPTS = [
+    "Введите номер договора (например 015-2508).",
+    "Введите дату договора (например 22 февраля 2026).",
+    "Введите срок действия договора — до какой даты (например 31 декабря 2026).",
+    "Загрузите реквизиты Заказчика (ФИО/название ИП, ИНН, адрес, р/с, БИК): отправьте текст, скриншот/фото или PDF/DOCX.",
+]
+
 
 class DocumentGenState(StatesGroup):
     choosing_template = State()
@@ -108,26 +119,17 @@ async def doc_gen_choose_template_callback(cb: CallbackQuery, state: FSMContext)
         await cb.answer(f"Файл шаблона не найден: {template_path.name}", show_alert=True)
         return
 
-    fields = template.get("fields", [])
-    fields_text = "\n".join(
-        f"• {f.get('label', f.get('key', ''))}"
-        for f in fields
-    )
-
     await state.update_data(
         doc_gen_template_id=template_id,
         doc_gen_template=template,
+        doc_gen_collected={},
+        doc_gen_next_field=0,
     )
     await state.set_state(DocumentGenState.waiting_data)
 
     await cb.message.answer(
         f"📄 <b>{template.get('name', template_id)}</b>\n\n"
-        "Отправьте данные для заполнения одним сообщением:\n"
-        "— текст с реквизитами и датами\n"
-        "— скриншот или фото документа\n"
-        "— PDF или DOCX файл\n\n"
-        f"Нужные поля:\n{fields_text}\n\n"
-        "Для отмены отправьте /cancel",
+        f"{DOC_GEN_PROMPTS[0]}\n\nДля отмены отправьте /cancel",
         parse_mode=ParseMode.HTML,
     )
     await cb.answer()
@@ -226,45 +228,57 @@ async def template_upload_receive_name(message: Message, state: FSMContext) -> N
 
 @router.message(DocumentGenState.waiting_data, F.text)
 async def doc_gen_receive_text(message: Message, state: FSMContext) -> None:
-    """Пользователь прислал текст — извлекаем поля через OpenAI."""
+    """Пошаговый ввод: номер → дата → срок → реквизиты (текст)."""
     if not await _require_admin(message):
         return
 
     data = await state.get_data()
     template = data.get("doc_gen_template")
+    collected = data.get("doc_gen_collected") or {}
+    next_field = data.get("doc_gen_next_field", 0)
+
     if not template:
         await state.clear()
         await message.answer("Ошибка: шаблон не выбран. Начните заново через /admin → Создать документ.")
         return
 
-    field_specs = template.get("fields", [])
     text = (message.text or "").strip()
     if not text:
-        await message.answer("Отправьте текст с реквизитами и датами.")
+        await message.answer(f"{DOC_GEN_PROMPTS[next_field]}\n\nДля отмены отправьте /cancel.")
         return
 
-    await message.bot.send_chat_action(message.chat.id, action=ChatAction.TYPING)
-    try:
-        extracted = await asyncio.to_thread(extract_fields_from_text, text, field_specs)
-    except Exception as e:
-        logger.exception("[DOC_GEN] Ошибка извлечения полей из текста: %s", e)
-        await message.answer("Не удалось извлечь данные из текста. Попробуйте отправить по-другому или /cancel.")
+    key = DOC_GEN_FIELD_ORDER[next_field]
+    collected[key] = text
+
+    if next_field < 3:
+        await state.update_data(doc_gen_collected=collected, doc_gen_next_field=next_field + 1)
+        next_prompt = DOC_GEN_PROMPTS[next_field + 1]
+        await message.answer(f"{next_prompt}\n\nДля отмены отправьте /cancel.")
         return
 
-    await _show_preview_and_confirm(message, state, template, extracted)
+    # next_field == 3: реквизиты получены, показываем превью
+    await state.update_data(doc_gen_collected=collected)
+    await _show_preview_and_confirm(message, state, template, collected)
 
 
 @router.message(DocumentGenState.waiting_data, F.photo)
 async def doc_gen_receive_photo(message: Message, state: FSMContext) -> None:
-    """Пользователь прислал фото/скриншот — извлекаем поля через Vision."""
+    """Фото/скриншот реквизитов (только на шаге 4): извлекаем customer_details через Vision."""
     if not await _require_admin(message):
         return
 
     data = await state.get_data()
     template = data.get("doc_gen_template")
+    collected = data.get("doc_gen_collected") or {}
+    next_field = data.get("doc_gen_next_field", 0)
+
     if not template:
         await state.clear()
         await message.answer("Ошибка: шаблон не выбран. Начните заново через /admin → Создать документ.")
+        return
+
+    if next_field != 3:
+        await message.answer(f"{DOC_GEN_PROMPTS[next_field]}\n\nДля отмены отправьте /cancel.")
         return
 
     photo = message.photo[-1] if message.photo else None
@@ -282,7 +296,7 @@ async def doc_gen_receive_photo(message: Message, state: FSMContext) -> None:
         await message.answer("Не удалось загрузить изображение. Попробуйте ещё раз или отправьте текст.")
         return
 
-    field_specs = template.get("fields", [])
+    field_specs = [{"key": "customer_details", "label": "Реквизиты Заказчика"}]
     try:
         extracted = await asyncio.to_thread(
             extract_fields_from_image,
@@ -292,23 +306,32 @@ async def doc_gen_receive_photo(message: Message, state: FSMContext) -> None:
         )
     except Exception as e:
         logger.exception("[DOC_GEN] Ошибка извлечения полей из фото: %s", e)
-        await message.answer("Не удалось распознать данные на изображении. Попробуйте отправить текст или документ.")
+        await message.answer("Не удалось распознать реквизиты на изображении. Попробуйте отправить текст или документ.")
         return
 
-    await _show_preview_and_confirm(message, state, template, extracted)
+    collected["customer_details"] = (extracted.get("customer_details") or "").strip()
+    await state.update_data(doc_gen_collected=collected)
+    await _show_preview_and_confirm(message, state, template, collected)
 
 
 @router.message(DocumentGenState.waiting_data, F.document)
 async def doc_gen_receive_document(message: Message, state: FSMContext) -> None:
-    """Пользователь прислал документ (PDF/DOCX) — извлекаем текст и поля."""
+    """Документ с реквизитами (только на шаге 4): извлекаем текст и customer_details через AI."""
     if not await _require_admin(message):
         return
 
     data = await state.get_data()
     template = data.get("doc_gen_template")
+    collected = data.get("doc_gen_collected") or {}
+    next_field = data.get("doc_gen_next_field", 0)
+
     if not template:
         await state.clear()
         await message.answer("Ошибка: шаблон не выбран. Начните заново через /admin → Создать документ.")
+        return
+
+    if next_field != 3:
+        await message.answer(f"{DOC_GEN_PROMPTS[next_field]}\n\nДля отмены отправьте /cancel.")
         return
 
     doc = message.document
@@ -331,7 +354,7 @@ async def doc_gen_receive_document(message: Message, state: FSMContext) -> None:
         await message.answer("Не удалось загрузить файл. Попробуйте ещё раз.")
         return
 
-    field_specs = template.get("fields", [])
+    field_specs = [{"key": "customer_details", "label": "Реквизиты Заказчика"}]
     try:
         extracted = await asyncio.to_thread(
             extract_fields_from_file,
@@ -341,10 +364,12 @@ async def doc_gen_receive_document(message: Message, state: FSMContext) -> None:
         )
     except Exception as e:
         logger.exception("[DOC_GEN] Ошибка извлечения полей из файла: %s", e)
-        await message.answer("Не удалось извлечь данные из файла. Попробуйте отправить текст.")
+        await message.answer("Не удалось извлечь реквизиты из файла. Попробуйте отправить текст.")
         return
 
-    await _show_preview_and_confirm(message, state, template, extracted)
+    collected["customer_details"] = (extracted.get("customer_details") or "").strip()
+    await state.update_data(doc_gen_collected=collected)
+    await _show_preview_and_confirm(message, state, template, collected)
 
 
 async def _show_preview_and_confirm(
@@ -431,7 +456,7 @@ async def doc_gen_cancel_callback(cb: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data == DOC_GEN_RETRY, DocumentGenState.confirming)
 async def doc_gen_retry_callback(cb: CallbackQuery, state: FSMContext) -> None:
-    """Повторить ввод данных."""
+    """Ввести данные заново: сбрасываем к первому шагу."""
     if not await _require_admin(cb):
         return
 
@@ -442,12 +467,10 @@ async def doc_gen_retry_callback(cb: CallbackQuery, state: FSMContext) -> None:
         await state.clear()
         return
 
-    fields = template.get("fields", [])
-    fields_text = "\n".join(f"• {f.get('label', f.get('key', ''))}" for f in fields)
-
+    await state.update_data(doc_gen_collected={}, doc_gen_next_field=0)
     await state.set_state(DocumentGenState.waiting_data)
     await cb.message.answer(
-        f"📄 Отправьте данные заново (текст, фото, PDF или DOCX).\n\nНужные поля:\n{fields_text}\n\nДля отмены: /cancel",
+        f"📄 {DOC_GEN_PROMPTS[0]}\n\nДля отмены отправьте /cancel",
         parse_mode=ParseMode.HTML,
     )
     await cb.answer()
