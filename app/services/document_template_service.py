@@ -204,11 +204,16 @@ def extract_fields_from_text(
         "Если какое-то поле не найдено в тексте — используй пустую строку \"\" для этого ключа. "
         "Даты пиши в формате «день месяц год» (например: 22 февраля 2026). "
     )
-    if "customer_name" in keys and "customer_requisites" in keys:
+    if "customer_preamble" in keys or ("customer_name" in keys and "customer_requisites" in keys):
         system_prompt += (
             "Из текста реквизитов извлеки: 1) ФИО физлица или название ИП/ООО — в customer_name; "
-            "2) полный блок реквизитов (адрес, ИНН, ОГРН, р/с, БИК, банк) — в customer_requisites, с переносами строк."
+            "2) полный блок реквизитов (адрес, ИНН, ОГРН, р/с, БИК, банк) — в customer_requisites, с переносами строк. "
         )
+        if "customer_preamble" in keys:
+            system_prompt += (
+                "Для customer_preamble: если Заказчик ИП — строка «Индивидуальный предприниматель» + ФИО; "
+                "если ООО — «Общество с ограниченной ответственностью» + название в кавычках (не писать «Индивидуальный предприниматель» для ООО)."
+            )
     else:
         system_prompt += (
             "Реквизиты (ИНН, адрес, р/с, БИК и т.д.) объединяй в одно поле с переносами строк."
@@ -267,11 +272,16 @@ def extract_fields_from_image(
         f"Ключи объекта: {keys_str}. "
         "Если поле не найдено — используй пустую строку \"\"."
     )
-    if "customer_name" in keys and "customer_requisites" in keys:
+    if "customer_preamble" in keys or ("customer_name" in keys and "customer_requisites" in keys):
         system_prompt += (
             " Из текста реквизитов извлеки: 1) ФИО физлица или название ИП/ООО — в customer_name; "
             "2) полный блок реквизитов (адрес, ИНН, ОГРН, р/с, БИК, банк) — в customer_requisites."
         )
+        if "customer_preamble" in keys:
+            system_prompt += (
+                " Для customer_preamble: если Заказчик ИП — «Индивидуальный предприниматель» + ФИО; "
+                "если ООО — «Общество с ограниченной ответственностью» + название в кавычках (не «Индивидуальный предприниматель» для ООО)."
+            )
     user_content: List[Any] = [
         {
             "type": "text",
