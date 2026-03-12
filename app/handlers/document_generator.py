@@ -288,6 +288,10 @@ async def doc_gen_receive_text(message: Message, state: FSMContext) -> None:
             collected[k] = v.strip()
         elif v is not None:
             collected[k] = v
+    for spec in REQUISITES_FIELD_SPECS:
+        key = spec["key"]
+        if key not in collected or collected.get(key) is None:
+            collected[key] = ""
     await state.update_data(doc_gen_collected=collected)
     await _show_preview_and_confirm(message, state, template, collected)
 
@@ -344,6 +348,10 @@ async def doc_gen_receive_photo(message: Message, state: FSMContext) -> None:
             collected[k] = v.strip()
         elif v is not None:
             collected[k] = v
+    for spec in REQUISITES_FIELD_SPECS:
+        key = spec["key"]
+        if key not in collected or collected.get(key) is None:
+            collected[key] = ""
     await state.update_data(doc_gen_collected=collected)
     await _show_preview_and_confirm(message, state, template, collected)
 
@@ -405,6 +413,10 @@ async def doc_gen_receive_document(message: Message, state: FSMContext) -> None:
             collected[k] = v.strip()
         elif v is not None:
             collected[k] = v
+    for spec in REQUISITES_FIELD_SPECS:
+        key = spec["key"]
+        if key not in collected or collected.get(key) is None:
+            collected[key] = ""
     await state.update_data(doc_gen_collected=collected)
     await _show_preview_and_confirm(message, state, template, collected)
 
@@ -456,8 +468,15 @@ async def doc_gen_confirm_callback(cb: CallbackQuery, state: FSMContext) -> None
         await state.clear()
         return
 
+    # Гарантируем наличие всех полей шаблона (реквизиты и др. подставляются в раздел «Заказчик» в конце)
+    field_keys = [f.get("key") for f in template.get("fields", []) if f.get("key")]
+    data_for_fill = dict(extracted) if extracted else {}
+    for key in field_keys:
+        if key not in data_for_fill or data_for_fill[key] is None:
+            data_for_fill[key] = ""
+
     try:
-        docx_bytes = fill_docx_template(template_path, extracted)
+        docx_bytes = fill_docx_template(template_path, data_for_fill)
     except Exception as e:
         logger.exception("[DOC_GEN] Ошибка заполнения шаблона: %s", e)
         await cb.answer("Ошибка при заполнении шаблона.", show_alert=True)
