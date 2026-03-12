@@ -59,23 +59,34 @@ def get_template_path(template: Dict[str, Any]) -> Path:
 
 
 def _replace_in_paragraph(paragraph, replacements: Dict[str, str]) -> None:
-    """Заменяет плейсхолдеры в параграфе. Объединяет текст runs для поиска {{key}}."""
+    """Заменяет плейсхолдеры в параграфе. Если плейсхолдер целиком в одном run — заменяем только в нём (сохраняем формат остальных, например жирный до «именуемый»)."""
     full_text = paragraph.text
     if not full_text or "{{" not in full_text:
         return
     for key, value in replacements.items():
         placeholder = "{{" + key + "}}"
-        if placeholder in full_text:
-            # Replace in each run that contains part of the placeholder
-            # Strategy: rebuild runs by doing full-text replace then assign to first run, clear others
-            new_text = full_text.replace(placeholder, str(value))
-            if new_text != full_text:
-                # Clear all runs and set full text in first run to preserve formatting
-                for i, run in enumerate(paragraph.runs):
-                    if i == 0:
-                        run.text = new_text
-                    else:
-                        run.text = ""
+        if placeholder not in full_text:
+            continue
+        new_text = full_text.replace(placeholder, str(value))
+        if new_text == full_text:
+            continue
+        # Если плейсхолдер целиком в одном run — заменяем только в нём, чтобы сохранить разбивку (жирный / обычный)
+        run_with_placeholder = None
+        for run in paragraph.runs:
+            if placeholder in run.text:
+                run_with_placeholder = run
+                break
+        if run_with_placeholder is not None:
+            run_with_placeholder.text = run_with_placeholder.text.replace(placeholder, str(value))
+            full_text = paragraph.text  # обновить для следующих ключей
+        else:
+            # плейсхолдер разбит по runs — склеиваем в первый run
+            for i, run in enumerate(paragraph.runs):
+                if i == 0:
+                    run.text = new_text
+                else:
+                    run.text = ""
+            full_text = new_text
 
 
 def _replace_in_cell(cell, replacements: Dict[str, str]) -> None:

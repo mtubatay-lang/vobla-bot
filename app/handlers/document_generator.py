@@ -474,6 +474,8 @@ async def doc_gen_confirm_callback(cb: CallbackQuery, state: FSMContext) -> None
     for key in field_keys:
         if key not in data_for_fill or data_for_fill[key] is None:
             data_for_fill[key] = ""
+    # Реквизиты Исполнителя из конфига шаблона (извлечены из загруженного шаблона)
+    data_for_fill["executor_requisites"] = template.get("executor_requisites", "")
 
     try:
         docx_bytes = fill_docx_template(template_path, data_for_fill)
