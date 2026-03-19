@@ -145,6 +145,28 @@ def test_parse_group_message_nested_chat_recipient():
     assert ev.chat.title == "Команда тест"
 
 
+def test_parse_group_nested_chat_uses_name_when_no_title():
+    """Webhook MAX: название группы в поле name, без title."""
+    body = {
+        "update_type": "message_created",
+        "message": {
+            "sender": {"user_id": 42, "name": "U"},
+            "recipient": {
+                "chat": {
+                    "chat_id": 72257432704463,
+                    "type": "chat",
+                    "name": "Тестовая группа MAX",
+                }
+            },
+            "body": {"text": "hi"},
+        },
+    }
+    ev = parse_max_update(body)
+    assert ev is not None
+    assert ev.chat.is_group is True
+    assert ev.chat.title == "Тестовая группа MAX"
+
+
 def test_parse_callback_peer_is_sender_in_dm():
     body = {
         "update_type": "message_callback",

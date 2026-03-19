@@ -56,6 +56,30 @@ def _norm_recipient_from_message(msg: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _extract_chat_title_from_peer(recipient: Dict[str, Any], chat_nested: Dict[str, Any]) -> Optional[str]:
+    """
+    Название группы/канала для Sheets и UI.
+    В доке MAX у Chat поле ``title``, в webhook часто приходит ``name`` или другие алиасы.
+    """
+    keys = (
+        "title",
+        "name",
+        "chat_name",
+        "chat_title",
+        "subject",
+        "display_name",
+        "label",
+    )
+    for src in (chat_nested, recipient):
+        if not isinstance(src, dict):
+            continue
+        for k in keys:
+            v = src.get(k)
+            if v is not None and str(v).strip():
+                return str(v).strip()
+    return None
+
+
 def _user_from_max(obj: Optional[Dict[str, Any]]) -> Optional[InternalUser]:
     if not obj or not isinstance(obj, dict):
         return None
@@ -143,7 +167,7 @@ def _parse_recipient_peer(
         )
         if cid is None:
             cid = sender.id
-        title = recipient.get("title") or chat_nested.get("title")
+        title = _extract_chat_title_from_peer(recipient, chat_nested)
         chat = InternalChat(
             id=cid,
             platform="max",
