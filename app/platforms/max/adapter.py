@@ -47,6 +47,10 @@ def _parse_recipient_peer(
 ) -> tuple[Any, bool, InternalChat]:
     """
     peer_id для POST /messages (user_id или chat_id), is_group, InternalChat.
+
+    В webhook MAX группа часто приходит как ``recipient.chat`` с полями
+    ``chat_id`` и ``type: "chat"`` (см. объект Chat в API), без верхнеуровневого
+    ``recipient.type`` — раньше такие сообщения ошибочно считались личкой.
     """
     if not recipient or not isinstance(recipient, dict):
         uid = sender.id
@@ -59,12 +63,25 @@ def _parse_recipient_peer(
         )
         return uid, False, chat
 
-    rtype = str(recipient.get("type") or recipient.get("recipient_type") or "").lower()
     chat_nested = recipient.get("chat") if isinstance(recipient.get("chat"), dict) else {}
+    rtype = str(recipient.get("type") or recipient.get("recipient_type") or "").lower()
+    nested_type = str(chat_nested.get("type") or "").lower()
 
-    # Группа / канал / чат (не путать с type=dialog — в MAX это может быть личка)
-    if rtype in ("chat", "group", "channel") or recipient.get("is_group"):
-        cid = recipient.get("chat_id") or recipient.get("id") or chat_nested.get("id")
+    # Группа / канал: верхний уровень или вложенный Chat (type "chat" = группа в MAX API).
+    # type "dialog" — личный диалог, не групповой чат для рассылок.
+    is_group = (
+        rtype in ("chat", "group", "channel")
+        or recipient.get("is_group")
+        or nested_type in ("chat", "channel")
+    )
+
+    if is_group:
+        cid = (
+            recipient.get("chat_id")
+            or recipient.get("id")
+            or chat_nested.get("chat_id")
+            or chat_nested.get("id")
+        )
         if cid is None:
             cid = sender.id
         title = recipient.get("title") or chat_nested.get("title")

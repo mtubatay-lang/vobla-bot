@@ -87,6 +87,29 @@ def test_parse_dm_recipient_is_bot_uses_sender_as_peer():
     assert ev.chat.is_group is False
 
 
+def test_parse_group_message_nested_chat_recipient():
+    """MAX часто шлёт группу как recipient.chat { chat_id, type: chat }, без recipient.type."""
+    body = {
+        "update_type": "message_created",
+        "message": {
+            "sender": {"user_id": 42, "name": "U"},
+            "recipient": {
+                "chat": {
+                    "chat_id": 987654321,
+                    "type": "chat",
+                    "title": "Команда тест",
+                }
+            },
+            "body": {"text": "hi all"},
+        },
+    }
+    ev = parse_max_update(body)
+    assert ev is not None
+    assert ev.chat.is_group is True
+    assert ev.chat.id == 987654321
+    assert ev.chat.title == "Команда тест"
+
+
 def test_parse_callback_peer_is_sender_in_dm():
     body = {
         "update_type": "message_callback",

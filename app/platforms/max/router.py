@@ -62,10 +62,15 @@ def _max_group_chat_type_from_raw(raw: Any) -> str:
     if not isinstance(rec, dict):
         return "group"
     t = str(rec.get("type") or rec.get("recipient_type") or "").lower()
-    if t == "channel":
-        return "channel"
-    if t in ("supergroup", "group", "chat", "dialog"):
-        return "supergroup" if t == "supergroup" else "group"
+    nested = rec.get("chat") if isinstance(rec.get("chat"), dict) else {}
+    nt = str(nested.get("type") or "").lower()
+    for x in (t, nt):
+        if x == "channel":
+            return "channel"
+        if x == "supergroup":
+            return "supergroup"
+        if x in ("chat", "group"):
+            return "group"
     return "group"
 
 
@@ -85,6 +90,11 @@ def _schedule_collect_max_group_chat(event: IncomingMessage | CallbackEvent) -> 
     title = event.chat.title or ""
     username = event.chat.username
     chat_type = _max_group_chat_type_from_raw(getattr(event, "raw", None))
+    logger.info(
+        "MAX recipients_chats: upsert scheduled chat_id=%s title=%r platform=max",
+        cid,
+        title,
+    )
     _aio.create_task(
         _aio.to_thread(
             upsert_chat_recipient,
