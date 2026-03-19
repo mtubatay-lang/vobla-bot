@@ -107,6 +107,27 @@ def test_parse_group_from_message_chat_root_only():
     assert ev.chat.id == 555444333
 
 
+def test_parse_group_title_from_update_level_chat():
+    """Название может быть только в update.chat, а в recipient — один chat_id."""
+    body = {
+        "update_type": "message_created",
+        "chat": {
+            "chat_id": 111222333,
+            "type": "chat",
+            "title": "Title only on update.chat",
+        },
+        "message": {
+            "sender": {"user_id": 42, "name": "U"},
+            "recipient": {"chat_id": 111222333},
+            "body": {"text": "x"},
+        },
+    }
+    ev = parse_max_update(body)
+    assert ev is not None
+    assert ev.chat.is_group is True
+    assert ev.chat.title == "Title only on update.chat"
+
+
 def test_parse_group_recipient_top_level_chat_id_only():
     body = {
         "update_type": "message_created",

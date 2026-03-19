@@ -24,10 +24,14 @@ from app.platforms.max.client import MaxApiClient
 logger = logging.getLogger(__name__)
 
 
-def _norm_recipient_from_message(msg: Dict[str, Any]) -> Dict[str, Any]:
+def _norm_recipient_from_message(
+    msg: Dict[str, Any],
+    update: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """
     Собрать единый dict recipient для разбора peer: иногда чат дублируется в
     ``message.chat`` или в ``body.recipient``, а не только в ``message.recipient``.
+    Иногда объект чата лежит на верхнем уровне webhook (``update.chat``).
     """
     rec = msg.get("recipient")
     out: Dict[str, Any] = dict(rec) if isinstance(rec, dict) else {}
@@ -52,6 +56,15 @@ def _norm_recipient_from_message(msg: Dict[str, Any]) -> Dict[str, Any]:
         else:
             merged = {**existing, **mch}
             out["chat"] = merged
+
+    if isinstance(update, dict):
+        uch = update.get("chat")
+        if isinstance(uch, dict):
+            existing = out.get("chat")
+            if not isinstance(existing, dict):
+                out["chat"] = dict(uch)
+            else:
+                out["chat"] = {**existing, **uch}
 
     return out
 
@@ -267,7 +280,7 @@ def parse_max_update(update: Dict[str, Any]) -> Optional[IncomingMessage | Callb
         msg = cb.get("message") or update.get("message") or {}
         if not isinstance(msg, dict):
             msg = {}
-        recipient = _norm_recipient_from_message(msg)
+        recipient = _norm_recipient_from_message(msg, update)
         _, _, chat = _parse_recipient_peer(recipient, user)
         mid = msg.get("id") or msg.get("message_id")
 
@@ -311,7 +324,7 @@ def parse_max_update(update: Dict[str, Any]) -> Optional[IncomingMessage | Callb
     if sender is None:
         return None
 
-    recipient = _norm_recipient_from_message(msg)
+    recipient = _norm_recipient_from_message(msg, update)
     _, is_group, chat = _parse_recipient_peer(recipient, sender)
 
     if update_type == "message_created" and not is_group:

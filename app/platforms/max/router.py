@@ -31,6 +31,8 @@ from app.services.broadcast_recipients_service import upsert_chat_recipient, ups
 from app.services.kilbil_service import find_kilbil_answer
 from app.services.max_qa_simple import max_simple_rag_answer
 from app.platforms.max import admin_flows
+from app.platforms.max.adapter import _extract_chat_title_from_peer
+from app.platforms.max.client import MaxApiClientError
 from app.ui.keyboards import max_main_menu_rows, qa_kb_rows
 
 logger = logging.getLogger(__name__)
@@ -74,10 +76,13 @@ def _max_group_chat_type_from_raw(raw: Any) -> str:
     return "group"
 
 
-def _schedule_collect_max_group_chat(event: IncomingMessage | CallbackEvent) -> None:
+def _schedule_collect_max_group_chat(
+    event: IncomingMessage | CallbackEvent,
+    max_client: Any = None,
+) -> None:
     """
     Любое событие из группы MAX → upsert в recipients_chats (platform=max).
-    Аналог Telegram recipients_collector для групп.
+    Если в webhook нет названия — подгружаем GET /chats/{chatId} и повторный upsert.
     """
     if not event.chat.is_group or event.chat.platform != "max":
         return
@@ -95,16 +100,58 @@ def _schedule_collect_max_group_chat(event: IncomingMessage | CallbackEvent) -> 
         cid,
         title,
     )
-    _aio.create_task(
-        _aio.to_thread(
+
+    async def _run_collect() -> None:
+        t = title or ""
+        await _aio.to_thread(
             upsert_chat_recipient,
             cid,
             chat_type,
-            title,
+            t,
             username,
             platform="max",
         )
-    )
+        if str(t).strip():
+            return
+        if max_client is None:
+            logger.info(
+                "MAX recipients_chats: title empty in webhook, no max_client for GET /chats/%s",
+                cid,
+            )
+            return
+        try:
+            info = await max_client.get_group_chat(cid)
+        except MaxApiClientError as e:
+            logger.warning("MAX GET /chats/%s failed: %s", cid, e)
+            return
+        except Exception as e:
+            logger.warning("MAX GET /chats/%s: %s", cid, e, exc_info=True)
+            return
+        if not isinstance(info, dict):
+            return
+        resolved = _extract_chat_title_from_peer({}, info)
+        if not resolved:
+            logger.info(
+                "MAX GET /chats/%s: no title in response keys=%s",
+                cid,
+                sorted(info.keys()),
+            )
+            return
+        await _aio.to_thread(
+            upsert_chat_recipient,
+            cid,
+            chat_type,
+            resolved,
+            username,
+            platform="max",
+        )
+        logger.info(
+            "MAX recipients_chats: title updated via API chat_id=%s title=%r",
+            cid,
+            resolved,
+        )
+
+    _aio.create_task(_run_collect())
 
 
 def _normalize_slash_command(text: str) -> str:
@@ -339,7 +386,7 @@ class MaxActionRouter:
         update_type = None
         if getattr(event, "raw", None) and isinstance(event.raw, dict):
             update_type = event.raw.get("update_type") or event.raw.get("type")
-        _schedule_collect_max_group_chat(event)
+        _schedule_collect_max_group_chat(event, self._max_client)
         authorized, role = self._auth_context(event.user.id)
 
         if isinstance(event, CallbackEvent):

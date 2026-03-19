@@ -227,6 +227,17 @@ class MaxApiClient:
                 body=last_body,
             )
 
+    async def get_group_chat(self, chat_id: str | int) -> Dict[str, Any]:
+        """
+        GET /chats/{chatId} — метаданные группового чата (title и т.д.).
+        https://dev.max.ru/docs-api/methods/GET/chats/-chatId-
+        """
+        cid = str(chat_id).strip()
+        data = await self._request("GET", f"/chats/{cid}")
+        if isinstance(data.get("chat"), dict):
+            return data["chat"]
+        return data
+
     async def send_typing(self, chat_id: str | int, *, is_group_chat: bool = False) -> None:
         """Индикатор набора (если метод есть в API)."""
         try:
