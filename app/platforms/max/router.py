@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from app.core.callbacks import (
     MAX_MENU_ADMIN,
@@ -27,8 +27,10 @@ from app.core.handlers import (
 )
 from app.core.types import CallbackEvent, IncomingMessage, OutgoingMessage
 from app.services.auth_service import find_user_by_platform_id
+from app.services.broadcast_recipients_service import upsert_chat_recipient, upsert_user_recipient
 from app.services.kilbil_service import find_kilbil_answer
 from app.services.max_qa_simple import max_simple_rag_answer
+from app.platforms.max import admin_flows
 from app.ui.keyboards import max_main_menu_rows, qa_kb_rows
 
 logger = logging.getLogger(__name__)
@@ -36,6 +38,63 @@ logger = logging.getLogger(__name__)
 # Видимая обратная связь в MAX: индикатор набора часто не отображается в клиенте.
 MAX_QA_SEARCHING_TEXT = "🔍 Ищу в базе знаний…"
 MAX_KILBIL_SEARCHING_TEXT = "🔍 Ищу в базе Kilbil…"
+
+
+def _max_chat_id_for_sheets(chat_id: int | str) -> int | None:
+    """Числовой chat_id для Google Sheets; None если не приводится к int."""
+    if isinstance(chat_id, int):
+        return chat_id
+    s = str(chat_id).strip()
+    try:
+        return int(s)
+    except ValueError:
+        return None
+
+
+def _max_group_chat_type_from_raw(raw: Any) -> str:
+    """Тип чата для колонки chat_type (как в Telegram: group / supergroup / channel)."""
+    if not isinstance(raw, dict):
+        return "group"
+    msg = raw.get("message")
+    if not isinstance(msg, dict):
+        return "group"
+    rec = msg.get("recipient")
+    if not isinstance(rec, dict):
+        return "group"
+    t = str(rec.get("type") or rec.get("recipient_type") or "").lower()
+    if t == "channel":
+        return "channel"
+    if t in ("supergroup", "group", "chat", "dialog"):
+        return "supergroup" if t == "supergroup" else "group"
+    return "group"
+
+
+def _schedule_collect_max_group_chat(event: IncomingMessage | CallbackEvent) -> None:
+    """
+    Любое событие из группы MAX → upsert в recipients_chats (platform=max).
+    Аналог Telegram recipients_collector для групп.
+    """
+    if not event.chat.is_group or event.chat.platform != "max":
+        return
+    cid = _max_chat_id_for_sheets(event.chat.id)
+    if cid is None:
+        logger.debug("MAX collect chat: skip non-numeric chat_id=%r", event.chat.id)
+        return
+    import asyncio as _aio
+
+    title = event.chat.title or ""
+    username = event.chat.username
+    chat_type = _max_group_chat_type_from_raw(getattr(event, "raw", None))
+    _aio.create_task(
+        _aio.to_thread(
+            upsert_chat_recipient,
+            cid,
+            chat_type,
+            title,
+            username,
+            platform="max",
+        )
+    )
 
 
 def _normalize_slash_command(text: str) -> str:
@@ -57,9 +116,10 @@ class MaxRouteResult:
 
 
 class MaxActionRouter:
-    def __init__(self) -> None:
+    def __init__(self, max_client: Any = None) -> None:
         self._qa_sessions: set[int] = set()
         self._kilbil_sessions: set[int] = set()
+        self._max_client = max_client
 
     def _user_int(self, user_id: int | str) -> int:
         return _pending_auth_uid(user_id)
@@ -269,11 +329,23 @@ class MaxActionRouter:
         update_type = None
         if getattr(event, "raw", None) and isinstance(event.raw, dict):
             update_type = event.raw.get("update_type") or event.raw.get("type")
+        _schedule_collect_max_group_chat(event)
         authorized, role = self._auth_context(event.user.id)
 
         if isinstance(event, CallbackEvent):
             await self._safe_answer_callback(adapter, event.callback_id)
             data = (event.data or "").strip()
+            if await admin_flows.handle_admin_callback(adapter, self._max_client, event, self._user_int(event.user.id)):
+                result = MaxRouteResult(f"admin_cb:{data}", authorized, role, True)
+                logger.info(
+                    "MAX route trace update_type=%r action=%s authorized=%s role=%s result=%s",
+                    update_type,
+                    result.action,
+                    result.authorized,
+                    result.role or "-",
+                    "handled" if result.handled else "ignored",
+                )
+                return result
             if data == START_AUTH:
                 await handle_start_auth_callback(adapter, event)
                 result = MaxRouteResult("start_auth", authorized, role, True)
@@ -295,18 +367,7 @@ class MaxActionRouter:
             elif data == MAX_MENU_ADMIN:
                 ok = await self._require_admin(adapter, event)
                 if ok:
-                    await adapter.send_message(
-                        OutgoingMessage(
-                            chat_id=event.chat.id,
-                            platform="max",
-                            text=(
-                                "🛠 Админ-раздел в MAX пока в режиме навигации.\n"
-                                "Полные админ-сценарии доступны в Telegram через /admin."
-                            ),
-                            keyboard_rows=max_main_menu_rows(is_authorized=True, is_admin=True),
-                            is_group_chat=event.chat.is_group,
-                        )
-                    )
+                    await admin_flows.show_admin_menu(adapter, event)
                 result = MaxRouteResult("menu_admin", authorized, role, ok)
             else:
                 result = MaxRouteResult(f"callback:{data}", authorized, role, False)
@@ -331,6 +392,19 @@ class MaxActionRouter:
             self._kilbil_sessions.discard(uid)
             await handle_start(adapter, event)
             handled, action = True, "cmd_start"
+            if self._auth_context(event.user.id)[0]:
+                import asyncio as _aio
+
+                fn = event.user.full_name or event.user.name
+                _aio.create_task(
+                    _aio.to_thread(
+                        upsert_user_recipient,
+                        uid,
+                        event.user.username,
+                        fn,
+                        platform="max",
+                    )
+                )
         elif norm == "/help":
             await handle_help(adapter, event)
             handled, action = True, "cmd_help"
@@ -347,19 +421,12 @@ class MaxActionRouter:
         elif norm == "/admin":
             ok = await self._require_admin(adapter, event)
             if ok:
-                await adapter.send_message(
-                    OutgoingMessage(
-                        chat_id=event.chat.id,
-                        platform="max",
-                        text=(
-                            "🛠 Админ-раздел в MAX пока в режиме навигации.\n"
-                            "Полные админ-сценарии доступны в Telegram через /admin."
-                        ),
-                        keyboard_rows=max_main_menu_rows(is_authorized=True, is_admin=True),
-                        is_group_chat=event.chat.is_group,
-                    )
-                )
+                await admin_flows.show_admin_menu(adapter, event)
             handled, action = ok, "cmd_admin"
+        elif await admin_flows.handle_admin_message(adapter, self._max_client, event, uid):
+            handled, action = True, "admin_msg"
+        elif event.attachments and await admin_flows.handle_admin_doc_attachment(adapter, event, uid):
+            handled, action = True, "admin_doc"
         elif is_pending_auth("max", event.user.id):
             await handle_auth_code(adapter, event)
             handled, action = True, "auth_code"

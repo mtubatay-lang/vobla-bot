@@ -1,6 +1,10 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from app.core.callbacks import (
+    ADMIN_SCHEDULED,
+    BROADCAST_START,
+    DOC_GEN_START,
+    KB_ADD,
     MAX_MENU_ADMIN,
     MAX_MENU_HELP,
     MAX_MENU_KILBIL,
@@ -52,3 +56,14 @@ def max_main_menu_rows(*, is_authorized: bool, is_admin: bool) -> list[KeyboardR
         rows.append([KeyboardButton(text="🛠 Админ-раздел", callback_data=MAX_MENU_ADMIN)])
     rows.append([KeyboardButton(text="🔐 Авторизация", callback_data=MAX_MENU_LOGIN)])
     return rows
+
+
+def max_admin_menu_rows() -> list[KeyboardRow]:
+    """Меню раздела администратора в MAX (те же callback_data, что в Telegram)."""
+    return [
+        [KeyboardButton(text="📢 Запуск рассылки", callback_data=BROADCAST_START)],
+        [KeyboardButton(text="📅 Плановые рассылки", callback_data=ADMIN_SCHEDULED)],
+        [KeyboardButton(text="📚 Пополнение базы знаний", callback_data=KB_ADD)],
+        [KeyboardButton(text="📝 Создать документ", callback_data=DOC_GEN_START)],
+        [KeyboardButton(text="⬅️ В главное меню", callback_data="max:admin:home")],
+    ]

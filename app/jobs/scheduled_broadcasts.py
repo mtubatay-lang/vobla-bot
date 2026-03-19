@@ -1,8 +1,8 @@
 """Job: выполнение плановых рассылок (запускать по cron каждые 15–60 мин).
 
-Использует execute_broadcast(bot, ...), который внутри вызывает execute_broadcast_multi
-с Telegram-адаптером. Получатели берутся из Sheets (пока только platform=telegram).
-При появлении получателей MAX их можно будет включить в рассылку через get_broadcast_recipients_list.
+Использует execute_broadcast(bot, ...): внутри execute_broadcast_multi с Telegram-
+и (при ENABLE_MAX + MAX_BOT_TOKEN) MAX-адаптером. В листах recipients_* колонка
+platform (telegram | max) задаёт канал доставки.
 """
 
 import asyncio

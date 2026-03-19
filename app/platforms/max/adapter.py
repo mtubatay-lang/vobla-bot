@@ -324,6 +324,10 @@ class MaxAdapter:
             notification=text,
         )
 
+    async def upload_document_bytes(self, data: bytes, filename: str, mime_type: str) -> str:
+        """Загрузить файл в MAX, вернуть file_id для вложений."""
+        return await self._client.upload_file(data, filename, mime_type)
+
     async def send_typing(self, chat_id: int | str, *, is_group_chat: bool = False) -> None:
         """Показать индикатор набора (лучшее усилие; эндпоинт может отличаться)."""
         await self._client.send_typing(str(chat_id), is_group_chat=is_group_chat)

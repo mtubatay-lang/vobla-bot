@@ -21,6 +21,7 @@ from aiogram.types import (
     Message,
 )
 
+from app.services.admin_access import is_admin_for_platform
 from app.services.auth_service import find_user_by_telegram_id
 from app.services.broadcast_service import (
     create_broadcast_draft,
@@ -97,23 +98,12 @@ async def _require_admin(obj) -> bool:
             await reply_func("🔒 Доступно только администраторам. Нажмите /login")
         return False
     
-    user = find_user_by_telegram_id(tg_id)
-    
-    if not user:
-        logger.warning(f"[BROADCAST] User {tg_id} not found")
+    if not is_admin_for_platform("telegram", tg_id):
+        logger.warning(f"[BROADCAST] User {tg_id} is not admin or not found")
         if reply_func:
             await reply_func("🔒 Доступно только администраторам. Нажмите /login")
         return False
-    
-    role = getattr(user, "role", "")
-    logger.info(f"[BROADCAST] User {tg_id} role: {role!r}, is_admin: {_check_admin(user)}")
-    
-    if not _check_admin(user):
-        logger.warning(f"[BROADCAST] User {tg_id} is not admin (role: {role!r})")
-        if reply_func:
-            await reply_func("🔒 Доступно только администраторам. Нажмите /login")
-        return False
-    
+
     return True
 
 

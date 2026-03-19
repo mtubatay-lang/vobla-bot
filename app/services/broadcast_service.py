@@ -7,8 +7,6 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-logger = logging.getLogger(__name__)
-
 from aiogram.enums import ParseMode
 from aiogram.types import InputMediaPhoto, InputMediaVideo
 
@@ -17,6 +15,60 @@ from app.services.sheets_client import get_sheets_client
 from app.core.types import Recipient, Platform, OutgoingMessage
 
 logger = logging.getLogger(__name__)
+
+
+def parse_broadcast_media_for_platform(media_json: str, platform: Platform) -> List[Dict[str, Any]]:
+    """
+    Вложения для рассылки по платформе.
+    v1: JSON-массив — только Telegram file_id.
+    v2: {"version": 2, "telegram": [...], "max": [...]} — раздельные вложения.
+    """
+    if not (media_json or "").strip():
+        return []
+    try:
+        data = json.loads(media_json)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(data, list):
+        return data if platform == "telegram" else []
+    if isinstance(data, dict) and data.get("version") == 2:
+        key = "telegram" if platform == "telegram" else "max"
+        raw = data.get(key)
+        if not isinstance(raw, list):
+            return []
+        out: List[Dict[str, Any]] = []
+        for a in raw:
+            if not isinstance(a, dict):
+                continue
+            if platform == "max":
+                fid = a.get("id_or_url") or a.get("file_id")
+                if not fid:
+                    continue
+                typ = str(a.get("type", "file")).lower()
+                out.append({"type": typ, "id_or_url": str(fid), "file_id": str(fid)})
+            else:
+                out.append(a)
+        return out
+    return []
+
+
+def _recipient_id_for_log(chat_or_user_id: int | str) -> int:
+    if isinstance(chat_or_user_id, int):
+        return chat_or_user_id
+    try:
+        return int(str(chat_or_user_id).strip())
+    except ValueError:
+        return 0
+
+
+def _row_platform_value(row: List[str], headers: List[str]) -> Platform:
+    if "platform" not in headers:
+        return "telegram"
+    idx = headers.index("platform")
+    if len(row) <= idx:
+        return "telegram"
+    p = (row[idx] or "").strip().lower()
+    return "max" if p == "max" else "telegram"
 
 
 def _utc_now_iso() -> str:
@@ -224,110 +276,90 @@ def log_broadcast_recipient(
     ws.append_row(row, value_input_option="RAW")
 
 
-def read_active_recipients_users() -> List[int]:
-    """Читает активных получателей-пользователей из recipients_users."""
+def read_active_user_recipients() -> List[Recipient]:
+    """Активные строки recipients_users с учётом колонки platform (по умолчанию telegram)."""
     if not STATS_SHEET_ID:
         return []
-    
     try:
         ws = _get_ws(RECIPIENTS_USERS_TAB)
-        header_map = _get_headers(ws)
-        
-        user_id_col = header_map.get("user_id")
-        is_active_col = header_map.get("is_active")
-        
-        if not user_id_col:
-            return []
-        
         values = ws.get_all_values()
         if len(values) < 2:
             return []
-        
         headers = [h.strip() for h in values[0]]
-        user_id_idx = headers.index("user_id") if "user_id" in headers else -1
+        if "user_id" not in headers:
+            return []
+        user_id_idx = headers.index("user_id")
         is_active_idx = headers.index("is_active") if "is_active" in headers else -1
-        
-        result = []
+        out: List[Recipient] = []
         for row in values[1:]:
             if len(row) <= user_id_idx:
                 continue
-            
-            user_id_str = row[user_id_idx].strip()
-            if not user_id_str:
+            uid_str = row[user_id_idx].strip()
+            if not uid_str:
                 continue
-            
-            # Проверяем is_active
             is_active = ""
             if is_active_idx >= 0 and len(row) > is_active_idx:
                 is_active = row[is_active_idx].strip().lower()
-            
-            # Активен, если is_active пусто, "1", "true"
             if is_active and is_active not in ("1", "true"):
                 continue
-            
             try:
-                user_id = int(user_id_str)
-                result.append(user_id)
+                uid = int(uid_str)
             except ValueError:
                 continue
-        
-        return result
+            pl = _row_platform_value(row, headers)
+            out.append(Recipient(platform=pl, chat_or_user_id=uid, is_chat=False))
+        return out
     except Exception as e:
-        logger.warning("[BROADCAST_SERVICE] read_active_recipients_users: %s", e, exc_info=True)
+        logger.warning("[BROADCAST_SERVICE] read_active_user_recipients: %s", e, exc_info=True)
         return []
 
 
-def read_active_recipients_chats() -> List[int]:
-    """Читает активных получателей-чатов из recipients_chats."""
+def read_active_chat_recipients() -> List[Recipient]:
+    """Активные строки recipients_chats с учётом platform."""
     if not STATS_SHEET_ID:
         return []
-    
     try:
         ws = _get_ws(RECIPIENTS_CHATS_TAB)
-        header_map = _get_headers(ws)
-        
-        chat_id_col = header_map.get("chat_id")
-        is_active_col = header_map.get("is_active")
-        
-        if not chat_id_col:
-            return []
-        
         values = ws.get_all_values()
         if len(values) < 2:
             return []
-        
         headers = [h.strip() for h in values[0]]
-        chat_id_idx = headers.index("chat_id") if "chat_id" in headers else -1
+        if "chat_id" not in headers:
+            return []
+        chat_id_idx = headers.index("chat_id")
         is_active_idx = headers.index("is_active") if "is_active" in headers else -1
-        
-        result = []
+        out: List[Recipient] = []
         for row in values[1:]:
             if len(row) <= chat_id_idx:
                 continue
-            
-            chat_id_str = row[chat_id_idx].strip()
-            if not chat_id_str:
+            cid_str = row[chat_id_idx].strip()
+            if not cid_str:
                 continue
-            
-            # Проверяем is_active
             is_active = ""
             if is_active_idx >= 0 and len(row) > is_active_idx:
                 is_active = row[is_active_idx].strip().lower()
-            
-            # Активен, если is_active пусто, "1", "true"
             if is_active and is_active not in ("1", "true"):
                 continue
-            
             try:
-                chat_id = int(chat_id_str)
-                result.append(chat_id)
+                cid = int(cid_str)
             except ValueError:
                 continue
-        
-        return result
+            pl = _row_platform_value(row, headers)
+            out.append(Recipient(platform=pl, chat_or_user_id=cid, is_chat=True))
+        return out
     except Exception as e:
-        logger.warning("[BROADCAST_SERVICE] read_active_recipients_chats: %s", e, exc_info=True)
+        logger.warning("[BROADCAST_SERVICE] read_active_chat_recipients: %s", e, exc_info=True)
         return []
+
+
+def read_active_recipients_users() -> List[int]:
+    """Telegram user_id из recipients_users (для обратной совместимости)."""
+    return [r.chat_or_user_id for r in read_active_user_recipients() if r.platform == "telegram"]
+
+
+def read_active_recipients_chats() -> List[int]:
+    """Telegram chat_id из recipients_chats (для обратной совместимости)."""
+    return [r.chat_or_user_id for r in read_active_chat_recipients() if r.platform == "telegram"]
 
 
 def read_active_recipients_chats_with_names() -> List[Dict[str, Any]]:
@@ -361,6 +393,8 @@ def read_active_recipients_chats_with_names() -> List[Dict[str, Any]]:
         result = []
         for row in values[1:]:
             if len(row) <= chat_id_idx:
+                continue
+            if _row_platform_value(row, headers) != "telegram":
                 continue
             
             chat_id_str = row[chat_id_idx].strip()
@@ -435,6 +469,8 @@ def read_active_regions() -> List[str]:
         regions_set = set()
         for row in values[1:]:
             if len(row) <= chat_id_idx or len(row) <= region_idx:
+                continue
+            if _row_platform_value(row, headers) != "telegram":
                 continue
             
             chat_id_str = row[chat_id_idx].strip()
@@ -519,6 +555,8 @@ def read_chats_by_regions(regions: List[str]) -> List[int]:
             # Проверяем регион
             region = row[region_idx].strip()
             if region in regions_set:
+                if _row_platform_value(row, headers) != "telegram":
+                    continue
                 try:
                     chat_id = int(chat_id_str)
                     result.append(chat_id)
@@ -531,7 +569,58 @@ def read_chats_by_regions(regions: List[str]) -> List[int]:
         return []
 
 
-def mark_user_failed(user_id: int, error_text: str) -> None:
+def _find_user_recipient_row_num(ws, user_id: int, platform: Platform) -> Optional[int]:
+    """Номер строки recipients_users по user_id и platform (если есть колонка platform)."""
+    values = ws.get_all_values()
+    if len(values) < 2:
+        return None
+    headers = [h.strip() for h in values[0]]
+    if "user_id" not in headers:
+        return None
+    uid_i = headers.index("user_id")
+    plat_i = headers.index("platform") if "platform" in headers else -1
+    want = "max" if platform == "max" else "telegram"
+    for ri, row in enumerate(values[1:], start=2):
+        if len(row) <= uid_i:
+            continue
+        if str(row[uid_i]).strip() != str(user_id):
+            continue
+        if plat_i >= 0 and len(row) > plat_i:
+            rp = (row[plat_i] or "").strip().lower() or "telegram"
+            if rp != want:
+                continue
+        elif want == "max":
+            continue
+        return ri
+    return None
+
+
+def _find_chat_recipient_row_num(ws, chat_id: int, platform: Platform) -> Optional[int]:
+    values = ws.get_all_values()
+    if len(values) < 2:
+        return None
+    headers = [h.strip() for h in values[0]]
+    if "chat_id" not in headers:
+        return None
+    cid_i = headers.index("chat_id")
+    plat_i = headers.index("platform") if "platform" in headers else -1
+    want = "max" if platform == "max" else "telegram"
+    for ri, row in enumerate(values[1:], start=2):
+        if len(row) <= cid_i:
+            continue
+        if str(row[cid_i]).strip() != str(chat_id):
+            continue
+        if plat_i >= 0 and len(row) > plat_i:
+            rp = (row[plat_i] or "").strip().lower() or "telegram"
+            if rp != want:
+                continue
+        elif want == "max":
+            continue
+        return ri
+    return None
+
+
+def mark_user_failed(user_id: int, error_text: str, *, platform: Platform = "telegram") -> None:
     """Помечает пользователя как неактивного при ошибке отправки."""
     if not STATS_SHEET_ID:
         return
@@ -544,14 +633,18 @@ def mark_user_failed(user_id: int, error_text: str) -> None:
         if not user_id_col:
             return
         
-        try:
-            cell = ws.find(str(user_id), in_column=user_id_col)
-            if not cell:
+        row_num = _find_user_recipient_row_num(ws, user_id, platform)
+        if row_num is None:
+            if platform != "telegram":
                 return
-            row_num = cell.row
-        except Exception as e:
-            logger.warning("[BROADCAST_SERVICE] mark_user_failed: не удалось найти user_id в таблице: %s", e, exc_info=True)
-            return
+            try:
+                cell = ws.find(str(user_id), in_column=user_id_col)
+                if not cell:
+                    return
+                row_num = cell.row
+            except Exception as e:
+                logger.warning("[BROADCAST_SERVICE] mark_user_failed: не удалось найти user_id в таблице: %s", e, exc_info=True)
+                return
 
         updates = {}
 
@@ -574,7 +667,7 @@ def mark_user_failed(user_id: int, error_text: str) -> None:
         logger.warning("[BROADCAST_SERVICE] mark_user_failed: %s", e, exc_info=True)
 
 
-def mark_chat_failed(chat_id: int, error_text: str) -> None:
+def mark_chat_failed(chat_id: int, error_text: str, *, platform: Platform = "telegram") -> None:
     """Помечает чат как неактивный при ошибке отправки."""
     if not STATS_SHEET_ID:
         return
@@ -587,14 +680,18 @@ def mark_chat_failed(chat_id: int, error_text: str) -> None:
         if not chat_id_col:
             return
         
-        try:
-            cell = ws.find(str(chat_id), in_column=chat_id_col)
-            if not cell:
+        row_num = _find_chat_recipient_row_num(ws, chat_id, platform)
+        if row_num is None:
+            if platform != "telegram":
                 return
-            row_num = cell.row
-        except Exception as e:
-            logger.warning("[BROADCAST_SERVICE] mark_chat_failed: не удалось найти chat_id в таблице: %s", e, exc_info=True)
-            return
+            try:
+                cell = ws.find(str(chat_id), in_column=chat_id_col)
+                if not cell:
+                    return
+                row_num = cell.row
+            except Exception as e:
+                logger.warning("[BROADCAST_SERVICE] mark_chat_failed: не удалось найти chat_id в таблице: %s", e, exc_info=True)
+                return
 
         updates = {}
 
@@ -617,29 +714,6 @@ def mark_chat_failed(chat_id: int, error_text: str) -> None:
         logger.warning("[BROADCAST_SERVICE] mark_chat_failed: %s", e, exc_info=True)
 
 
-def get_broadcast_recipients(mode: str, mode_extra: Optional[Dict[str, Any]] = None) -> Tuple[List[int], List[int]]:
-    """
-    Возвращает (users, chats) для режима рассылки.
-    mode_extra: для selected_chats — {"chat_ids": [int, ...]}, для selected_regions — {"regions": [str, ...]}.
-    """
-    users: List[int] = []
-    chats: List[int] = []
-    if mode == "users":
-        users = read_active_recipients_users()
-    elif mode == "chats":
-        chats = read_active_recipients_chats()
-    elif mode == "users_chats":
-        users = read_active_recipients_users()
-        chats = read_active_recipients_chats()
-    elif mode == "selected_chats" and mode_extra:
-        chat_ids = mode_extra.get("chat_ids") or mode_extra.get("selected_chat_ids") or []
-        chats = [int(x) for x in chat_ids]
-    elif mode == "selected_regions" and mode_extra:
-        regions = mode_extra.get("regions") or mode_extra.get("selected_regions") or []
-        chats = read_chats_by_regions(regions)
-    return (users, chats)
-
-
 def get_broadcast_recipients_list(
     mode: str,
     mode_extra: Optional[Dict[str, Any]] = None,
@@ -647,19 +721,40 @@ def get_broadcast_recipients_list(
 ) -> List[Recipient]:
     """
     Возвращает список получателей рассылки с указанием платформы.
-    Если колонка platform в таблицах отсутствует — считаем всех telegram.
-    platform_filter: если задан, возвращать только получателей этой платформы.
+    Колонка platform в Sheets: telegram | max; без колонки — все строки считаются telegram.
     """
-    users, chats = get_broadcast_recipients(mode, mode_extra)
+    mode_extra = mode_extra or {}
     result: List[Recipient] = []
-    # Пока все получатели из Sheets — telegram
-    for uid in users:
-        result.append(Recipient(platform="telegram", chat_or_user_id=uid, is_chat=False))
-    for cid in chats:
-        result.append(Recipient(platform="telegram", chat_or_user_id=cid, is_chat=True))
+    if mode == "users":
+        result = list(read_active_user_recipients())
+    elif mode == "chats":
+        result = list(read_active_chat_recipients())
+    elif mode == "users_chats":
+        result = read_active_user_recipients() + read_active_chat_recipients()
+    elif mode == "selected_chats" and mode_extra:
+        chat_ids = mode_extra.get("chat_ids") or mode_extra.get("selected_chat_ids") or []
+        for x in chat_ids:
+            try:
+                result.append(Recipient(platform="telegram", chat_or_user_id=int(x), is_chat=True))
+            except (TypeError, ValueError):
+                continue
+    elif mode == "selected_regions" and mode_extra:
+        regions = mode_extra.get("regions") or mode_extra.get("selected_regions") or []
+        for cid in read_chats_by_regions(regions):
+            result.append(Recipient(platform="telegram", chat_or_user_id=cid, is_chat=True))
     if platform_filter:
         result = [r for r in result if r.platform == platform_filter]
     return result
+
+
+def get_broadcast_recipients(mode: str, mode_extra: Optional[Dict[str, Any]] = None) -> Tuple[List[int], List[int]]:
+    """
+    Возвращает (users, chats) для режима рассылки — только platform=telegram (legacy API).
+    """
+    lst = get_broadcast_recipients_list(mode, mode_extra, platform_filter="telegram")
+    users = [r.chat_or_user_id for r in lst if not r.is_chat]
+    chats = [r.chat_or_user_id for r in lst if r.is_chat]
+    return (users, chats)
 
 
 def mark_recipient_failed(
@@ -669,13 +764,11 @@ def mark_recipient_failed(
     is_chat: bool = False,
 ) -> None:
     """Помечает получателя как неактивного при ошибке отправки."""
-    if platform == "telegram":
-        rid = int(recipient_id) if isinstance(recipient_id, str) else recipient_id
-        if is_chat:
-            mark_chat_failed(rid, error_text)
-        else:
-            mark_user_failed(rid, error_text)
-    # Для MAX при появлении таблиц/колонки platform — обновить поиск по (platform, id)
+    rid = int(recipient_id) if isinstance(recipient_id, str) else recipient_id
+    if is_chat:
+        mark_chat_failed(rid, error_text, platform=platform)
+    else:
+        mark_user_failed(rid, error_text, platform=platform)
 
 
 async def send_media_to_recipient(
@@ -731,14 +824,22 @@ async def execute_broadcast(
 ) -> Tuple[str, int, int]:
     """
     Выполняет рассылку (обратная совместимость: принимает aiogram Bot).
-    Строит список получателей и вызывает execute_broadcast_multi с Telegram-адаптером.
-    Возвращает (broadcast_id, sent_ok, sent_fail).
+    Telegram + при ENABLE_MAX и MAX_BOT_TOKEN — также MAX-получатели из таблицы.
     """
+    from app.config import ENABLE_MAX, MAX_API_BASE_URL, MAX_AUTH_BEARER_PREFIX, MAX_BOT_TOKEN
+    from app.platforms.max import MaxAdapter, MaxApiClient
     from app.platforms.telegram import TelegramAdapter
 
     mode_extra = mode_extra or {}
     recipients = await asyncio.to_thread(get_broadcast_recipients_list, mode, mode_extra)
     adapters: Dict[Platform, Any] = {"telegram": TelegramAdapter(bot)}
+    if ENABLE_MAX and (MAX_BOT_TOKEN or "").strip():
+        mx_client = MaxApiClient(
+            token=MAX_BOT_TOKEN,
+            base_url=MAX_API_BASE_URL,
+            use_bearer_prefix=MAX_AUTH_BEARER_PREFIX,
+        )
+        adapters["max"] = MaxAdapter(mx_client)
     return await execute_broadcast_multi(
         adapters,
         recipients,
@@ -781,13 +882,6 @@ async def execute_broadcast_multi(
         chats_count=chats_count,
     )
 
-    attachments: List[Dict[str, Any]] = []
-    if media_json:
-        try:
-            attachments = json.loads(media_json)
-        except Exception as e:
-            logger.warning("[BROADCAST_SERVICE] execute_broadcast_multi media_json parse: %s", e)
-
     sent_ok = 0
     sent_fail = 0
     semaphore = asyncio.Semaphore(10)
@@ -801,34 +895,44 @@ async def execute_broadcast_multi(
                 log_broadcast_recipient,
                 broadcast_id,
                 "user" if not r.is_chat else "chat",
-                r.chat_or_user_id,
+                _recipient_id_for_log(r.chat_or_user_id),
                 "fail",
                 "no adapter",
             )
             sent_fail += 1
             return
+        atts = parse_broadcast_media_for_platform(media_json or "", r.platform)
         async with semaphore:
             try:
-                if text_final or attachments:
-                    if attachments:
-                        await adapter.send_media(
-                            r.chat_or_user_id,
-                            attachments,
-                            caption=text_final,
-                        )
+                if text_final or atts:
+                    if atts:
+                        if r.platform == "max":
+                            await adapter.send_media(
+                                r.chat_or_user_id,
+                                atts,
+                                caption=text_final,
+                                is_group_chat=r.is_chat,
+                            )
+                        else:
+                            await adapter.send_media(
+                                r.chat_or_user_id,
+                                atts,
+                                caption=text_final,
+                            )
                     else:
                         await adapter.send_message(
                             OutgoingMessage(
                                 chat_id=r.chat_or_user_id,
                                 platform=r.platform,
                                 text=text_final,
+                                is_group_chat=r.is_chat if r.platform == "max" else False,
                             )
                         )
                     await asyncio.to_thread(
                         log_broadcast_recipient,
                         broadcast_id,
                         "user" if not r.is_chat else "chat",
-                        r.chat_or_user_id,
+                        _recipient_id_for_log(r.chat_or_user_id),
                         "ok",
                     )
                     sent_ok += 1
@@ -837,7 +941,7 @@ async def execute_broadcast_multi(
                         log_broadcast_recipient,
                         broadcast_id,
                         "user" if not r.is_chat else "chat",
-                        r.chat_or_user_id,
+                        _recipient_id_for_log(r.chat_or_user_id),
                         "fail",
                         "empty message",
                     )

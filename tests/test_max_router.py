@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from app.core.types import CallbackEvent, IncomingMessage, InternalChat, InternalUser
@@ -142,3 +144,57 @@ async def test_kilbil_turn_sends_searching_then_answer(monkeypatch):
     assert len(adapter.sent_messages) == 2
     assert "Ищу в базе Kilbil" in adapter.sent_messages[0].text
     assert "KILBIL_ANS" in adapter.sent_messages[1].text
+
+
+@pytest.mark.asyncio
+async def test_max_group_message_schedules_chat_recipient_upsert(monkeypatch):
+    import app.platforms.max.router as max_router_mod
+
+    calls: list[dict] = []
+
+    def fake_upsert(chat_id, chat_type, title=None, username=None, *, platform="telegram"):
+        calls.append(
+            {
+                "chat_id": chat_id,
+                "chat_type": chat_type,
+                "title": title,
+                "username": username,
+                "platform": platform,
+            }
+        )
+
+    monkeypatch.setattr(max_router_mod, "upsert_chat_recipient", fake_upsert)
+    monkeypatch.setattr(max_router_mod, "find_user_by_platform_id", lambda platform, user_id: None)
+
+    msg = IncomingMessage(
+        user=InternalUser(id=100, platform="max", name="U"),
+        chat=InternalChat(id=-100500, platform="max", is_group=True, title="MAX Group"),
+        text="hello",
+        raw={
+            "update_type": "message_created",
+            "message": {"recipient": {"type": "chat"}},
+        },
+    )
+    router = MaxActionRouter()
+    adapter = DummyAdapter()
+    await router.route(adapter, msg)
+    await asyncio.sleep(0.2)
+    assert len(calls) == 1
+    assert calls[0]["platform"] == "max"
+    assert calls[0]["chat_id"] == -100500
+    assert calls[0]["title"] == "MAX Group"
+
+
+@pytest.mark.asyncio
+async def test_private_max_message_does_not_upsert_chat(monkeypatch):
+    import app.platforms.max.router as max_router_mod
+
+    calls: list = []
+    monkeypatch.setattr(max_router_mod, "upsert_chat_recipient", lambda *a, **k: calls.append(1))
+    monkeypatch.setattr(max_router_mod, "find_user_by_platform_id", lambda platform, user_id: None)
+
+    router = MaxActionRouter()
+    adapter = DummyAdapter()
+    await router.route(adapter, _mk_msg("hi"))
+    await asyncio.sleep(0.15)
+    assert calls == []

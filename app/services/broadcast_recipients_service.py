@@ -37,6 +37,49 @@ def _is_429(e: Exception) -> bool:
     return "429" in msg or "Quota exceeded" in msg
 
 
+def _find_user_row_by_platform(ws, user_id: int, platform: str) -> Optional[int]:
+    """Строка recipients_users: совпадение user_id и platform (нужна колонка platform)."""
+    values = ws.get_all_values()
+    if len(values) < 2:
+        return None
+    headers = [h.strip() for h in values[0]]
+    if "user_id" not in headers or "platform" not in headers:
+        return None
+    uid_i = headers.index("user_id")
+    plat_i = headers.index("platform")
+    want = platform.strip().lower()
+    for ri, row in enumerate(values[1:], start=2):
+        if len(row) <= uid_i:
+            continue
+        if str(row[uid_i]).strip() != str(user_id):
+            continue
+        rp = (row[plat_i] if len(row) > plat_i else "").strip().lower() or "telegram"
+        if rp == want:
+            return ri
+    return None
+
+
+def _find_chat_row_by_platform(ws, chat_id: int, platform: str) -> Optional[int]:
+    values = ws.get_all_values()
+    if len(values) < 2:
+        return None
+    headers = [h.strip() for h in values[0]]
+    if "chat_id" not in headers or "platform" not in headers:
+        return None
+    cid_i = headers.index("chat_id")
+    plat_i = headers.index("platform")
+    want = platform.strip().lower()
+    for ri, row in enumerate(values[1:], start=2):
+        if len(row) <= cid_i:
+            continue
+        if str(row[cid_i]).strip() != str(chat_id):
+            continue
+        rp = (row[plat_i] if len(row) > plat_i else "").strip().lower() or "telegram"
+        if rp == want:
+            return ri
+    return None
+
+
 def _find_row_by_value(ws, col: int, value: str) -> Optional[int]:
     """
     Ищет строку по точному совпадению в колонке.
@@ -51,14 +94,23 @@ def _find_row_by_value(ws, col: int, value: str) -> Optional[int]:
     return None
 
 
-def upsert_user_recipient(user_id: int, username: Optional[str] = None, full_name: Optional[str] = None) -> None:
+def upsert_user_recipient(
+    user_id: int,
+    username: Optional[str] = None,
+    full_name: Optional[str] = None,
+    *,
+    platform: str = "telegram",
+) -> None:
     """
     Добавляет или обновляет получателя-пользователя в таблице recipients_users.
-    user_id - ключ (уникальный идентификатор).
-    При 429 (Quota exceeded) повторяет запрос до 2 раз с задержкой 2 и 5 сек.
+    user_id — id в указанной платформе. Колонка platform: telegram | max (обязательна для MAX).
     """
     if not STATS_SHEET_ID:
         return  # Тихий выход, если не настроено
+
+    plat_norm = (platform or "telegram").strip().lower()
+    if plat_norm not in ("telegram", "max"):
+        plat_norm = "telegram"
 
     for attempt in range(3):
         try:
@@ -70,8 +122,17 @@ def upsert_user_recipient(user_id: int, username: Optional[str] = None, full_nam
             if not user_id_col:
                 return  # Нет колонки user_id - пропускаем
 
-            # Ищем существующую строку
-            row_num = _find_row_by_value(ws, user_id_col, str(user_id))
+            if plat_norm == "max" and "platform" not in header_map:
+                logger.warning(
+                    "[BROADCAST_RECIPIENTS] Добавьте колонку platform в recipients_users для MAX (user_id=%s)",
+                    user_id,
+                )
+                return
+
+            if "platform" in header_map:
+                row_num = _find_user_row_by_platform(ws, user_id, plat_norm)
+            else:
+                row_num = _find_row_by_value(ws, user_id_col, str(user_id))
             now_iso = _utc_now_iso()
 
             if row_num:
@@ -91,6 +152,8 @@ def upsert_user_recipient(user_id: int, username: Optional[str] = None, full_nam
                     updates["username"] = username or ""
                 if "full_name" in header_map:
                     updates["full_name"] = full_name or ""
+                if "platform" in header_map:
+                    updates["platform"] = plat_norm
 
                 # Если created_at пустой — заполняем (один раз)
                 if "created_at" in header_map:
@@ -124,6 +187,8 @@ def upsert_user_recipient(user_id: int, username: Optional[str] = None, full_nam
                         row.append("1")
                     elif header_clean == "last_error":
                         row.append("")
+                    elif header_clean == "platform":
+                        row.append(plat_norm)
                     else:
                         row.append("")
 
@@ -139,7 +204,14 @@ def upsert_user_recipient(user_id: int, username: Optional[str] = None, full_nam
             return
 
 
-def upsert_chat_recipient(chat_id: int, chat_type: str, title: Optional[str] = None, username: Optional[str] = None) -> None:
+def upsert_chat_recipient(
+    chat_id: int,
+    chat_type: str,
+    title: Optional[str] = None,
+    username: Optional[str] = None,
+    *,
+    platform: str = "telegram",
+) -> None:
     """
     Добавляет или обновляет получателя-чат в таблице recipients_chats.
     chat_id - ключ (уникальный идентификатор).
@@ -147,6 +219,10 @@ def upsert_chat_recipient(chat_id: int, chat_type: str, title: Optional[str] = N
     """
     if not STATS_SHEET_ID:
         return  # Тихий выход, если не настроено
+
+    plat_norm = (platform or "telegram").strip().lower()
+    if plat_norm not in ("telegram", "max"):
+        plat_norm = "telegram"
 
     for attempt in range(3):
         try:
@@ -158,8 +234,17 @@ def upsert_chat_recipient(chat_id: int, chat_type: str, title: Optional[str] = N
             if not chat_id_col:
                 return  # Нет колонки chat_id - пропускаем
 
-            # Ищем существующую строку
-            row_num = _find_row_by_value(ws, chat_id_col, str(chat_id))
+            if plat_norm == "max" and "platform" not in header_map:
+                logger.warning(
+                    "[BROADCAST_RECIPIENTS] Добавьте колонку platform в recipients_chats для MAX (chat_id=%s)",
+                    chat_id,
+                )
+                return
+
+            if "platform" in header_map:
+                row_num = _find_chat_row_by_platform(ws, chat_id, plat_norm)
+            else:
+                row_num = _find_row_by_value(ws, chat_id_col, str(chat_id))
             now_iso = _utc_now_iso()
 
             if row_num:
@@ -181,6 +266,8 @@ def upsert_chat_recipient(chat_id: int, chat_type: str, title: Optional[str] = N
                     updates["username"] = username or ""
                 if "chat_type" in header_map:
                     updates["chat_type"] = chat_type
+                if "platform" in header_map:
+                    updates["platform"] = plat_norm
 
                 # Если created_at пустой — заполняем (один раз)
                 if "created_at" in header_map:
@@ -216,6 +303,8 @@ def upsert_chat_recipient(chat_id: int, chat_type: str, title: Optional[str] = N
                         row.append("1")
                     elif header_clean == "last_error":
                         row.append("")
+                    elif header_clean == "platform":
+                        row.append(plat_norm)
                     else:
                         row.append("")
 

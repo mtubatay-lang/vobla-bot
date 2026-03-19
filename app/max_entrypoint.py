@@ -50,7 +50,7 @@ def _create_app():
         use_bearer_prefix=MAX_AUTH_BEARER_PREFIX,
     )
     adapter = MaxAdapter(client)
-    action_router = MaxActionRouter()
+    action_router = MaxActionRouter(max_client=client)
 
     @app.post(MAX_WEBHOOK_PATH)
     async def webhook(request: Request):

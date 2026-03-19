@@ -12,18 +12,9 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import Message, CallbackQuery
 
 from app.services.auth_service import find_user_by_telegram_id
-from app.services.qdrant_service import get_qdrant_service
-from app.services.document_processor import extract_text, extract_text_with_structure
-from app.services.chunking_service import (
-    structure_aware_chunk_text,
-    semantic_chunk_text,
-    extract_metadata_from_text,
-)
-from app.services.context_enrichment import enrich_chunks_batch
-from app.services.openai_client import create_embedding
 from app.services.metrics_service import alog_event
 from app.services.faq_migration import migrate_faq_to_qdrant
-from app.services.document_preparation import prepare_for_rag
+from app.services.kb_upload_service import process_kb_document_pipeline
 from app.handlers.broadcast import _check_admin, _require_admin
 
 logger = logging.getLogger(__name__)
@@ -345,186 +336,24 @@ async def process_document_async(
 ):
     """Асинхронная обработка документа: предподготовка (если применимо), извлечение текста, чанкинг, обогащение, загрузка в Qdrant."""
     try:
-        is_csv = filename.lower().endswith(".csv")
 
-        # 0. Предподготовка для RAG (CSV → FAQ MD, TXT/PDF/DOCX/MD → регламент MD при распознавании)
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=status_msg_id,
-            text="⏳ Предподготавливаю документ для RAG...",
-        )
-        try:
-            prepared = await asyncio.to_thread(prepare_for_rag, file_content, filename)
-        except Exception as e:
-            logger.exception(f"[KB_ADMIN] Ошибка предподготовки: {e}")
-            prepared = None
-        if prepared is not None:
-            file_content, filename = prepared[0], prepared[1]
-        elif is_csv:
+        async def notify(html: str) -> None:
             await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=status_msg_id,
-                text="❌ CSV не распознан. Нужны колонки: «Вопросы из Телеграм», «Ответ в Телеграм» или «Ответы Финал», «Направление (бухгалтерия, маркетинг, технические вопросы)».",
+                text=html,
+                parse_mode="HTML",
             )
-            await state.clear()
-            return
 
-        # Обновляем статус
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=status_msg_id,
-            text="⏳ Извлекаю текст из документа...",
+        ok = await process_kb_document_pipeline(
+            file_content,
+            filename,
+            document_title,
+            user_id,
+            notify,
         )
-
-        # 1. Извлечение текста и структуры
-        try:
-            extracted = extract_text_with_structure(file_content, filename)
-            text = extracted.get("text", "")
-            structure = extracted.get("structure", [])
-            if not text or not text.strip():
-                await bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=status_msg_id,
-                    text="❌ Не удалось извлечь текст из документа",
-                )
-                await state.clear()
-                return
-        except Exception as e:
-            logger.exception(f"[KB_ADMIN] Ошибка извлечения текста: {e}")
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=status_msg_id,
-                text=f"❌ Ошибка извлечения текста: {str(e)}",
-            )
+        if ok:
             await state.clear()
-            return
-
-        # 2. Разбивка на чанки (structure-aware или семантически)
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=status_msg_id,
-            text="⏳ Разбиваю документ на семантические чанки...",
-        )
-
-        chunks = structure_aware_chunk_text(
-            text, structure=structure, document_title=document_title
-        )
-        if not chunks:
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=status_msg_id,
-                text="❌ Не удалось разбить документ на чанки",
-            )
-            await state.clear()
-            return
-        
-        # 3. Обогащение контекстом
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=status_msg_id,
-            text=f"⏳ Обогащаю {len(chunks)} чанков контекстом...",
-        )
-        
-        try:
-            enriched_chunks = await enrich_chunks_batch(chunks, document_title)
-        except Exception as e:
-            logger.exception(f"[KB_ADMIN] Ошибка обогащения: {e}")
-            # Продолжаем с оригинальными чанками
-            enriched_chunks = chunks
-        
-        # 4. Создание эмбеддингов
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=status_msg_id,
-            text=f"⏳ Создаю эмбеддинги для {len(enriched_chunks)} чанков...",
-        )
-        
-        embeddings = []
-        for chunk in enriched_chunks:
-            try:
-                embedding = await asyncio.to_thread(
-                    create_embedding,
-                    chunk.get("text", ""),
-                )
-                embeddings.append(embedding)
-            except Exception as e:
-                logger.exception(f"[KB_ADMIN] Ошибка создания эмбеддинга: {e}")
-                # Создаем нулевой эмбеддинг как fallback
-                embeddings.append([0.0] * 1536)
-        
-        # 5. Извлечение метаданных из текста
-        extracted_metadata = extract_metadata_from_text(text, source="manual_upload")
-        
-        # 6. Подготовка метаданных с расширенными полями
-        timestamp = datetime.now().isoformat()
-        chunks_with_metadata = []
-        for chunk in enriched_chunks:
-            chunk_meta = chunk.get("metadata") or {}
-            meta = {
-                "source": "manual_upload",
-                "document_type": extracted_metadata.get("document_type", "reference"),
-                "category": extracted_metadata.get("category", "общее"),
-                "tags": extracted_metadata.get("tags", []),
-                "keywords": extracted_metadata.get("keywords", []),
-                "document_title": document_title,
-                "filename": filename,
-                "chunk_index": chunk.get("chunk_index", 0),
-                "total_chunks": chunk.get("total_chunks", len(enriched_chunks)),
-                "uploaded_by": user_id,
-                "uploaded_at": timestamp,
-            }
-            for key in ("section_path", "section_id", "section_title", "chunk_id"):
-                if chunk_meta.get(key) is not None:
-                    meta[key] = chunk_meta[key]
-            chunks_with_metadata.append({"text": chunk.get("text", ""), "metadata": meta})
-        
-        # 7. Загрузка в Qdrant
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=status_msg_id,
-            text="⏳ Загружаю в Qdrant...",
-        )
-        
-        try:
-            qdrant_service = get_qdrant_service()
-            qdrant_service.add_documents(chunks_with_metadata, embeddings)
-        except Exception as e:
-            logger.exception(f"[KB_ADMIN] Ошибка загрузки в Qdrant: {e}")
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=status_msg_id,
-                text=f"❌ Ошибка загрузки в Qdrant: {str(e)}",
-            )
-            await state.clear()
-            return
-        
-        # 7. Финальное сообщение
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=status_msg_id,
-            text=(
-                f"✅ <b>Документ успешно добавлен в базу знаний</b>\n\n"
-                f"📄 Название: {document_title}\n"
-                f"📊 Создано чанков: {len(enriched_chunks)}\n"
-                f"📁 Файл: {filename}"
-            ),
-            parse_mode="HTML",
-        )
-        
-        # Логируем событие
-        await alog_event(
-            user_id=user_id,
-            username=None,
-            event="kb_document_uploaded",
-            meta={
-                "document_title": document_title,
-                "filename": filename,
-                "chunks_count": len(enriched_chunks),
-            },
-        )
-        
-        await state.clear()
-        
     except Exception as e:
         logger.exception(f"[KB_ADMIN] Неожиданная ошибка при обработке документа: {e}")
         try:
@@ -533,7 +362,7 @@ async def process_document_async(
                 message_id=status_msg_id,
                 text=f"❌ Произошла ошибка при обработке документа: {str(e)}",
             )
-        except:
+        except Exception:
             pass
 
 
