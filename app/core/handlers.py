@@ -25,7 +25,7 @@ from app.services.auth_service import (
     bind_platform_id,
 )
 from app.services.metrics_service import log_event
-from app.ui.keyboards import main_menu_rows
+from app.ui.keyboards import main_menu_rows, max_main_menu_rows
 
 # Глобальное состояние ожидания кода (ключ = (platform, user_id_int))
 _pending_auth: Dict[tuple[str, int], bool] = {}
@@ -45,14 +45,34 @@ def _pending_auth_uid(user_id: int | str) -> int:
         raise ValueError(f"pending_auth: ожидался числовой user_id, получено {user_id!r}") from None
 
 
-def _commands_menu_text() -> str:
+def _commands_menu_text(platform: Platform, *, is_admin: bool) -> str:
     """Текст с меню команд после авторизации."""
+    if platform == "max":
+        lines = [
+            "📋 <b>Доступные команды:</b>",
+            "• /help — подсказка",
+            "• /ask — задать вопрос",
+            "• /kilbil — вопросы по kilbil",
+            "• /login — повторная авторизация",
+        ]
+        if is_admin:
+            lines.append("• /admin — админ-раздел")
+        lines.append("")
+        lines.append("Или используйте кнопки меню ниже 👇")
+        return "\n".join(lines)
+
     return (
         "📋 <b>Доступные команды:</b>\n"
         "• /help — подсказка по всем командам бота\n"
         "• /ask — задать вопрос (режим навыка)\n\n"
         "Или просто нажмите кнопку «❓ Задать вопрос» ниже 👇"
     )
+
+
+def _menu_rows_for(platform: Platform, *, is_authorized: bool, is_admin: bool):
+    if platform == "max":
+        return max_main_menu_rows(is_authorized=is_authorized, is_admin=is_admin)
+    return main_menu_rows()
 
 
 def auth_keyboard_rows() -> list[KeyboardRow]:
@@ -68,6 +88,7 @@ async def handle_start(adapter: Any, incoming: IncomingMessage) -> None:
 
     user = find_user_by_platform_id(platform, user_id)
     if user:
+        role = (getattr(user, "role", "") or "").strip().lower()
         log_event(
             user_id=user_id,
             username=incoming.user.username,
@@ -79,8 +100,8 @@ async def handle_start(adapter: Any, incoming: IncomingMessage) -> None:
             platform=platform,
             text=f"👋 Привет, {user.name}!\n"
             f"Вы авторизованы как <b>{user.role}</b>.\n\n"
-            + _commands_menu_text(),
-            keyboard_rows=main_menu_rows(),
+            + _commands_menu_text(platform, is_admin=(role == "admin")),
+            keyboard_rows=_menu_rows_for(platform, is_authorized=True, is_admin=(role == "admin")),
             is_group_chat=incoming.chat.is_group,
         )
         await adapter.send_message(msg)
@@ -101,7 +122,7 @@ async def handle_start(adapter: Any, incoming: IncomingMessage) -> None:
         chat_id=chat_id,
         platform=platform,
         text=text,
-        keyboard_rows=auth_keyboard_rows(),
+        keyboard_rows=_menu_rows_for(platform, is_authorized=False, is_admin=False),
         is_group_chat=incoming.chat.is_group,
     )
     await adapter.send_message(msg)
@@ -226,8 +247,12 @@ async def handle_auth_code(
         platform=platform,
         text=f"✅ Добро пожаловать, {user.name}!\n"
         f"Вы авторизованы как <b>{user.role}</b>.\n\n"
-        + _commands_menu_text(),
-        keyboard_rows=main_menu_rows(),
+        + _commands_menu_text(platform, is_admin=((getattr(user, "role", "") or "").strip().lower() == "admin")),
+        keyboard_rows=_menu_rows_for(
+            platform,
+            is_authorized=True,
+            is_admin=((getattr(user, "role", "") or "").strip().lower() == "admin"),
+        ),
         is_group_chat=incoming.chat.is_group,
     ))
 
@@ -264,11 +289,12 @@ async def handle_help(adapter: Any, incoming: IncomingMessage) -> None:
 
     user = find_user_by_platform_id(platform, user_id)
     if user:
+        role = (getattr(user, "role", "") or "").strip().lower()
         msg = OutgoingMessage(
             chat_id=chat_id,
             platform=platform,
             text=_help_text_authorized(),
-            keyboard_rows=main_menu_rows(),
+            keyboard_rows=_menu_rows_for(platform, is_authorized=True, is_admin=(role == "admin")),
             is_group_chat=incoming.chat.is_group,
         )
         await adapter.send_message(msg)
@@ -277,5 +303,6 @@ async def handle_help(adapter: Any, incoming: IncomingMessage) -> None:
             chat_id=chat_id,
             platform=platform,
             text=_help_text_unauthorized(),
+            keyboard_rows=_menu_rows_for(platform, is_authorized=False, is_admin=False),
             is_group_chat=incoming.chat.is_group,
         ))
