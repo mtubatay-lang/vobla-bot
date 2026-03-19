@@ -1,12 +1,13 @@
 """
 HTTP-клиент к platform-api.max.ru для бота MAX.
-Базовый URL и эндпоинты могут потребовать уточнения по официальной документации MAX.
+Спецификация: https://dev.max.ru/docs-api
 """
 
 from __future__ import annotations
 
 import logging
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlencode
 
 import aiohttp
 
@@ -15,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 class MaxApiClientError(Exception):
     """Ошибка вызова MAX API."""
+
     def __init__(self, message: str, status: Optional[int] = None, body: Optional[str] = None):
         self.status = status
         self.body = body
@@ -29,14 +31,26 @@ class MaxApiClient:
         token: str,
         base_url: str = "https://platform-api.max.ru",
         timeout: float = 30.0,
+        *,
+        use_bearer_prefix: bool = True,
     ) -> None:
-        self._token = token
+        self._token = token.strip()
         self._base_url = base_url.rstrip("/")
         self._timeout = aiohttp.ClientTimeout(total=timeout)
+        self._use_bearer_prefix = use_bearer_prefix
+
+    def _authorization_value(self) -> str:
+        """Значение заголовка Authorization (см. https://dev.max.ru/docs-api)."""
+        auth = self._token
+        if auth.lower().startswith("bearer "):
+            return auth
+        if self._use_bearer_prefix:
+            return f"Bearer {auth}"
+        return auth
 
     def _headers(self) -> Dict[str, str]:
         return {
-            "Authorization": f"Bearer {self._token}",
+            "Authorization": self._authorization_value(),
             "Content-Type": "application/json",
         }
 
@@ -46,8 +60,13 @@ class MaxApiClient:
         path: str,
         json: Optional[Dict[str, Any]] = None,
         data: Any = None,
+        params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         url = f"{self._base_url}{path}"
+        if params:
+            q = {k: v for k, v in params.items() if v is not None}
+            if q:
+                url = f"{url}?{urlencode(q)}"
         async with aiohttp.ClientSession(timeout=self._timeout) as session:
             async with session.request(
                 method,
@@ -69,75 +88,92 @@ class MaxApiClient:
                     )
                 return parsed if isinstance(parsed, dict) else {"result": parsed}
 
+    def message_id_from_response(self, result: Dict[str, Any]) -> Optional[str]:
+        msg = result.get("message")
+        if isinstance(msg, dict):
+            mid = msg.get("id") or msg.get("message_id")
+            if mid is not None:
+                return str(mid)
+        mid = result.get("message_id") or result.get("id")
+        return str(mid) if mid is not None else None
+
     async def send_message(
         self,
         chat_id: str | int,
         text: str,
-        parse_mode: Optional[str] = None,
-        reply_markup: Optional[Dict[str, Any]] = None,
+        *,
+        is_group_chat: bool = False,
+        text_format: Optional[str] = None,
+        attachments: Optional[List[Dict[str, Any]]] = None,
         reply_to_message_id: Optional[str | int] = None,
     ) -> Dict[str, Any]:
-        """Отправить текстовое сообщение.
-        Эндпоинт и формат тела зависят от документации MAX.
         """
-        body: Dict[str, Any] = {
-            "chat_id": str(chat_id),
-            "text": text,
-        }
-        if parse_mode:
-            body["parse_mode"] = parse_mode
-        if reply_markup:
-            body["reply_markup"] = reply_markup
-        if reply_to_message_id is not None:
-            body["reply_to_message_id"] = str(reply_to_message_id)
-        return await self._request("POST", "/v1/messages/send", json=body)
+        POST /messages
+        Личка: query user_id; группа: query chat_id.
+        """
+        params: Dict[str, Any] = {}
+        if is_group_chat:
+            params["chat_id"] = str(chat_id)
+        else:
+            params["user_id"] = str(chat_id)
+
+        body: Dict[str, Any] = {"text": text}
+        if text_format:
+            body["format"] = text_format
+        if attachments:
+            body["attachments"] = attachments
+
+        return await self._request("POST", "/messages", json=body, params=params)
 
     async def edit_message(
         self,
-        chat_id: str | int,
         message_id: str | int,
         text: str,
-        reply_markup: Optional[Dict[str, Any]] = None,
-        parse_mode: Optional[str] = None,
+        *,
+        text_format: Optional[str] = None,
+        attachments: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
-        """Редактировать сообщение."""
-        body: Dict[str, Any] = {
-            "chat_id": str(chat_id),
-            "message_id": str(message_id),
-            "text": text,
-        }
-        if reply_markup is not None:
-            body["reply_markup"] = reply_markup
-        if parse_mode:
-            body["parse_mode"] = parse_mode
-        return await self._request("POST", "/v1/messages/edit", json=body)
+        """PUT /messages?message_id=..."""
+        body: Dict[str, Any] = {"text": text}
+        if text_format:
+            body["format"] = text_format
+        if attachments is not None:
+            body["attachments"] = attachments
+        return await self._request(
+            "PUT",
+            "/messages",
+            json=body,
+            params={"message_id": str(message_id)},
+        )
 
     async def answer_callback(
         self,
         callback_id: str,
-        text: Optional[str] = None,
+        *,
+        notification: Optional[str] = None,
     ) -> None:
-        """Ответить на callback (убрать индикатор загрузки)."""
-        body: Dict[str, Any] = {"callback_id": callback_id}
-        if text:
-            body["text"] = text
-        await self._request("POST", "/v1/callbacks/answer", json=body)
+        """POST /answers?callback_id=..."""
+        params = {"callback_id": callback_id}
+        body: Optional[Dict[str, Any]] = None
+        if notification:
+            body = {"notification": notification}
+        await self._request("POST", "/answers", json=body, params=params)
 
-    async def send_typing(self, chat_id: str | int) -> None:
-        """Показать индикатор набора (если API поддерживает)."""
+    async def send_typing(self, chat_id: str | int, *, is_group_chat: bool = False) -> None:
+        """Индикатор набора (если метод есть в API)."""
         try:
-            await self._request("POST", "/v1/chats/typing", json={"chat_id": str(chat_id)})
+            params: Dict[str, Any] = (
+                {"chat_id": str(chat_id)} if is_group_chat else {"user_id": str(chat_id)}
+            )
+            await self._request("POST", "/chats/typing", params=params)
         except MaxApiClientError as e:
             if e.status != 404:
                 logger.warning("MAX send_typing failed: %s", e)
 
     async def upload_file(self, file_bytes: bytes, filename: str, mime_type: str) -> str:
-        """Загрузить файл и получить id/url для вложения.
-        Возвращает идентификатор вложения для использования в send_media.
-        """
-        # Многие API принимают multipart/form-data для загрузки
-        url = f"{self._base_url}/v1/upload"
-        headers = {"Authorization": f"Bearer {self._token}"}
+        """POST /upload — multipart."""
+        url = f"{self._base_url}/upload"
+        headers = {"Authorization": self._authorization_value()}
         form = aiohttp.FormData()
         form.add_field("file", file_bytes, filename=filename, content_type=mime_type)
         async with aiohttp.ClientSession(timeout=self._timeout) as session:
@@ -153,13 +189,10 @@ class MaxApiClient:
                 return str(file_id)
 
     async def get_updates(self, offset: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
-        """Long polling: получить обновления (если API поддерживает).
-        Возвращает список update-объектов.
-        """
+        """GET /updates — long polling (dev)."""
         params: Dict[str, Any] = {"limit": limit}
         if offset:
             params["offset"] = offset
-        # Предполагаем GET /v1/updates или /v1/subscriptions/poll
-        result = await self._request("GET", "/v1/updates")
+        result = await self._request("GET", "/updates", params=params)
         updates = result.get("updates") or result.get("result") or []
         return updates if isinstance(updates, list) else []

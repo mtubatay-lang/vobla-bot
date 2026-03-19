@@ -64,6 +64,7 @@ async def handle_start(adapter: Any, incoming: IncomingMessage) -> None:
             f"Вы авторизованы как <b>{user.role}</b>.\n\n"
             + _commands_menu_text(),
             keyboard_rows=main_menu_rows(),
+            is_group_chat=incoming.chat.is_group,
         )
         await adapter.send_message(msg)
         return
@@ -84,6 +85,7 @@ async def handle_start(adapter: Any, incoming: IncomingMessage) -> None:
         platform=platform,
         text=text,
         keyboard_rows=auth_keyboard_rows(),
+        is_group_chat=incoming.chat.is_group,
     )
     await adapter.send_message(msg)
 
@@ -110,15 +112,11 @@ async def handle_start_auth_callback(adapter: Any, event: CallbackEvent) -> None
             "🔐 Для входа в систему введите код доступа, выданный менеджером.\n"
             "Код можно использовать только один раз."
         ),
+        is_group_chat=event.chat.is_group,
     )
     await adapter.send_message(msg)
-    callback_id = None
-    if hasattr(event.raw, "id"):
-        callback_id = event.raw.id
-    elif isinstance(event.raw, dict):
-        callback_id = event.raw.get("callback_id") or event.raw.get("id")
-    if callback_id is not None:
-        await adapter.answer_callback(callback_id)
+    if event.callback_id is not None:
+        await adapter.answer_callback(event.callback_id)
 
 
 def is_pending_auth(platform: Platform, user_id: int | str) -> bool:
@@ -141,7 +139,7 @@ async def handle_auth_code(
     if not _pending_auth.get(key):
         return
 
-    await adapter.send_typing(chat_id)
+    await adapter.send_typing(chat_id, is_group_chat=incoming.chat.is_group)
     await asyncio.sleep(1.2)
 
     log_event(
@@ -163,6 +161,7 @@ async def handle_auth_code(
             chat_id=chat_id,
             platform=platform,
             text="❌ Код не найден. Проверьте правильность и попробуйте снова.",
+            is_group_chat=incoming.chat.is_group,
         ))
         return
 
@@ -177,6 +176,7 @@ async def handle_auth_code(
             chat_id=chat_id,
             platform=platform,
             text="⛔ Ваш код не активирован. Обратитесь к менеджеру.",
+            is_group_chat=incoming.chat.is_group,
         ))
         return
 
@@ -196,6 +196,7 @@ async def handle_auth_code(
         f"Вы авторизованы как <b>{user.role}</b>.\n\n"
         + _commands_menu_text(),
         keyboard_rows=main_menu_rows(),
+        is_group_chat=incoming.chat.is_group,
     ))
 
 
@@ -236,6 +237,7 @@ async def handle_help(adapter: Any, incoming: IncomingMessage) -> None:
             platform=platform,
             text=_help_text_authorized(),
             keyboard_rows=main_menu_rows(),
+            is_group_chat=incoming.chat.is_group,
         )
         await adapter.send_message(msg)
     else:
@@ -243,4 +245,5 @@ async def handle_help(adapter: Any, incoming: IncomingMessage) -> None:
             chat_id=chat_id,
             platform=platform,
             text=_help_text_unauthorized(),
+            is_group_chat=incoming.chat.is_group,
         ))

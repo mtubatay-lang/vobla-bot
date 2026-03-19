@@ -89,6 +89,7 @@ def from_telegram_callback(callback: CallbackQuery) -> CallbackEvent:
         data=callback.data or "",
         original_message_id=callback.message.message_id if callback.message else None,
         raw=callback,
+        callback_id=str(callback.id) if callback.id is not None else None,
     )
 
 
@@ -169,7 +170,7 @@ class TelegramAdapter:
             text=text,
         )
 
-    async def send_typing(self, chat_id: int | str) -> None:
+    async def send_typing(self, chat_id: int | str, **kwargs: Any) -> None:
         """Показать индикатор набора текста."""
         await self._bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 

@@ -1,9 +1,11 @@
 """
 MAX-адаптер: преобразование внутренних типов ↔ MAX API, реализация MessengerAdapter.
+Спецификация webhook Update: https://dev.max.ru/docs-api/objects/Update
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional
 
 from app.core.types import (
@@ -19,103 +21,254 @@ from app.core.types import (
 
 from app.platforms.max.client import MaxApiClient
 
+logger = logging.getLogger(__name__)
 
-def parse_max_update(update: Dict[str, Any]) -> Optional[IncomingMessage | CallbackEvent]:
-    """
-    Разобрать входящий Update от MAX в IncomingMessage или CallbackEvent.
-    Формат update зависит от документации MAX (message_new, message_callback и т.д.).
-    """
-    if not update:
+
+def _user_from_max(obj: Optional[Dict[str, Any]]) -> Optional[InternalUser]:
+    if not obj or not isinstance(obj, dict):
         return None
-
-    # Типичные поля: type, message, callback_query, chat, from/user
-    update_type = update.get("type") or update.get("event_type")
-    if not update_type:
+    uid = obj.get("user_id")
+    if uid is None:
+        uid = obj.get("id")
+    if uid is None:
         return None
-
-    # Извлекаем пользователя и чат из update
-    raw_user = update.get("user") or update.get("from") or update.get("message", {}).get("from") or {}
-    raw_chat = update.get("chat") or update.get("message", {}).get("chat") or {}
-
-    user_id = raw_user.get("id") or raw_user.get("user_id")
-    if user_id is None:
-        return None
-
-    user = InternalUser(
-        id=user_id,
+    return InternalUser(
+        id=uid,
         platform="max",
-        username=raw_user.get("username"),
-        name=raw_user.get("first_name") or raw_user.get("name"),
-        full_name=raw_user.get("full_name") or raw_user.get("name"),
+        username=obj.get("username"),
+        name=obj.get("name") or obj.get("first_name"),
+        full_name=obj.get("full_name") or obj.get("name"),
     )
-    chat_id = raw_chat.get("id") or raw_chat.get("chat_id") or update.get("chat_id")
-    if chat_id is None:
-        chat_id = user_id  # личка
+
+
+def _parse_recipient_peer(
+    recipient: Optional[Dict[str, Any]],
+    sender: InternalUser,
+) -> tuple[Any, bool, InternalChat]:
+    """
+    peer_id для POST /messages (user_id или chat_id), is_group, InternalChat.
+    """
+    if not recipient or not isinstance(recipient, dict):
+        uid = sender.id
+        chat = InternalChat(
+            id=uid,
+            platform="max",
+            is_group=False,
+            title=None,
+            username=sender.username,
+        )
+        return uid, False, chat
+
+    rtype = str(recipient.get("type") or recipient.get("recipient_type") or "").lower()
+    chat_nested = recipient.get("chat") if isinstance(recipient.get("chat"), dict) else {}
+
+    if rtype in ("chat", "group", "channel", "dialog") or recipient.get("is_group"):
+        cid = recipient.get("chat_id") or recipient.get("id") or chat_nested.get("id")
+        if cid is None:
+            cid = sender.id
+        title = recipient.get("title") or chat_nested.get("title")
+        chat = InternalChat(
+            id=cid,
+            platform="max",
+            is_group=True,
+            title=title,
+            username=recipient.get("username") or chat_nested.get("username"),
+        )
+        return cid, True, chat
+
+    uid = recipient.get("user_id") or recipient.get("id")
+    if uid is None:
+        uid = sender.id
     chat = InternalChat(
-        id=chat_id,
+        id=uid,
         platform="max",
-        is_group=raw_chat.get("type") == "group" or bool(raw_chat.get("is_group")),
-        title=raw_chat.get("title"),
-        username=raw_chat.get("username"),
+        is_group=False,
+        title=None,
+        username=None,
     )
+    return uid, False, chat
 
-    # Callback (нажатие inline-кнопки)
-    if update_type in ("message_callback", "callback_query", "callback"):
-        callback_data = (
-            update.get("callback_data")
-            or update.get("data")
-            or (update.get("callback_query") or {}).get("data")
-            or ""
-        )
-        return CallbackEvent(
-            user=user,
-            chat=chat,
-            data=str(callback_data),
-            original_message_id=update.get("message_id") or (update.get("message") or {}).get("id"),
-            raw=update,
-        )
 
-    # Обычное сообщение
-    msg = update.get("message") or update
-    text = (msg.get("text") or msg.get("message") or "").strip()
-    attachments: List[Dict[str, Any]] = []
-    for att in msg.get("attachments") or msg.get("media") or []:
+def _message_body_text(msg: Dict[str, Any]) -> str:
+    body = msg.get("body")
+    if isinstance(body, dict):
+        t = body.get("text")
+        if t is not None:
+            return str(t).strip()
+    return str(msg.get("text") or msg.get("message") or "").strip()
+
+
+def _incoming_attachments(msg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    body = msg.get("body")
+    atts: List[Any] = []
+    if isinstance(body, dict):
+        atts = body.get("attachments") or []
+    if not atts:
+        atts = msg.get("attachments") or msg.get("media") or []
+    for att in atts:
+        if not isinstance(att, dict):
+            continue
         att_type = att.get("type") or att.get("media_type") or "document"
         file_id = att.get("file_id") or att.get("id") or att.get("url")
         if file_id:
-            attachments.append({"type": att_type, "file_id": file_id, "id_or_url": file_id})
+            out.append({"type": att_type, "file_id": file_id, "id_or_url": file_id})
+    return out
+
+
+def _reply_to_mid(msg: Dict[str, Any]) -> Optional[str | int]:
+    link = msg.get("link")
+    if isinstance(link, dict):
+        mid = link.get("mid") or link.get("message_id") or link.get("id")
+        if mid is not None:
+            return mid
+    return msg.get("reply_to_message_id")
+
+
+def parse_max_update(update: Dict[str, Any]) -> Optional[IncomingMessage | CallbackEvent]:
+    """
+    Разобрать входящий Update от MAX (webhook).
+    https://dev.max.ru/docs-api/objects/Update — поле update_type.
+    """
+    if not update or not isinstance(update, dict):
+        return None
+
+    update_type = (
+        update.get("update_type")
+        or update.get("type")
+        or update.get("event_type")
+    )
+    if not update_type:
+        return None
+
+    update_type = str(update_type)
+
+    # --- message_callback ---
+    if update_type in ("message_callback", "callback_query", "callback"):
+        cb = update.get("callback") or update.get("callback_query") or {}
+        if not isinstance(cb, dict):
+            cb = {}
+        callback_id = cb.get("callback_id") or cb.get("id")
+        callback_id_str = str(callback_id) if callback_id is not None else ""
+        payload = cb.get("payload") or cb.get("data") or update.get("payload") or ""
+
+        user_dict = (
+            update.get("user")
+            or cb.get("user")
+            or cb.get("from")
+            or (cb.get("message") or {}).get("sender")
+            or update.get("sender")
+        )
+        user = _user_from_max(user_dict if isinstance(user_dict, dict) else None)
+        if user is None:
+            return None
+
+        msg = cb.get("message") or update.get("message") or {}
+        if not isinstance(msg, dict):
+            msg = {}
+        recipient = msg.get("recipient") if isinstance(msg.get("recipient"), dict) else {}
+        _, _, chat = _parse_recipient_peer(recipient, user)
+        mid = msg.get("id") or msg.get("message_id")
+
+        return CallbackEvent(
+            user=user,
+            chat=chat,
+            data=str(payload),
+            original_message_id=mid,
+            raw=update,
+            callback_id=callback_id_str or None,
+        )
+
+    # --- bot_started → как /start ---
+    if update_type == "bot_started":
+        user = _user_from_max(update.get("user") or update.get("sender"))
+        if user is None:
+            return None
+        _, _, chat = _parse_recipient_peer(None, user)
+        return IncomingMessage(
+            user=user,
+            chat=chat,
+            text="/start",
+            attachments=[],
+            is_command=True,
+            reply_to_message_id=None,
+            raw=update,
+        )
+
+    # --- message_created и прочие с полем message ---
+    if update_type not in ("message_created", "message_updated", "message_edited", "message_received"):
+        if update.get("message") is None:
+            return None
+
+    msg = update.get("message")
+    if not isinstance(msg, dict):
+        return None
+
+    sender = _user_from_max(msg.get("sender"))
+    if sender is None:
+        sender = _user_from_max(update.get("user") or update.get("sender"))
+    if sender is None:
+        return None
+
+    recipient = msg.get("recipient") if isinstance(msg.get("recipient"), dict) else {}
+    _, is_group, chat = _parse_recipient_peer(recipient, sender)
+
+    text = _message_body_text(msg)
+    attachments = _incoming_attachments(msg)
+    reply_mid = _reply_to_mid(msg)
 
     return IncomingMessage(
-        user=user,
+        user=sender,
         chat=chat,
         text=text,
         attachments=attachments,
         is_command=text.startswith("/"),
-        reply_to_message_id=msg.get("reply_to_message_id") or (msg.get("reply_to_message") or {}).get("id"),
+        reply_to_message_id=reply_mid,
         raw=update,
     )
 
 
-def _rows_to_max_keyboard(rows: Optional[List[KeyboardRow]]) -> Optional[Dict[str, Any]]:
-    """Преобразовать ряды кнопок в формат клавиатуры MAX (InlineKeyboardAttachment и т.п.)."""
+def keyboard_rows_to_max_attachments(rows: Optional[List[KeyboardRow]]) -> Optional[List[Dict[str, Any]]]:
+    """
+    Вложения MAX: inline_keyboard с кнопками callback / link.
+    https://dev.max.ru/docs-api — раздел «Клавиатура».
+    """
     if not rows:
         return None
-    # Типичный формат: {"inline_keyboard": [[{"text": "...", "callback_data": "..."}], ...]}
-    inline = []
+    button_rows: List[List[Dict[str, Any]]] = []
     for row in rows:
-        r = []
+        r: List[Dict[str, Any]] = []
         for btn in row:
-            b: Dict[str, Any] = {"text": btn.text}
-            if btn.callback_data:
-                b["callback_data"] = btn.callback_data
             if btn.url:
-                b["url"] = btn.url
-            r.append(b)
+                r.append({"type": "link", "text": btn.text, "url": btn.url})
+            elif btn.callback_data:
+                r.append(
+                    {
+                        "type": "callback",
+                        "text": btn.text,
+                        "payload": btn.callback_data,
+                    }
+                )
         if r:
-            inline.append(r)
-    if not inline:
+            button_rows.append(r)
+    if not button_rows:
         return None
-    return {"inline_keyboard": inline}
+    return [{"type": "inline_keyboard", "payload": {"buttons": button_rows}}]
+
+
+def _parse_mode_to_max_format(parse_mode: Optional[str]) -> Optional[str]:
+    if not parse_mode:
+        return None
+    p = str(parse_mode).upper()
+    if p in ("HTML", "PARSEMODE.HTML"):
+        return "html"
+    if p in ("MARKDOWN", "MD", "PARSEMODE.MARKDOWN"):
+        return "markdown"
+    if parse_mode.lower() == "html":
+        return "html"
+    if parse_mode.lower() == "markdown":
+        return "markdown"
+    return "html"
 
 
 class MaxAdapter:
@@ -130,15 +283,16 @@ class MaxAdapter:
 
     async def send_message(self, msg: OutgoingMessage) -> Optional[str]:
         """Отправить сообщение. Возвращает message_id (строка)."""
-        reply_markup = _rows_to_max_keyboard(msg.keyboard_rows)
+        attachments = keyboard_rows_to_max_attachments(msg.keyboard_rows)
+        text_format = _parse_mode_to_max_format(msg.parse_mode) or "html"
         result = await self._client.send_message(
             chat_id=msg.chat_id,
             text=msg.text,
-            parse_mode=msg.parse_mode,
-            reply_markup=reply_markup,
-            reply_to_message_id=msg.reply_to_message_id,
+            is_group_chat=msg.is_group_chat,
+            text_format=text_format,
+            attachments=attachments,
         )
-        return result.get("message_id") or result.get("id")
+        return self._client.message_id_from_response(result)
 
     async def edit_message(
         self,
@@ -148,14 +302,14 @@ class MaxAdapter:
         keyboard_rows: Optional[List[KeyboardRow]] = None,
         parse_mode: Optional[str] = None,
     ) -> None:
-        """Редактировать сообщение."""
-        reply_markup = _rows_to_max_keyboard(keyboard_rows)
+        """Редактировать сообщение (PUT /messages). chat_id в MAX для edit не используется в query."""
+        attachments = keyboard_rows_to_max_attachments(keyboard_rows)
+        text_format = _parse_mode_to_max_format(parse_mode)
         await self._client.edit_message(
-            chat_id=chat_id,
             message_id=message_id,
             text=text,
-            reply_markup=reply_markup,
-            parse_mode=parse_mode,
+            text_format=text_format,
+            attachments=attachments,
         )
 
     async def answer_callback(
@@ -163,15 +317,15 @@ class MaxAdapter:
         callback_id_or_equivalent: str | int,
         text: Optional[str] = None,
     ) -> None:
-        """Ответить на callback."""
+        """Ответить на callback (POST /answers)."""
         await self._client.answer_callback(
-            callback_id=str(callback_id_or_equivalent),
-            text=text,
+            str(callback_id_or_equivalent),
+            notification=text,
         )
 
-    async def send_typing(self, chat_id: int | str) -> None:
-        """Показать индикатор набора."""
-        await self._client.send_typing(str(chat_id))
+    async def send_typing(self, chat_id: int | str, *, is_group_chat: bool = False) -> None:
+        """Показать индикатор набора (лучшее усилие; эндпоинт может отличаться)."""
+        await self._client.send_typing(str(chat_id), is_group_chat=is_group_chat)
 
     async def send_media(
         self,
@@ -179,36 +333,43 @@ class MaxAdapter:
         attachments: List[Dict[str, Any]],
         caption: Optional[str] = None,
         reply_to_message_id: Optional[int | str] = None,
+        *,
+        is_group_chat: bool = False,
     ) -> None:
-        """Отправить медиа. В MAX — через upload и затем отправка по file_id/url."""
+        """Отправить медиа через POST /messages с вложениями."""
         if not attachments:
             return None
-        # Упрощённо: если есть id_or_url — отправляем как вложение; иначе нужна загрузка
+        max_atts: List[Dict[str, Any]] = []
         for att in attachments:
             file_id = att.get("id_or_url") or att.get("file_id")
             if not file_id:
                 continue
-            await self._client._request(
-                "POST",
-                "/v1/messages/send",
-                json={
-                    "chat_id": str(chat_id),
-                    "attachment": {"type": att.get("type", "document"), "file_id": str(file_id)},
-                    "caption": caption,
-                    "reply_to_message_id": str(reply_to_message_id) if reply_to_message_id else None,
-                },
+            max_atts.append(
+                {
+                    "type": att.get("type", "file"),
+                    "payload": {"file_id": str(file_id)},
+                }
             )
+        if not max_atts:
+            return None
+        body_text = caption or ""
+        await self._client.send_message(
+            chat_id,
+            body_text,
+            is_group_chat=is_group_chat,
+            attachments=max_atts,
+        )
 
     async def download_file(self, file_id_or_url: str) -> bytes:
         """Скачать файл по file_id или URL."""
         import aiohttp
+
         if file_id_or_url.startswith("http://") or file_id_or_url.startswith("https://"):
             async with aiohttp.ClientSession() as session:
                 async with session.get(file_id_or_url) as resp:
                     resp.raise_for_status()
                     return await resp.read()
-        # Иначе запрос к API MAX на получение файла
-        result = await self._client._request("GET", f"/v1/files/{file_id_or_url}")
+        result = await self._client._request("GET", f"/files/{file_id_or_url}")
         url = result.get("url") or result.get("file_url")
         if url:
             async with aiohttp.ClientSession() as session:

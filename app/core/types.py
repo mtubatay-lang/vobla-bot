@@ -62,6 +62,8 @@ class CallbackEvent:
     data: str
     original_message_id: Optional[int | str] = None
     raw: Any = None
+    # MAX: POST /answers?callback_id=... (Telegram не использует)
+    callback_id: Optional[str] = None
 
 
 @dataclass
@@ -74,6 +76,8 @@ class OutgoingMessage:
     attachments: list[dict[str, Any]] = field(default_factory=list)
     keyboard_rows: Optional[list[KeyboardRow]] = None
     reply_to_message_id: Optional[int | str] = None
+    # MAX: POST /messages — user_id (личка) или chat_id (группа)
+    is_group_chat: bool = False
 
 
 @dataclass
