@@ -64,9 +64,9 @@ MAX работает через **HTTPS webhook** к отдельному про
 
 **Лимит Google Sheets (429 / Quota exceeded):** при большом числе запросов к таблицам (статистика, рассылки, лист получателей) API может вернуть 429. Запись в `bot_stats` через `log_event` **не роняет** сценарии RAG/QA — в логах будет предупреждение; при необходимости увеличь квоту проекта в Google Cloud или снизь частоту обращений к Sheets.
 
-**Повторный запрос кода в MAX после кнопки «Авторизация»:** если `user_id` в webhook приходит строкой, ключ ожидания кода должен совпадать (исправлено в `app/core/handlers.py` — нормализация в int).
+**Повторный запрос кода в MAX после кнопки «Авторизация»:** проверь колонку MAX ID в листе «Пользователи». Код поддерживает алиасы `max_user_id` (каноничное имя) и `max_id` (legacy).
 
-**MAX `POST /answers` и 400:** пустой JSON `{}` с `Content-Type: application/json` API может отклонять — клиент шлёт запрос **без тела**, если нет `notification`.
+**MAX `POST /answers` и 400:** API требует непустой payload (`message` или `notification`). Клиент теперь сначала шлёт `{"notification": ""}` и только затем fallback-стратегии.
 
 **Кнопка «Задать вопрос» в Telegram «зависает»:** callback нужно подтвердить быстро (~10 с); в `qa_mode` после проверки авторизации вызывается `cb.answer()` до тяжёлой работы.
 
@@ -91,7 +91,7 @@ MAX работает через **HTTPS webhook** к отдельному про
 
 ### Railway
 
-**Вариант A — один сервис (текущий [Procfile](Procfile)):** процесс `worker` запускает `python -m app.max_entrypoint` в фоне (uvicorn на `PORT`) и затем `python -m app.main`. Нужны публичный домен и включённый **Public Networking**, иначе MAX не достучится до webhook. Домен можно сгенерировать в Railway (или через MCP `generate-domain` для связанного сервиса).
+**Вариант A — один сервис (текущий [Procfile](Procfile)):** процесс `worker` запускает `python -m app.max_entrypoint` в фоне (uvicorn на `PORT`) и затем `python -m app.main`. Нужны публичный домен и включённый **Public Networking**, иначе MAX не достучится до webhook. Домен можно сгенерировать в Railway (или через MCP `generate-domain` для связанного сервиса). Для стабильной авторизации и polling держите **1 реплику** этого сервиса.
 
 **Вариант B — второй сервис только под MAX (предпочтительно для продакшена):**
 
@@ -149,6 +149,7 @@ python scripts/max_subscribe_webhook.py --url https://<домен>/webhook/max
 - `MAX_AUTH_BEARER_PREFIX` — `false` (по умолчанию): только токен в `Authorization`; `true` — префикс `Bearer ` (если без него API отвечает 401)  
 - `MAX_WEBHOOK_SECRET` — если задан при подписке с `secret`, входящие запросы без совпадающего `X-Max-Bot-Api-Secret` отклоняются (403)  
 - Для скрипта подписки: `MAX_WEBHOOK_PUBLIC_BASE` — HTTPS-база Railway без пути (к `MAX_WEBHOOK_PATH` он добавится)
+- В листе `Пользователи` колонка MAX ID: рекомендуется `max_user_id`; также поддерживается legacy-имя `max_id`
 
 ## Плановые рассылки
 

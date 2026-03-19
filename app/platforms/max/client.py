@@ -179,9 +179,10 @@ class MaxApiClient:
                 return
 
             attempts: list[tuple[str, str, Any]] = [
+                # По логам this variant стабильно проходит у текущего API MAX.
+                ("post_json_notification_empty", "json", {"notification": ""}),
                 ("post_no_body", "no_json", None),
                 ("post_json_empty", "json", {}),
-                ("post_json_notification_empty", "json", {"notification": ""}),
                 ("post_raw_braces", "data", b"{}"),
             ]
             last_status, last_body = 0, ""

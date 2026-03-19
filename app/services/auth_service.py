@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import logging
 from typing import Optional, List
 
 from cachetools import TTLCache
@@ -18,6 +19,8 @@ from app.core.types import Platform
 from app.services.sheets_client import get_sheets_client  # уже есть в проекте
 
 USERS_SHEET_NAME = "Пользователи"
+MAX_ID_HEADERS = ("max_user_id", "max_id", "maxid")
+logger = logging.getLogger(__name__)
 
 # Кэш списка пользователей: TTL 5 минут, при bind_* инвалидируется
 _users_cache: TTLCache = TTLCache(maxsize=1, ttl=300)
@@ -72,15 +75,46 @@ def _parse_bool(value) -> bool:
     return True
 
 
-def load_users() -> List[User]:
+def _extract_max_user_id(record: dict) -> Optional[int]:
+    """Читает MAX ID из поддерживаемых алиасов колонок."""
+    raw = ""
+    used_key = None
+    for key in MAX_ID_HEADERS:
+        value = str(record.get(key, "")).strip()
+        if value:
+            raw = value
+            used_key = key
+            break
+    if used_key and used_key != "max_user_id":
+        logger.warning("auth_service: using legacy MAX column alias '%s'", used_key)
+    if not raw or raw == "0":
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("auth_service: invalid max user id value=%r", raw)
+        return None
+
+
+def _resolve_max_id_column(headers: dict) -> tuple[Optional[int], Optional[str]]:
+    """Возвращает индекс и имя колонки для MAX ID с учётом алиасов."""
+    for name in MAX_ID_HEADERS:
+        col = headers.get(name)
+        if col is not None:
+            return col, name
+    return None, None
+
+
+def load_users(force_reload: bool = False) -> List[User]:
     """
     Загружает всех пользователей из листа 'Пользователи'
     и возвращает список User. Результат кэшируется на 5 минут.
     """
-    try:
-        return _users_cache[_USERS_CACHE_KEY]
-    except KeyError:
-        pass
+    if not force_reload:
+        try:
+            return _users_cache[_USERS_CACHE_KEY]
+        except KeyError:
+            pass
 
     ws = _get_worksheet()
     headers = _get_headers(ws)
@@ -102,13 +136,7 @@ def load_users() -> List[User]:
         else:
             telegram_id = None
 
-        raw_max_user_id = str(rec.get("max_user_id", "")).strip()
-        max_user_id: Optional[int] = None
-        if raw_max_user_id and raw_max_user_id != "0":
-            try:
-                max_user_id = int(raw_max_user_id)
-            except ValueError:
-                pass
+        max_user_id = _extract_max_user_id(rec)
 
         user = User(
             row=row_number,
@@ -131,7 +159,8 @@ def load_users() -> List[User]:
 def find_user_by_platform_id(platform: Platform, user_id: int | str) -> Optional[User]:
     """Ищет пользователя по ID на указанной платформе. Возвращает User или None."""
     uid = int(user_id) if isinstance(user_id, str) else user_id
-    for user in load_users():
+    force_reload = platform == "max"
+    for user in load_users(force_reload=force_reload):
         if platform == "telegram" and user.telegram_id == uid:
             return user
         if platform == "max" and user.max_user_id is not None and user.max_user_id == uid:
@@ -169,15 +198,16 @@ def bind_platform_id(user: User, platform: Platform, platform_user_id: int | str
         col = headers.get("telegram_id", 5)
         ws.update_cell(user.row, col, str(pid))
     elif platform == "max":
-        col = headers.get("max_user_id")
+        col, col_name = _resolve_max_id_column(headers)
         if col is None:
             # Колонка может отсутствовать — добавляем в конец (после последней известной)
             last_col = max(headers.values()) if headers else 8
             col = last_col + 1
-            # Опционально: можно записать заголовок в ячейку (1, col), но лучше добавить колонку вручную в таблице
-            ws.update_cell(user.row, col, str(pid))
-        else:
-            ws.update_cell(user.row, col, str(pid))
+            ws.update_cell(1, col, "max_user_id")
+            logger.warning("auth_service: auto-created missing 'max_user_id' column at index=%s", col)
+        elif col_name != "max_user_id":
+            logger.warning("auth_service: writing MAX user id into legacy column '%s'", col_name)
+        ws.update_cell(user.row, col, str(pid))
 
     used_at_col = headers.get("used_at", 7)
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

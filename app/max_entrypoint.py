@@ -63,6 +63,12 @@ async def _handle_max_qa_start(adapter: MaxAdapter, event: CallbackEvent) -> Non
     uid = _max_user_int(event.user.id)
     user = find_user_by_platform_id("max", uid)
     if not user:
+        logger.warning(
+            "MAX qa_start rejected: user not authorized (uid=%s, callback_id=%s, data=%r)",
+            uid,
+            event.callback_id,
+            event.data,
+        )
         await adapter.send_message(
             OutgoingMessage(
                 chat_id=event.chat.id,
@@ -217,9 +223,11 @@ def _create_app():
                 await _handle_max_qa_turn(adapter, event)
             else:
                 logger.info(
-                    "MAX message not handled (user_id=%s text_prefix=%r)",
+                    "MAX message not handled (user_id=%s text_prefix=%r qa_session=%s pending_auth=%s)",
                     event.user.id,
                     text[:80],
+                    uid in _max_qa_sessions,
+                    is_pending_auth("max", event.user.id),
                 )
             return JSONResponse(content={"ok": True})
         except Exception as e:
