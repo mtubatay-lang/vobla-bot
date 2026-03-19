@@ -203,19 +203,24 @@ class MaxApiClient:
                         async with session.post(url, headers=hdrs, data=payload) as resp:
                             last_status, last_body = resp.status, await resp.text()
                 except Exception as e:
-                    logger.warning("MAX /answers [%s] request error: %s", name, e)
+                    logger.debug("MAX /answers [%s] request error: %s", name, e)
                     continue
                 if last_status < 400:
-                    if name != "post_no_body":
-                        logger.info("MAX /answers ok via strategy %s", name)
+                    logger.info("MAX /answers ok via strategy %s", name)
                     return
-                logger.warning(
+                logger.debug(
                     "MAX /answers [%s] -> %s body=%r",
                     name,
                     last_status,
                     (last_body or "")[:400],
                 )
 
+            logger.warning(
+                "MAX /answers failed for all strategies callback_id=%s status=%s body=%r",
+                cid,
+                last_status or 400,
+                (last_body or "")[:400],
+            )
             raise MaxApiClientError(
                 f"MAX API error: {last_status}",
                 status=last_status or 400,

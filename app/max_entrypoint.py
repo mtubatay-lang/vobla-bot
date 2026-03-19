@@ -20,132 +20,14 @@ from app.config import (
     MAX_AUTH_BEARER_PREFIX,
     MAX_WEBHOOK_SECRET,
 )
-from app.core.types import CallbackEvent, IncomingMessage, OutgoingMessage
-from app.core.handlers import (
-    handle_start,
-    handle_start_auth_callback,
-    handle_auth_code,
-    handle_help,
-    is_pending_auth,
-    _pending_auth_uid,
-)
-from app.core.callbacks import QA_EXIT, QA_START, START_AUTH
 from app.platforms.max import MaxApiClient, MaxAdapter, parse_max_update
-from app.services.auth_service import find_user_by_platform_id
-from app.services.max_qa_simple import max_simple_rag_answer
-from app.ui.keyboards import qa_kb_rows
+from app.platforms.max.router import MaxActionRouter
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
-
-# Пользователи MAX в режиме «Задать вопрос» (после callback qa_start)
-_max_qa_sessions: set[int] = set()
-
-
-def _max_user_int(user_id: int | str) -> int:
-    return _pending_auth_uid(user_id)
-
-
-async def _safe_max_answer_callback(adapter: MaxAdapter, callback_id: str | None) -> None:
-    if not callback_id:
-        return
-    try:
-        await adapter.answer_callback(str(callback_id))
-    except Exception as e:
-        logger.warning("MAX answer_callback: %s", e)
-
-
-async def _handle_max_qa_start(adapter: MaxAdapter, event: CallbackEvent) -> None:
-    await _safe_max_answer_callback(adapter, event.callback_id)
-    uid = _max_user_int(event.user.id)
-    user = find_user_by_platform_id("max", uid)
-    if not user:
-        logger.warning(
-            "MAX qa_start rejected: user not authorized (uid=%s, callback_id=%s, data=%r)",
-            uid,
-            event.callback_id,
-            event.data,
-        )
-        await adapter.send_message(
-            OutgoingMessage(
-                chat_id=event.chat.id,
-                platform="max",
-                text="Сначала пройдите авторизацию: /start → кнопка «Авторизация».",
-                is_group_chat=event.chat.is_group,
-            )
-        )
-        return
-    _max_qa_sessions.add(uid)
-    await adapter.send_message(
-        OutgoingMessage(
-            chat_id=event.chat.id,
-            platform="max",
-            text=(
-                "🧠 <b>Навык: Ответы на вопросы</b>\n\n"
-                "Напишите вопрос одним сообщением.\n"
-                "Можно задавать вопросы подряд.\n\n"
-                "Чтобы выйти — «✅ Завершить навык»."
-            ),
-            keyboard_rows=qa_kb_rows(),
-            is_group_chat=event.chat.is_group,
-        )
-    )
-
-
-async def _handle_max_qa_exit(adapter: MaxAdapter, event: CallbackEvent) -> None:
-    await _safe_max_answer_callback(adapter, event.callback_id)
-    _max_qa_sessions.discard(_max_user_int(event.user.id))
-    await adapter.send_message(
-        OutgoingMessage(
-            chat_id=event.chat.id,
-            platform="max",
-            text="Вы вышли из режима «Задать вопрос».",
-            is_group_chat=event.chat.is_group,
-        )
-    )
-
-
-async def _handle_max_qa_turn(adapter: MaxAdapter, event: IncomingMessage) -> None:
-    uid = _max_user_int(event.user.id)
-    text = (event.text or "").strip()
-    if not text:
-        return
-    first = text.split()[0].lower() if text.split() else ""
-    if first.startswith("/"):
-        if first.startswith("/start"):
-            _max_qa_sessions.discard(uid)
-            await handle_start(adapter, event)
-        return
-    user = find_user_by_platform_id("max", uid)
-    user_name = user.name if user else (event.user.name or "друг")
-    await adapter.send_typing(event.chat.id, is_group_chat=event.chat.is_group)
-    answer = await max_simple_rag_answer(text, user_name)
-    await adapter.send_message(
-        OutgoingMessage(
-            chat_id=event.chat.id,
-            platform="max",
-            text=(
-                f"{answer}\n\n"
-                "Можете задать ещё вопрос или нажать «✅ Завершить навык»."
-            ),
-            keyboard_rows=qa_kb_rows(),
-            is_group_chat=event.chat.is_group,
-        )
-    )
-
-
-def _normalize_slash_command(text: str) -> str:
-    """Убирает @botname у команд вида /start@MyBot."""
-    t = (text or "").strip()
-    if not t.startswith("/"):
-        return t
-    cmd = t.split(None, 1)[0]
-    if "@" in cmd:
-        cmd = cmd.split("@", 1)[0]
-    return cmd
 
 
 def _create_app():
@@ -168,6 +50,7 @@ def _create_app():
         use_bearer_prefix=MAX_AUTH_BEARER_PREFIX,
     )
     adapter = MaxAdapter(client)
+    action_router = MaxActionRouter()
 
     @app.post(MAX_WEBHOOK_PATH)
     async def webhook(request: Request):
@@ -198,37 +81,7 @@ def _create_app():
             return JSONResponse(content={"ok": True})
 
         try:
-            if isinstance(event, CallbackEvent):
-                if event.data == START_AUTH:
-                    await handle_start_auth_callback(adapter, event)
-                elif event.data == QA_START:
-                    await _handle_max_qa_start(adapter, event)
-                elif event.data == QA_EXIT:
-                    await _handle_max_qa_exit(adapter, event)
-                else:
-                    logger.debug("MAX callback not handled: %s", event.data)
-                return JSONResponse(content={"ok": True})
-
-            text = (event.text or "").strip()
-            norm = _normalize_slash_command(text)
-            uid = _max_user_int(event.user.id)
-            if norm == "/start":
-                _max_qa_sessions.discard(uid)
-                await handle_start(adapter, event)
-            elif norm == "/help":
-                await handle_help(adapter, event)
-            elif is_pending_auth("max", event.user.id):
-                await handle_auth_code(adapter, event)
-            elif uid in _max_qa_sessions:
-                await _handle_max_qa_turn(adapter, event)
-            else:
-                logger.info(
-                    "MAX message not handled (user_id=%s text_prefix=%r qa_session=%s pending_auth=%s)",
-                    event.user.id,
-                    text[:80],
-                    uid in _max_qa_sessions,
-                    is_pending_auth("max", event.user.id),
-                )
+            await action_router.route(adapter, event)
             return JSONResponse(content={"ok": True})
         except Exception as e:
             logger.exception("MAX webhook handler error: %s", e)

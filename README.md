@@ -124,8 +124,11 @@ python scripts/max_subscribe_webhook.py --url https://<домен>/webhook/max
 
 ### Поведение в MAX
 
-- Обрабатываются: событие **`bot_started`** (как `/start`), текстовые **`/start`**, **`/help`** (в т.ч. с суффиксом `@botname`), нажатие «Авторизация» и ввод кода после неё.
-- После авторизации кнопка **«❓ Задать вопрос»** (`qa_start`): упрощённый **одношаговый RAG** по Qdrant (см. `app/services/max_qa_simple.py`), кнопка **«Завершить навык»** (`qa_exit`). Полный сценарий QA с FSM — в Telegram.
+- Гибридное меню MAX: команды + inline-кнопки. Поддерживаются **`/start`**, **`/help`**, **`/login`**, **`/ask`**, **`/kilbil`**, **`/admin`**.
+- Callback-меню в MAX: `start_auth`, `qa_start`, `qa_exit`, `max:menu:help`, `max:menu:login`, `max:menu:kilbil`, `max:menu:admin`.
+- После авторизации `qa_start` запускает упрощённый одношаговый RAG по Qdrant (см. `app/services/max_qa_simple.py`), `qa_exit` завершает сессию.
+- `kilbil` работает как отдельный вопрос в режиме знаний `help.kilbil.ru`.
+- `admin` в MAX сейчас read-only навигация: полные админ-сценарии остаются в Telegram (`/admin`).
 - **`POST /answers`**: клиент перебирает варианты тела запроса (без тела, `{}`, `notification: ""` и т.д.) — у разных версий API MAX требования различаются.
 - **Меню команд как в Telegram** (`setMyCommands`) в MAX **не выставляется** — отдельного аналога в используемом API нет.
 - Рассылки, админка и часть сценариев по-прежнему только в Telegram.

@@ -40,6 +40,12 @@ BROADCAST_SCHEDULED_DISABLE_PREFIX = "broadcast:scheduled_disable:"
 # --- admin section (menu) ---
 ADMIN_SCHEDULED = "admin:scheduled"
 
+# --- MAX menu / navigation ---
+MAX_MENU_HELP = "max:menu:help"
+MAX_MENU_LOGIN = "max:menu:login"
+MAX_MENU_KILBIL = "max:menu:kilbil"
+MAX_MENU_ADMIN = "max:menu:admin"
+
 # --- knowledge_base_admin ---
 KB_ADD = "kb_add"
 
