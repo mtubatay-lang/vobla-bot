@@ -33,6 +33,10 @@ from app.ui.keyboards import max_main_menu_rows, qa_kb_rows
 
 logger = logging.getLogger(__name__)
 
+# Видимая обратная связь в MAX: индикатор набора часто не отображается в клиенте.
+MAX_QA_SEARCHING_TEXT = "🔍 Ищу в базе знаний…"
+MAX_KILBIL_SEARCHING_TEXT = "🔍 Ищу в базе Kilbil…"
+
 
 def _normalize_slash_command(text: str) -> str:
     t = (text or "").strip()
@@ -171,6 +175,15 @@ class MaxActionRouter:
         if not q:
             return True
         await adapter.send_typing(event.chat.id, is_group_chat=event.chat.is_group)
+        await adapter.send_message(
+            OutgoingMessage(
+                chat_id=event.chat.id,
+                platform="max",
+                text=MAX_QA_SEARCHING_TEXT,
+                keyboard_rows=qa_kb_rows(),
+                is_group_chat=event.chat.is_group,
+            )
+        )
         user = find_user_by_platform_id("max", uid)
         user_name = user.name if user else (event.user.name or "друг")
         answer = await max_simple_rag_answer(q, user_name)
@@ -220,6 +233,14 @@ class MaxActionRouter:
             )
             return True
         await adapter.send_typing(event.chat.id, is_group_chat=event.chat.is_group)
+        await adapter.send_message(
+            OutgoingMessage(
+                chat_id=event.chat.id,
+                platform="max",
+                text=MAX_KILBIL_SEARCHING_TEXT,
+                is_group_chat=event.chat.is_group,
+            )
+        )
         match = await find_kilbil_answer(q)
         if not match:
             text = (

@@ -126,8 +126,8 @@ python scripts/max_subscribe_webhook.py --url https://<домен>/webhook/max
 
 - Гибридное меню MAX: команды + inline-кнопки. Поддерживаются **`/start`**, **`/help`**, **`/login`**, **`/ask`**, **`/kilbil`**, **`/admin`**.
 - Callback-меню в MAX: `start_auth`, `qa_start`, `qa_exit`, `max:menu:help`, `max:menu:login`, `max:menu:kilbil`, `max:menu:admin`.
-- После авторизации `qa_start` запускает упрощённый одношаговый RAG по Qdrant (см. `app/services/max_qa_simple.py`), `qa_exit` завершает сессию.
-- `kilbil` работает как отдельный вопрос в режиме знаний `help.kilbil.ru`.
+- После авторизации `qa_start` запускает упрощённый одношаговый RAG по Qdrant (см. `app/services/max_qa_simple.py`), `qa_exit` завершает сессию. Пока идёт поиск и генерация ответа, бот сразу шлёт короткое сообщение «ищу в базе знаний…» (и при необходимости индикатор набора), затем полный ответ отдельным сообщением — так видно, что бот не завис.
+- `kilbil` работает как отдельный вопрос в режиме знаний `help.kilbil.ru`; перед ответом также отправляется статус «ищу в базе Kilbil…».
 - `admin` в MAX сейчас read-only навигация: полные админ-сценарии остаются в Telegram (`/admin`).
 - **`POST /answers`**: клиент перебирает варианты тела запроса (без тела, `{}`, `notification: ""` и т.д.) — у разных версий API MAX требования различаются.
 - **Меню команд как в Telegram** (`setMyCommands`) в MAX **не выставляется** — отдельного аналога в используемом API нет.
