@@ -24,8 +24,22 @@ from app.services.auth_service import (
 from app.services.metrics_service import log_event
 from app.ui.keyboards import main_menu_rows
 
-# Глобальное состояние ожидания кода (ключ = (platform, user_id))
+# Глобальное состояние ожидания кода (ключ = (platform, user_id_int))
 _pending_auth: Dict[tuple[str, int], bool] = {}
+
+
+def _pending_auth_uid(user_id: int | str) -> int:
+    """
+    Единый числовой user_id для ключа _pending_auth.
+    В MAX из JSON часто приходит str — иначе ключ при записи и чтении не совпадает.
+    """
+    if isinstance(user_id, int):
+        return user_id
+    s = str(user_id).strip()
+    try:
+        return int(s)
+    except ValueError:
+        raise ValueError(f"pending_auth: ожидался числовой user_id, получено {user_id!r}") from None
 
 
 def _commands_menu_text() -> str:
@@ -95,7 +109,7 @@ async def handle_start_auth_callback(adapter: Any, event: CallbackEvent) -> None
     platform = adapter.platform
     user_id = event.user.id
     chat_id = event.chat.id
-    key = (platform, int(user_id) if isinstance(user_id, int) else user_id)
+    key = (platform, _pending_auth_uid(user_id))
     _pending_auth[key] = True
 
     log_event(
@@ -121,7 +135,10 @@ async def handle_start_auth_callback(adapter: Any, event: CallbackEvent) -> None
 
 def is_pending_auth(platform: Platform, user_id: int | str) -> bool:
     """Проверка, ожидаем ли мы от пользователя ввод кода."""
-    uid = int(user_id) if isinstance(user_id, str) else user_id
+    try:
+        uid = _pending_auth_uid(user_id)
+    except ValueError:
+        return False
     return _pending_auth.get((platform, uid), False)
 
 
@@ -134,7 +151,10 @@ async def handle_auth_code(
     user_id = incoming.user.id
     chat_id = incoming.chat.id
     text = (incoming.text or "").strip()
-    key = (platform, int(user_id) if isinstance(user_id, int) else user_id)
+    try:
+        key = (platform, _pending_auth_uid(user_id))
+    except ValueError:
+        return
 
     if not _pending_auth.get(key):
         return

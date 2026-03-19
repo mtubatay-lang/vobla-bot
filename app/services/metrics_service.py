@@ -2,11 +2,14 @@
 
 import json
 import asyncio
+import logging
 from datetime import datetime, timezone, date
 from typing import Any, Dict, Optional, List
 
 from app.config import STATS_SHEET_ID, STATS_SHEET_TAB
 from app.services.sheets_client import get_sheets_client
+
+logger = logging.getLogger(__name__)
 
 
 def _now_ts_iso() -> str:
@@ -32,24 +35,37 @@ def log_event(
     if not STATS_SHEET_ID:
         return
 
-    client = get_sheets_client()
-    sh = client.open_by_key(STATS_SHEET_ID)
-    ws = sh.worksheet(STATS_SHEET_TAB)
+    try:
+        client = get_sheets_client()
+        sh = client.open_by_key(STATS_SHEET_ID)
+        ws = sh.worksheet(STATS_SHEET_TAB)
 
-    meta_json = ""
-    if meta:
-        meta_json = json.dumps(meta, ensure_ascii=False)
+        meta_json = ""
+        if meta:
+            meta_json = json.dumps(meta, ensure_ascii=False)
 
-    row = [
-        _now_ts_iso(),
-        _today_date(),
-        str(user_id) if user_id is not None else "",
-        username or "",
-        event,
-        meta_json,
-    ]
+        row = [
+            _now_ts_iso(),
+            _today_date(),
+            str(user_id) if user_id is not None else "",
+            username or "",
+            event,
+            meta_json,
+        ]
 
-    ws.append_row(row, value_input_option="RAW")
+        ws.append_row(row, value_input_option="RAW")
+    except Exception as e:
+        # 429 и прочие ошибки Sheets не должны ронять RAG/QA/групповой чат
+        msg = str(e).lower()
+        if "429" in msg or "quota" in msg:
+            logger.warning(
+                "log_event пропущен (лимит Google Sheets): event=%s user_id=%s — %s",
+                event,
+                user_id,
+                e,
+            )
+        else:
+            logger.warning("log_event не записан: event=%s — %s", event, e, exc_info=True)
 
 
 async def alog_event(
