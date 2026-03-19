@@ -97,7 +97,7 @@ def main() -> int:
         print("MAX_BOT_TOKEN не задан", file=sys.stderr)
         return 1
 
-    use_bearer = os.getenv("MAX_AUTH_BEARER_PREFIX", "true").lower() == "true"
+    use_bearer = os.getenv("MAX_AUTH_BEARER_PREFIX", "false").lower() == "true"
     if args.no_bearer:
         use_bearer = False
 

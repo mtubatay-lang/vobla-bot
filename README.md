@@ -112,7 +112,7 @@ python scripts/max_subscribe_webhook.py --url https://<домен>/webhook/max
 
 Проверить текущие подписки: `python scripts/max_subscribe_webhook.py --list`
 
-По умолчанию скрипт и `MaxApiClient` шлют **`Authorization: Bearer <token>`**. Если API отвечает **401**, задай **`MAX_AUTH_BEARER_PREFIX=false`** (и в Railway для webhook-сервиса тоже) или запусти скрипт с **`--no-bearer`** (только токен в заголовке, как в ряде примеров [dev.max.ru/docs-api](https://dev.max.ru/docs-api)).
+По умолчанию в коде **`MAX_AUTH_BEARER_PREFIX=false`** — заголовок **`Authorization: <token>`** (как в примерах [dev.max.ru/docs-api](https://dev.max.ru/docs-api)). Скрипт подписки без флагов использует то же из env. Если API отвечает **401**, задай **`MAX_AUTH_BEARER_PREFIX=true`** или запусти скрипт **без** `--no-bearer`.
 
 ### Поведение в MAX
 
@@ -134,7 +134,7 @@ python scripts/max_subscribe_webhook.py --url https://<домен>/webhook/max
 - `MAX_BOT_TOKEN` — токен бота в MAX  
 - `MAX_API_BASE_URL` — базовый URL API (по умолчанию `https://platform-api.max.ru`)  
 - `MAX_WEBHOOK_PATH` — путь для webhook (по умолчанию `/webhook/max`)  
-- `MAX_AUTH_BEARER_PREFIX` — `true` (по умолчанию): заголовок `Authorization: Bearer <token>`; `false` — только токен (если API отвечает 401)  
+- `MAX_AUTH_BEARER_PREFIX` — `false` (по умолчанию): только токен в `Authorization`; `true` — префикс `Bearer ` (если без него API отвечает 401)  
 - `MAX_WEBHOOK_SECRET` — если задан при подписке с `secret`, входящие запросы без совпадающего `X-Max-Bot-Api-Secret` отклоняются (403)  
 - Для скрипта подписки: `MAX_WEBHOOK_PUBLIC_BASE` — HTTPS-база Railway без пути (к `MAX_WEBHOOK_PATH` он добавится)
 

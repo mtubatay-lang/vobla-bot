@@ -178,8 +178,8 @@ ENABLE_MAX = os.getenv("ENABLE_MAX", "false").lower() == "true"
 MAX_BOT_TOKEN = os.getenv("MAX_BOT_TOKEN", "")
 MAX_API_BASE_URL = os.getenv("MAX_API_BASE_URL", "https://platform-api.max.ru").rstrip("/")
 MAX_WEBHOOK_PATH = os.getenv("MAX_WEBHOOK_PATH", "/webhook/max")
-# Заголовок Authorization к platform-api.max.ru: true = "Bearer <token>", false = только токен (как в некоторых примерах MAX)
-MAX_AUTH_BEARER_PREFIX = os.getenv("MAX_AUTH_BEARER_PREFIX", "true").lower() == "true"
+# Заголовок Authorization к platform-api.max.ru: true = "Bearer <token>", false = только токен (как в примерах dev.max.ru)
+MAX_AUTH_BEARER_PREFIX = os.getenv("MAX_AUTH_BEARER_PREFIX", "false").lower() == "true"
 # Если задан при подписке (POST /subscriptions secret), webhook должен сверять заголовок X-Max-Bot-Api-Secret
 MAX_WEBHOOK_SECRET = os.getenv("MAX_WEBHOOK_SECRET", "").strip()
 

@@ -62,7 +62,8 @@ def _parse_recipient_peer(
     rtype = str(recipient.get("type") or recipient.get("recipient_type") or "").lower()
     chat_nested = recipient.get("chat") if isinstance(recipient.get("chat"), dict) else {}
 
-    if rtype in ("chat", "group", "channel", "dialog") or recipient.get("is_group"):
+    # Группа / канал / чат (не путать с type=dialog — в MAX это может быть личка)
+    if rtype in ("chat", "group", "channel") or recipient.get("is_group"):
         cid = recipient.get("chat_id") or recipient.get("id") or chat_nested.get("id")
         if cid is None:
             cid = sender.id
@@ -76,15 +77,15 @@ def _parse_recipient_peer(
         )
         return cid, True, chat
 
-    uid = recipient.get("user_id") or recipient.get("id")
-    if uid is None:
-        uid = sender.id
+    # Личка с ботом: recipient почти всегда указывает на бота (его user_id).
+    # POST /messages?user_id=… должен быть id пользователя-отправителя, иначе API отвечает 403.
+    uid = sender.id
     chat = InternalChat(
         id=uid,
         platform="max",
         is_group=False,
         title=None,
-        username=None,
+        username=sender.username,
     )
     return uid, False, chat
 

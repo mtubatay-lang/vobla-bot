@@ -154,9 +154,10 @@ class MaxApiClient:
     ) -> None:
         """POST /answers?callback_id=..."""
         params = {"callback_id": callback_id}
-        body: Optional[Dict[str, Any]] = None
+        # Пустое тело нельзя слать как json=None — у части стеков это даёт 400 при Content-Type: json
+        body: Dict[str, Any] = {}
         if notification:
-            body = {"notification": notification}
+            body["notification"] = notification
         await self._request("POST", "/answers", json=body, params=params)
 
     async def send_typing(self, chat_id: str | int, *, is_group_chat: bool = False) -> None:
