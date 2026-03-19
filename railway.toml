@@ -1,0 +1,11 @@
+# Конфиг Railway: https://docs.railway.com/reference/config-as-code
+# Явный start (дублирует Procfile) и healthcheck для публичного URL.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "sh -c 'python -m app.max_entrypoint & exec python -m app.main'"
+healthcheckPath = "/health"
+healthcheckTimeout = 30

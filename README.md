@@ -58,6 +58,10 @@ MAX работает через **HTTPS webhook** к отдельному про
 
 Логи вида `aiogram.event: ... bot id=...` относятся **только к Telegram**. Для MAX смотри логи процесса с `uvicorn` / `MAX webhook`.
 
+Если в логах **TelegramConflictError: terminated by other getUpdates request** — одновременно запущены **два** экземпляра с тем же `BOT_TOKEN` (например локальный `python -m app.main` и Railway). Останови лишний, иначе polling конфликтует.
+
+Если **POST /webhook/max** с кодом **422** — это баг разбора аннотаций FastAPI у вложенного handler (исправлено в `app/max_entrypoint.py`): задеплой свежий коммит.
+
 ### Локально
 
 1. Включи MAX и задай токен:

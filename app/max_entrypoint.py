@@ -3,9 +3,11 @@
 Запуск: ENABLE_MAX=true MAX_BOT_TOKEN=... python -m app.max_entrypoint
 
 На Railway задайте PORT (и при необходимости отдельный сервис только для webhook).
-"""
 
-from __future__ import annotations
+Без ``from __future__ import annotations``: у вложенной ``async def webhook(request: Request)``
+иначе аннотация превращается в строку ``"Request"``, FastAPI принимает её за JSON-body
+и отвечает 422 на POST /webhook/max.
+"""
 
 import logging
 import os
