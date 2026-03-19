@@ -1206,6 +1206,9 @@ async def qa_start(cb: CallbackQuery, state: FSMContext):
     if not await _require_auth(cb):
         return
 
+    # Сразу ответить на callback (лимит Telegram ~10s; иначе «часики» и ощущение, что кнопка мёртвая)
+    await cb.answer()
+
     session_id = uuid.uuid4().hex[:12]
     await state.set_state(QAMode.active)
     await state.update_data(
@@ -1226,8 +1229,6 @@ async def qa_start(cb: CallbackQuery, state: FSMContext):
         reply_markup=qa_kb(),
         parse_mode="HTML",
     )
-
-    await cb.answer()
 
 
 @router.message(F.text == "❓ Задать вопрос")

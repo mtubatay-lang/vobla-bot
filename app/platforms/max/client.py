@@ -152,13 +152,74 @@ class MaxApiClient:
         *,
         notification: Optional[str] = None,
     ) -> None:
-        """POST /answers?callback_id=..."""
-        params = {"callback_id": callback_id}
-        # Пустое тело нельзя слать как json=None — у части стеков это даёт 400 при Content-Type: json
-        body: Dict[str, Any] = {}
-        if notification:
-            body["notification"] = notification
-        await self._request("POST", "/answers", json=body, params=params)
+        """
+        POST /answers?callback_id=...
+        Разные сборки API MAX по-разному принимают тело; при 400 перебираем варианты.
+        """
+        cid = (callback_id or "").strip()
+        if not cid:
+            logger.warning("MAX answer_callback: пустой callback_id, пропуск")
+            return
+        url = f"{self._base_url}/answers?{urlencode({'callback_id': cid})}"
+        auth_h = {"Authorization": self._authorization_value()}
+
+        async with aiohttp.ClientSession(timeout=self._timeout) as session:
+            if notification:
+                headers = {**auth_h, "Content-Type": "application/json"}
+                async with session.post(
+                    url, headers=headers, json={"notification": notification}
+                ) as resp:
+                    body = await resp.text()
+                    if resp.status >= 400:
+                        raise MaxApiClientError(
+                            f"MAX API error: {resp.status}",
+                            status=resp.status,
+                            body=body,
+                        )
+                return
+
+            attempts: list[tuple[str, str, Any]] = [
+                ("post_no_body", "no_json", None),
+                ("post_json_empty", "json", {}),
+                ("post_json_notification_empty", "json", {"notification": ""}),
+                ("post_raw_braces", "data", b"{}"),
+            ]
+            last_status, last_body = 0, ""
+            for name, kind, payload in attempts:
+                try:
+                    hdrs = (
+                        auth_h
+                        if kind == "no_json"
+                        else {**auth_h, "Content-Type": "application/json"}
+                    )
+                    if kind == "no_json":
+                        async with session.post(url, headers=hdrs) as resp:
+                            last_status, last_body = resp.status, await resp.text()
+                    elif kind == "json":
+                        async with session.post(url, headers=hdrs, json=payload) as resp:
+                            last_status, last_body = resp.status, await resp.text()
+                    else:
+                        async with session.post(url, headers=hdrs, data=payload) as resp:
+                            last_status, last_body = resp.status, await resp.text()
+                except Exception as e:
+                    logger.warning("MAX /answers [%s] request error: %s", name, e)
+                    continue
+                if last_status < 400:
+                    if name != "post_no_body":
+                        logger.info("MAX /answers ok via strategy %s", name)
+                    return
+                logger.warning(
+                    "MAX /answers [%s] -> %s body=%r",
+                    name,
+                    last_status,
+                    (last_body or "")[:400],
+                )
+
+            raise MaxApiClientError(
+                f"MAX API error: {last_status}",
+                status=last_status or 400,
+                body=last_body,
+            )
 
     async def send_typing(self, chat_id: str | int, *, is_group_chat: bool = False) -> None:
         """Индикатор набора (если метод есть в API)."""

@@ -6,7 +6,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Dict, Any
+
+logger = logging.getLogger(__name__)
 
 from app.core.types import (
     CallbackEvent,
@@ -112,12 +115,16 @@ async def handle_start_auth_callback(adapter: Any, event: CallbackEvent) -> None
     key = (platform, _pending_auth_uid(user_id))
     _pending_auth[key] = True
 
-    log_event(
-        user_id=user_id,
-        username=event.user.username,
-        event="auth_button_click",
-        meta={"platform": platform},
-    )
+    # Сначала снимаем «часики» (Telegram ~10s лимит; MAX — POST /answers без зависания UX)
+    if event.callback_id is not None:
+        try:
+            await adapter.answer_callback(event.callback_id)
+        except Exception as e:
+            logger.warning(
+                "answer_callback после «Авторизация» не удался (platform=%s): %s",
+                platform,
+                e,
+            )
 
     msg = OutgoingMessage(
         chat_id=chat_id,
@@ -129,8 +136,13 @@ async def handle_start_auth_callback(adapter: Any, event: CallbackEvent) -> None
         is_group_chat=event.chat.is_group,
     )
     await adapter.send_message(msg)
-    if event.callback_id is not None:
-        await adapter.answer_callback(event.callback_id)
+
+    log_event(
+        user_id=user_id,
+        username=event.user.username,
+        event="auth_button_click",
+        meta={"platform": platform},
+    )
 
 
 def is_pending_auth(platform: Platform, user_id: int | str) -> bool:
