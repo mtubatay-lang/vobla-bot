@@ -87,6 +87,41 @@ def test_parse_dm_recipient_is_bot_uses_sender_as_peer():
     assert ev.chat.is_group is False
 
 
+def test_parse_group_from_message_chat_root_only():
+    """Иногда peer только в message.chat (без message.recipient)."""
+    body = {
+        "update_type": "message_created",
+        "message": {
+            "sender": {"user_id": 42, "name": "U"},
+            "chat": {
+                "chat_id": 555444333,
+                "type": "chat",
+                "title": "Root chat only",
+            },
+            "body": {"text": "x"},
+        },
+    }
+    ev = parse_max_update(body)
+    assert ev is not None
+    assert ev.chat.is_group is True
+    assert ev.chat.id == 555444333
+
+
+def test_parse_group_recipient_top_level_chat_id_only():
+    body = {
+        "update_type": "message_created",
+        "message": {
+            "sender": {"user_id": 42, "name": "U"},
+            "recipient": {"chat_id": 777888999},
+            "body": {"text": "x"},
+        },
+    }
+    ev = parse_max_update(body)
+    assert ev is not None
+    assert ev.chat.is_group is True
+    assert ev.chat.id == 777888999
+
+
 def test_parse_group_message_nested_chat_recipient():
     """MAX часто шлёт группу как recipient.chat { chat_id, type: chat }, без recipient.type."""
     body = {

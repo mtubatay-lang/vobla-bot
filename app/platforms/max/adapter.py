@@ -24,6 +24,38 @@ from app.platforms.max.client import MaxApiClient
 logger = logging.getLogger(__name__)
 
 
+def _norm_recipient_from_message(msg: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Собрать единый dict recipient для разбора peer: иногда чат дублируется в
+    ``message.chat`` или в ``body.recipient``, а не только в ``message.recipient``.
+    """
+    rec = msg.get("recipient")
+    out: Dict[str, Any] = dict(rec) if isinstance(rec, dict) else {}
+
+    body = msg.get("body")
+    if isinstance(body, dict):
+        br = body.get("recipient")
+        if isinstance(br, dict):
+            for k, v in br.items():
+                if k not in out or out[k] in (None, "", {}):
+                    out[k] = v
+        # редко: вложенный chat в body
+        bch = body.get("chat")
+        if isinstance(bch, dict) and not isinstance(out.get("chat"), dict):
+            out["chat"] = bch
+
+    mch = msg.get("chat")
+    if isinstance(mch, dict):
+        existing = out.get("chat")
+        if not isinstance(existing, dict):
+            out["chat"] = dict(mch)
+        else:
+            merged = {**existing, **mch}
+            out["chat"] = merged
+
+    return out
+
+
 def _user_from_max(obj: Optional[Dict[str, Any]]) -> Optional[InternalUser]:
     if not obj or not isinstance(obj, dict):
         return None
@@ -67,13 +99,40 @@ def _parse_recipient_peer(
     rtype = str(recipient.get("type") or recipient.get("recipient_type") or "").lower()
     nested_type = str(chat_nested.get("type") or "").lower()
 
+    participants_raw = chat_nested.get("participants_count")
+    try:
+        participants_n = int(participants_raw) if participants_raw is not None else None
+    except (TypeError, ValueError):
+        participants_n = None
+
     # Группа / канал: верхний уровень или вложенный Chat (type "chat" = группа в MAX API).
-    # type "dialog" — личный диалог, не групповой чат для рассылок.
+    # type "dialog" при participants_count > 2 — несоответствие схемы, но это явно не 1:1.
+    # У вложенного Chat без type, но с chat_id и >2 участников — группа.
     is_group = (
         rtype in ("chat", "group", "channel")
         or recipient.get("is_group")
         or nested_type in ("chat", "channel")
+        or (nested_type == "dialog" and participants_n is not None and participants_n > 2)
+        or (
+            participants_n is not None
+            and participants_n > 2
+            and nested_type not in ("dialog",)
+        )
     )
+
+    # Webhook: только верхний chat_id без user_id и без вложенного chat — часто peer группы
+    if not is_group:
+        top_cid = recipient.get("chat_id")
+        top_uid = recipient.get("user_id")
+        if top_cid is not None and top_uid is None and rtype not in ("user",) and not chat_nested:
+            is_group = True
+
+    # Вложенный объект chat с chat_id и явным типом группы / канала
+    if not is_group and chat_nested.get("chat_id") is not None:
+        if nested_type in ("chat", "channel", "group", "supergroup"):
+            is_group = True
+        elif not nested_type and participants_n is not None and participants_n > 2:
+            is_group = True
 
     if is_group:
         cid = (
@@ -184,7 +243,7 @@ def parse_max_update(update: Dict[str, Any]) -> Optional[IncomingMessage | Callb
         msg = cb.get("message") or update.get("message") or {}
         if not isinstance(msg, dict):
             msg = {}
-        recipient = msg.get("recipient") if isinstance(msg.get("recipient"), dict) else {}
+        recipient = _norm_recipient_from_message(msg)
         _, _, chat = _parse_recipient_peer(recipient, user)
         mid = msg.get("id") or msg.get("message_id")
 
@@ -228,8 +287,20 @@ def parse_max_update(update: Dict[str, Any]) -> Optional[IncomingMessage | Callb
     if sender is None:
         return None
 
-    recipient = msg.get("recipient") if isinstance(msg.get("recipient"), dict) else {}
+    recipient = _norm_recipient_from_message(msg)
     _, is_group, chat = _parse_recipient_peer(recipient, sender)
+
+    if update_type == "message_created" and not is_group:
+        cn = recipient.get("chat") if isinstance(recipient.get("chat"), dict) else {}
+        logger.info(
+            "MAX message_created parsed as direct chat (is_group=False): "
+            "recipient_keys=%s chat_keys=%s chat.type=%r participants_count=%r top_chat_id=%r",
+            sorted(recipient.keys()),
+            sorted(cn.keys()) if cn else [],
+            cn.get("type"),
+            cn.get("participants_count"),
+            recipient.get("chat_id"),
+        )
 
     text = _message_body_text(msg)
     attachments = _incoming_attachments(msg)
