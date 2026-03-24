@@ -135,6 +135,8 @@ def _parse_recipient_peer(
     chat_nested = recipient.get("chat") if isinstance(recipient.get("chat"), dict) else {}
     rtype = str(recipient.get("type") or recipient.get("recipient_type") or "").lower()
     nested_type = str(chat_nested.get("type") or "").lower()
+    # Плоский recipient MAX: { chat_id, chat_type, user_id } — группа даже при user_id (например бот).
+    chat_type_flat = str(recipient.get("chat_type") or "").lower()
 
     participants_raw = chat_nested.get("participants_count")
     try:
@@ -149,6 +151,7 @@ def _parse_recipient_peer(
         rtype in ("chat", "group", "channel")
         or recipient.get("is_group")
         or nested_type in ("chat", "channel")
+        or chat_type_flat in ("chat", "channel", "group", "supergroup")
         or (nested_type == "dialog" and participants_n is not None and participants_n > 2)
         or (
             participants_n is not None

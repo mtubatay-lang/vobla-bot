@@ -10,7 +10,7 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, Update
 
-from app.config import BOT_TOKEN, LOG_LEVEL, SENTRY_DSN
+from app.config import BOT_TOKEN, LOG_LEVEL, SENTRY_DSN, TELEGRAM_POLLING_ENABLED
 from app.handlers.debug_passthrough import router as debug_router
 from app.handlers.start import router as start_router
 from app.handlers.help import router as help_router
@@ -96,6 +96,15 @@ async def main() -> None:
     for idx, router in enumerate(dp.sub_routers):
         router_name = getattr(router, 'name', f'router_{idx}')
         logger.info(f"[MAIN] Роутер {idx+1}: {router_name}")
+
+    if not TELEGRAM_POLLING_ENABLED:
+        logger.warning(
+            "[MAIN] TELEGRAM_POLLING_ENABLED=false — long polling не запускается в этом процессе. "
+            "Убедитесь, что другой инстанс один получает апдейты, иначе Telegram-бот не ответит."
+        )
+        stop = asyncio.Event()
+        await stop.wait()
+        return
 
     logger.info("Запускаем бота...")
 

@@ -63,6 +63,13 @@ def _max_group_chat_type_from_raw(raw: Any) -> str:
     rec = msg.get("recipient")
     if not isinstance(rec, dict):
         return "group"
+    ct_flat = str(rec.get("chat_type") or "").lower()
+    if ct_flat == "channel":
+        return "channel"
+    if ct_flat == "supergroup":
+        return "supergroup"
+    if ct_flat in ("chat", "group"):
+        return "group"
     t = str(rec.get("type") or rec.get("recipient_type") or "").lower()
     nested = rec.get("chat") if isinstance(rec.get("chat"), dict) else {}
     nt = str(nested.get("type") or "").lower()

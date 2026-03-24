@@ -58,7 +58,17 @@ MAX работает через **HTTPS webhook** к отдельному про
 
 Логи вида `aiogram.event: ... bot id=...` относятся **только к Telegram**. Для MAX смотри логи процесса с `uvicorn` / `MAX webhook`.
 
-Если в логах **TelegramConflictError: terminated by other getUpdates request** — одновременно запущены **два** экземпляра с тем же `BOT_TOKEN` (например локальный `python -m app.main` и Railway). Останови лишний, иначе polling конфликтует.
+### TelegramConflictError (`getUpdates` / «terminated by other getUpdates request»)
+
+Одновременно в сети не должно быть **двух** клиентов **long polling** с **одним** `BOT_TOKEN`. Иначе Telegram рвёт соединение, aiogram в логах спамит ошибкой, **бот не получает апдейты** (рассылка и любые сценарии в Telegram «не работают»).
+
+**Что проверить:**
+
+- На Railway у сервиса с `python -m app.main` — **Replicas = 1** (не масштабировать горизонтально polling).
+- Не запущен ли **второй** деплой/staging/локальный `python -m app.main` с **продакшен**-токеном.
+- Два сервиса из одного репозитория: оба не должны выполнять polling с одним токеном. Для сервиса **только MAX** задай **`TELEGRAM_POLLING_ENABLED=false`** (см. конфигурацию) и **Start Command** только `python -m app.max_entrypoint`, без `app.main`.
+
+**Опционально:** `TELEGRAM_POLLING_ENABLED=false` в процессе, где намеренно не нужен Telegram — процесс не вызывает `getUpdates` и не конфликтует с основным воркером.
 
 Если **POST /webhook/max** с кодом **422** — это баг разбора аннотаций FastAPI у вложенного handler (исправлено в `app/max_entrypoint.py`): задеплой свежий коммит.
 
@@ -130,7 +140,7 @@ python scripts/max_subscribe_webhook.py --url https://<домен>/webhook/max
 - `kilbil` работает как отдельный вопрос в режиме знаний `help.kilbil.ru`; перед ответом также отправляется статус «ищу в базе Kilbil…».
 - **`/admin`** в MAX открывает тот же набор функций, что в Telegram (рассылка, плановые рассылки, загрузка в базу знаний, генерация DOCX). Состояние шагов хранится в памяти процесса webhook (при нескольких репликах возможны расхождения — держите 1 реплику или sticky session).
 - Рассылка из MAX: медиа кладётся в `media_json` формата **v2** (`{"version":2,"telegram":[],"max":[...]}`), чтобы для MAX-получателей использовались **file_id MAX**, для Telegram — свои вложения. См. `parse_broadcast_media_for_platform` в `app/services/broadcast_service.py`.
-- В листах **`recipients_users`** и **`recipients_chats`** (таблица `STATS_SHEET_ID`) добавьте колонку **`platform`**: значения `telegram` или `max`. Без колонки все строки считаются Telegram. Для MAX-рассылок пользователи должны попасть в таблицу (после `/start` у авторизованного бот делает upsert строки `platform=max`). **Групповые чаты MAX** попадают в `recipients_chats` автоматически при первом (и следующих) сообщениях в группе или нажатии inline-кнопки там же (`platform=max`, `chat_id` из MAX). Парсер учитывает `message.recipient.chat`, **`update.chat`** на корне webhook, дублирование в **`message.chat`**, опционально **`body.recipient`**, верхнеуровневый **`recipient.chat_id`** без `user_id`, а также `participants_count > 2`. Если в webhook нет названия группы, после upsert вызывается **`GET /chats/{chatId}`** и колонка title обновляется (в логах: `title updated via API`). В логах: успех записи — `MAX recipients_chats: upsert scheduled`; если событие всё ещё считается личкой — строка `MAX message_created parsed as direct chat`.
+- В листах **`recipients_users`** и **`recipients_chats`** (таблица `STATS_SHEET_ID`) добавьте колонку **`platform`**: значения `telegram` или `max`. Без колонки все строки считаются Telegram. Для MAX-рассылок пользователи должны попасть в таблицу (после `/start` у авторизованного бот делает upsert строки `platform=max`). **Групповые чаты MAX** попадают в `recipients_chats` автоматически при первом (и следующих) сообщениях в группе или нажатии inline-кнопки там же (`platform=max`, `chat_id` из MAX). Парсер учитывает `message.recipient.chat`, плоский **`recipient.chat_type`** (`chat` / `channel` / `dialog` и т.д.), **`update.chat`** на корне webhook, дублирование в **`message.chat`**, опционально **`body.recipient`**, верхнеуровневый **`recipient.chat_id`** без `user_id`, а также `participants_count > 2`. Если в webhook нет названия группы, после upsert вызывается **`GET /chats/{chatId}`** и колонка title обновляется (в логах: `title updated via API`). В логах: успех записи — `MAX recipients_chats: upsert scheduled`; если событие всё ещё считается личкой — строка `MAX message_created parsed as direct chat`.
 - Команда **`/kb_migrate`** и тяжёлые обслуживающие сценарии по-прежнему удобнее запускать из Telegram.
 - **`POST /answers`**: клиент перебирает варианты тела запроса (без тела, `{}`, `notification: ""` и т.д.) — у разных версий API MAX требования различаются.
 - **Нижнее меню команд как в Telegram** (`setMyCommands` / reply keyboard) в MAX **нет** — только inline-кнопки у сообщений.
@@ -142,6 +152,7 @@ python scripts/max_subscribe_webhook.py --url https://<домен>/webhook/max
 ### Обязательные переменные (для основного бота)
 
 - `BOT_TOKEN` — токен Telegram-бота  
+- `TELEGRAM_POLLING_ENABLED` — по умолчанию `true`; `false` — не запускать long polling в этом процессе (второй сервис только под MAX webhook, чтобы не дублировать `getUpdates`)
 - `OPENAI_API_KEY` — ключ OpenAI  
 - `SHEET_ID`, `USERS_SHEET_ID`, `GOOGLE_SERVICE_ACCOUNT_JSON` — Google Sheets  
 - При необходимости: `STATS_SHEET_ID`, `MANAGER_CHAT_ID`, `KB_MANAGERS_CHAT_ID` и др. (см. `app/config.py`)

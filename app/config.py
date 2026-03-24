@@ -13,6 +13,17 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
 
+
+def _env_bool(name: str, default: bool = True) -> bool:
+    v = os.getenv(name)
+    if v is None:
+        return default
+    return v.strip().lower() in ("1", "true", "yes", "on")
+
+
+# False — не вызывать getUpdates в этом процессе (второй сервис только под MAX webhook и т.п.).
+TELEGRAM_POLLING_ENABLED = _env_bool("TELEGRAM_POLLING_ENABLED", True)
+
 # --- OpenAI ---
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")

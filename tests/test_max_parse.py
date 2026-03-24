@@ -128,6 +128,46 @@ def test_parse_group_title_from_update_level_chat():
     assert ev.chat.title == "Title only on update.chat"
 
 
+def test_parse_group_flat_recipient_chat_type_with_user_id():
+    """Плоский recipient: chat_id + chat_type=chat + user_id (например бот) — всё равно группа."""
+    body = {
+        "update_type": "message_created",
+        "message": {
+            "sender": {"user_id": 100, "name": "U"},
+            "recipient": {
+                "chat_id": -71933414354218,
+                "chat_type": "chat",
+                "user_id": 999001,
+            },
+            "body": {"text": "x"},
+        },
+    }
+    ev = parse_max_update(body)
+    assert ev is not None
+    assert ev.chat.is_group is True
+    assert ev.chat.id == -71933414354218
+
+
+def test_parse_dialog_flat_recipient_chat_type_dialog():
+    """Личка: chat_type dialog — не группа."""
+    body = {
+        "update_type": "message_created",
+        "message": {
+            "sender": {"user_id": 173247757, "name": "Admin"},
+            "recipient": {
+                "chat_id": 173247757,
+                "chat_type": "dialog",
+                "user_id": 111,
+            },
+            "body": {"text": "hi"},
+        },
+    }
+    ev = parse_max_update(body)
+    assert ev is not None
+    assert ev.chat.is_group is False
+    assert ev.chat.id == 173247757
+
+
 def test_parse_group_recipient_top_level_chat_id_only():
     body = {
         "update_type": "message_created",
