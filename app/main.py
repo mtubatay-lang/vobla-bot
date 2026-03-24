@@ -43,6 +43,11 @@ async def main() -> None:
         level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    _root_lvl = getattr(logging, LOG_LEVEL.upper(), logging.INFO)
+    if isinstance(_root_lvl, int) and _root_lvl >= logging.INFO:
+        # Иначе каждый long poll пишет URL с токеном в INFO (утечка в Railway-логах).
+        for _name in ("httpx", "httpcore"):
+            logging.getLogger(_name).setLevel(logging.WARNING)
     logger = logging.getLogger(__name__)
 
     # --- Создаём бота и диспетчер ---

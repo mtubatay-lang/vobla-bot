@@ -14,6 +14,7 @@ import os
 
 from app.config import (
     ENABLE_MAX,
+    LOG_LEVEL,
     MAX_BOT_TOKEN,
     MAX_API_BASE_URL,
     MAX_WEBHOOK_PATH,
@@ -24,10 +25,28 @@ from app.platforms.max import MaxApiClient, MaxAdapter, parse_max_update
 from app.platforms.max.router import MaxActionRouter
 
 logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+_root_lvl = getattr(logging, LOG_LEVEL.upper(), logging.INFO)
+if isinstance(_root_lvl, int) and _root_lvl >= logging.INFO:
+    for _name in ("httpx", "httpcore"):
+        logging.getLogger(_name).setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
+
+
+def _is_google_sheets_quota_error(exc: BaseException) -> bool:
+    s = str(exc)
+    if "429" not in s:
+        return False
+    mod = (type(exc).__module__ or "").lower()
+    if "gspread" in mod:
+        return True
+    s_low = s.lower()
+    return any(
+        x in s_low
+        for x in ("quota", "sheets.googleapis.com", "read requests", "rate limit exceeded")
+    )
 
 
 def _create_app():
@@ -84,6 +103,12 @@ def _create_app():
             await action_router.route(adapter, event)
             return JSONResponse(content={"ok": True})
         except Exception as e:
+            if _is_google_sheets_quota_error(e):
+                logger.warning(
+                    "MAX webhook: Google Sheets quota/rate limit, ack 200 to avoid retry storm: %s",
+                    e,
+                )
+                return JSONResponse(content={"ok": True, "degraded": True})
             logger.exception("MAX webhook handler error: %s", e)
             return JSONResponse(content={"ok": False}, status_code=500)
 
