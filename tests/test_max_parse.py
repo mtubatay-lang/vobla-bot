@@ -268,3 +268,38 @@ def test_parse_message_attachment_payload_file_id():
     assert len(ev.attachments) == 1
     assert ev.attachments[0]["file_id"] == "abc-123"
     assert ev.attachments[0]["type"] == "image"
+    assert ev.attachments[0]["max_payload"] == {"file_id": "abc-123"}
+
+
+def test_parse_message_attachment_payload_token():
+    """Для исходящего POST /messages картинка может прийти только с token в payload."""
+    body = {
+        "update_type": "message_created",
+        "message": {
+            "sender": {"user_id": 1, "name": "U"},
+            "recipient": {"type": "user", "user_id": 1},
+            "body": {
+                "text": "c",
+                "attachments": [{"type": "image", "payload": {"token": "tok-max-9"}}],
+            },
+        },
+    }
+    ev = parse_max_update(body)
+    assert ev is not None
+    assert ev.attachments[0]["max_payload"] == {"token": "tok-max-9"}
+
+
+def test_parse_message_video_attachment_outgoing_token():
+    body = {
+        "update_type": "message_created",
+        "message": {
+            "sender": {"user_id": 1, "name": "U"},
+            "recipient": {"type": "user", "user_id": 1},
+            "body": {
+                "attachments": [{"type": "video", "payload": {"file_id": "vid-1"}}],
+            },
+        },
+    }
+    ev = parse_max_update(body)
+    assert ev is not None
+    assert ev.attachments[0]["max_payload"] == {"token": "vid-1"}

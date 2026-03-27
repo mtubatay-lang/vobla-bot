@@ -20,6 +20,9 @@ class MaxApiClientError(Exception):
     def __init__(self, message: str, status: Optional[int] = None, body: Optional[str] = None):
         self.status = status
         self.body = body
+        detail = (body or "").strip()
+        if detail and detail not in message:
+            message = f"{message}: {detail[:800]}"
         super().__init__(message)
 
 

@@ -52,7 +52,11 @@ def parse_broadcast_media_for_platform(media_json: str, platform: Platform) -> L
                 if not fid:
                     continue
                 typ = str(a.get("type", "file")).lower()
-                out.append({"type": typ, "id_or_url": str(fid), "file_id": str(fid)})
+                row: Dict[str, Any] = {"type": typ, "id_or_url": str(fid), "file_id": str(fid)}
+                mp = a.get("max_payload")
+                if isinstance(mp, dict) and mp:
+                    row["max_payload"] = mp
+                out.append(row)
             else:
                 out.append(a)
         return out

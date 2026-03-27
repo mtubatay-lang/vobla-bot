@@ -347,6 +347,21 @@ async def _try_maxbc_broadcast(
     return False
 
 
+def _max_broadcast_item_from_attachment(a: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    fid = a.get("id_or_url") or a.get("file_id")
+    if not fid:
+        return None
+    item: Dict[str, Any] = {
+        "type": str(a.get("type", "file")).lower(),
+        "file_id": str(fid),
+        "id_or_url": str(fid),
+    }
+    mp = a.get("max_payload")
+    if isinstance(mp, dict) and mp:
+        item["max_payload"] = mp
+    return item
+
+
 def _merge_max_media_json(existing: str, max_items: list) -> str:
     try:
         data = json.loads(existing) if existing.strip() else {}
@@ -909,16 +924,9 @@ async def handle_admin_message(adapter, max_client: Any, event: IncomingMessage,
             if atts:
                 items = []
                 for a in atts:
-                    fid = a.get("id_or_url") or a.get("file_id")
-                    if not fid:
-                        continue
-                    items.append(
-                        {
-                            "type": str(a.get("type", "file")).lower(),
-                            "file_id": str(fid),
-                            "id_or_url": str(fid),
-                        }
-                    )
+                    it = _max_broadcast_item_from_attachment(a)
+                    if it:
+                        items.append(it)
                 if items:
                     mj = _merge_max_media_json(s.get("media_json", ""), items)
                     await _after_text_media(adapter, event.chat.id, is_g, uid, s, to, mj)
@@ -938,16 +946,9 @@ async def handle_admin_message(adapter, max_client: Any, event: IncomingMessage,
             if atts:
                 items = []
                 for a in atts:
-                    fid = a.get("id_or_url") or a.get("file_id")
-                    if not fid:
-                        continue
-                    items.append(
-                        {
-                            "type": str(a.get("type", "file")).lower(),
-                            "file_id": str(fid),
-                            "id_or_url": str(fid),
-                        }
-                    )
+                    it = _max_broadcast_item_from_attachment(a)
+                    if it:
+                        items.append(it)
                 if items:
                     mj = _merge_max_media_json(s.get("media_json", ""), items)
                     to = s.get("text_original", "")

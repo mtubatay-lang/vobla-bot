@@ -16,7 +16,14 @@ def test_v2_split_platforms():
         {
             "version": 2,
             "telegram": [{"type": "photo", "file_id": "a"}],
-            "max": [{"type": "image", "file_id": "m1", "id_or_url": "m1"}],
+            "max": [
+                {
+                    "type": "image",
+                    "file_id": "m1",
+                    "id_or_url": "m1",
+                    "max_payload": {"token": "m1"},
+                }
+            ],
         }
     )
     tg = parse_broadcast_media_for_platform(raw, "telegram")
@@ -24,6 +31,7 @@ def test_v2_split_platforms():
     assert tg[0]["file_id"] == "a"
     assert mx[0]["id_or_url"] == "m1"
     assert mx[0]["type"] == "image"
+    assert mx[0]["max_payload"] == {"token": "m1"}
 
 
 def test_invalid_json_empty():

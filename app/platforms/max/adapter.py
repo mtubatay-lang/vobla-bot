@@ -215,34 +215,54 @@ def _message_body_text(msg: Dict[str, Any]) -> str:
     return str(msg.get("text") or msg.get("message") or "").strip()
 
 
-def _attachment_file_ref(att: Any) -> tuple[Optional[str], str]:
-    """Идентификатор файла/URL для вложения MAX (в т.ч. внутри payload или вложенных объектов)."""
+def _attachment_file_ref(att: Any) -> tuple[Optional[str], str, str]:
+    """Идентификатор вложения MAX: (value, media_type, source_key) — source_key нужен для исходящего payload (token vs file_id)."""
     if not isinstance(att, dict):
-        return None, "file"
+        return None, "file", ""
     att_type = str(att.get("type") or att.get("media_type") or "file").lower()
 
-    def pick(d: dict) -> Optional[str]:
+    def pick(d: dict) -> tuple[Optional[str], str]:
         for key in ("file_id", "id", "url", "token", "photo_id", "media_id"):
             v = d.get(key)
             if v is not None and str(v).strip():
-                return str(v).strip()
-        return None
+                return str(v).strip(), key
+        return None, ""
 
-    fid = pick(att)
-    if fid:
-        return fid, att_type
+    val, rk = pick(att)
+    if val:
+        return val, att_type, rk
     pl = att.get("payload")
     if isinstance(pl, dict):
-        fid = pick(pl)
-        if fid:
-            return fid, att_type
+        val, rk = pick(pl)
+        if val:
+            return val, att_type, rk
     for subk in ("photo", "file", "image", "video", "document", "media", "sticker"):
         sub = att.get(subk)
         if isinstance(sub, dict):
-            fid = pick(sub)
-            if fid:
-                return fid, att_type
-    return None, att_type
+            val, rk = pick(sub)
+            if val:
+                return val, att_type, rk
+    return None, att_type, ""
+
+
+def _max_outgoing_payload(att_type: str, ref_key: str, value: str) -> Dict[str, str]:
+    """
+    Поле payload для POST /messages по документации MAX:
+    video/audio — token; часть входящих картинок приходит только с token в payload.
+    """
+    t = att_type.lower()
+    if t == "photo":
+        t = "image"
+    if t in ("video", "audio"):
+        return {"token": value}
+    if ref_key == "token":
+        return {"token": value}
+    return {"file_id": value}
+
+
+def normalize_max_send_attachment_type(t: str) -> str:
+    x = (t or "file").lower()
+    return "image" if x == "photo" else x
 
 
 def _incoming_attachments(msg: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -264,9 +284,16 @@ def _incoming_attachments(msg: Dict[str, Any]) -> List[Dict[str, Any]]:
     for att in atts:
         if not isinstance(att, dict):
             continue
-        file_id, att_type = _attachment_file_ref(att)
+        file_id, att_type, ref_key = _attachment_file_ref(att)
         if file_id:
-            out.append({"type": att_type, "file_id": file_id, "id_or_url": file_id})
+            out.append(
+                {
+                    "type": att_type,
+                    "file_id": file_id,
+                    "id_or_url": file_id,
+                    "max_payload": _max_outgoing_payload(att_type, ref_key, file_id),
+                }
+            )
     return out
 
 
@@ -526,12 +553,15 @@ class MaxAdapter:
             file_id = att.get("id_or_url") or att.get("file_id")
             if not file_id:
                 continue
-            max_atts.append(
-                {
-                    "type": att.get("type", "file"),
-                    "payload": {"file_id": str(file_id)},
-                }
-            )
+            typ = normalize_max_send_attachment_type(str(att.get("type", "file")))
+            mp = att.get("max_payload")
+            if isinstance(mp, dict) and mp:
+                payload = {k: str(v) for k, v in mp.items() if v is not None}
+            elif typ in ("video", "audio"):
+                payload = {"token": str(file_id)}
+            else:
+                payload = {"file_id": str(file_id)}
+            max_atts.append({"type": typ, "payload": payload})
         if not max_atts:
             return None
         body_text = caption or ""
