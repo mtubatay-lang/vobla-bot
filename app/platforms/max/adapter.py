@@ -179,12 +179,14 @@ def _user_from_max(obj: Optional[Dict[str, Any]]) -> Optional[InternalUser]:
         uid = obj.get("id")
     if uid is None:
         return None
+    is_bot = bool(obj.get("is_bot") or obj.get("bot"))
     return InternalUser(
         id=uid,
         platform="max",
         username=obj.get("username"),
         name=obj.get("name") or obj.get("first_name"),
         full_name=obj.get("full_name") or obj.get("name"),
+        is_bot=is_bot,
     )
 
 

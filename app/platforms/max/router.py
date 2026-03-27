@@ -26,7 +26,21 @@ from app.core.handlers import (
     handle_start_auth_callback,
     is_pending_auth,
 )
-from app.config import VOICE_STRUCTURE_OUTPUT, VOICE_TO_TEXT_ENABLED, WHISPER_MAX_FILE_BYTES
+from app.config import (
+    RAG_SKIP_SENDER_IDS,
+    VOICE_STRUCTURE_OUTPUT,
+    VOICE_TO_TEXT_ENABLED,
+    WHISPER_MAX_FILE_BYTES,
+    get_rag_test_chat_id,
+)
+from app.handlers.group_chat_qa import (
+    GroupChatQaSink,
+    _get_user_context,
+    _is_question,
+    passes_group_kb_content_filters,
+    process_group_chat_question_with_sink,
+    rag_chat_matches_restriction,
+)
 from app.core.types import CallbackEvent, IncomingMessage, OutgoingMessage
 from app.services.auth_service import find_user_by_platform_id
 from app.services.voice_transcription_service import structure_transcript, transcribe_audio_bytes
@@ -406,6 +420,70 @@ class MaxActionRouter:
         )
         return True
 
+    async def _max_group_sink_send(self, adapter, event: IncomingMessage, text: str) -> Any:
+        return await adapter.send_message(
+            OutgoingMessage(
+                chat_id=event.chat.id,
+                platform="max",
+                text=text,
+                is_group_chat=True,
+            )
+        )
+
+    async def _max_group_kb_from_plain_question(
+        self,
+        adapter,
+        event: IncomingMessage,
+        question_text: str,
+        *,
+        transcript_followup: bool = False,
+    ) -> bool:
+        """Групповой RAG по тексту (сообщение или транскрипт голоса), как в Telegram.
+        transcript_followup: True для голоса — вернуть True только если пользователю уже отправили ответ
+        (иначе ниже покажем расшифровку). Для текста после пайплайна всегда True (сообщение обработано)."""
+        if not event.chat.is_group:
+            return False
+        if getattr(event.user, "is_bot", False):
+            return False
+        q = (question_text or "").strip()
+        if not q:
+            return False
+        if not passes_group_kb_content_filters(q):
+            return False
+        if not rag_chat_matches_restriction(event.chat.id, get_rag_test_chat_id()):
+            return False
+        uid = self._user_int(event.user.id)
+        if uid in RAG_SKIP_SENDER_IDS:
+            return False
+        context = _get_user_context(event.chat.id, uid)
+        if context.get("pending_clarification") is None:
+            if not await _is_question(q):
+                return False
+
+        async def send_fn(t: str) -> Any:
+            return await self._max_group_sink_send(adapter, event, t)
+
+        sink = GroupChatQaSink(
+            chat_id=event.chat.id,
+            user_id=uid,
+            username=event.user.username,
+            user_first_name=(event.user.name or event.user.full_name or "пользователь"),
+            source_message_id=incoming_max_message_id(event) or "",
+            send=send_fn,
+        )
+        notified = await process_group_chat_question_with_sink(sink, q)
+        if transcript_followup:
+            return notified
+        return True
+
+    async def _max_group_kb_turn(self, adapter, event: IncomingMessage) -> bool:
+        if not event.chat.is_group:
+            return False
+        raw = (event.text or "").strip()
+        if not raw or raw.startswith("/"):
+            return False
+        return await self._max_group_kb_from_plain_question(adapter, event, raw)
+
     async def _max_voice_to_text_turn(self, adapter, event: IncomingMessage) -> bool:
         """Голос/аудио → текст (как Telegram voice_to_text), до admin/QA."""
         if not VOICE_TO_TEXT_ENABLED:
@@ -493,6 +571,10 @@ class MaxActionRouter:
                 text = await asyncio.to_thread(structure_transcript, text)
             except Exception as e:
                 logger.warning("[MAX_VOICE_TO_TEXT] structure: %s", e)
+        if is_g and await self._max_group_kb_from_plain_question(
+            adapter, event, text, transcript_followup=True
+        ):
+            return True
         for i in range(0, len(text), _MAX_VTT_CHUNK_LEN):
             chunk = text[i : i + _MAX_VTT_CHUNK_LEN]
             await adapter.send_message(
@@ -605,6 +687,8 @@ class MaxActionRouter:
             handled, action = ok, "cmd_admin"
         elif await self._max_voice_to_text_turn(adapter, event):
             handled, action = True, "voice_to_text"
+        elif await self._max_group_kb_turn(adapter, event):
+            handled, action = True, "group_kb_rag"
         elif await admin_flows.handle_admin_message(adapter, self._max_client, event, uid):
             handled, action = True, "admin_msg"
         elif event.attachments and await admin_flows.handle_admin_doc_attachment(adapter, event, uid):

@@ -18,6 +18,7 @@ class InternalUser:
     username: Optional[str] = None
     name: Optional[str] = None
     full_name: Optional[str] = None
+    is_bot: bool = False
 
 
 @dataclass(frozen=True)

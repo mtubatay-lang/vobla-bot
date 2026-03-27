@@ -3,7 +3,8 @@
 import asyncio
 import logging
 import re
-from typing import List, Dict, Any, Optional
+from dataclasses import dataclass
+from typing import List, Dict, Any, Optional, Callable, Awaitable
 
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
@@ -60,12 +61,12 @@ _awaiting_answer_cache: TTLCache = TTLCache(maxsize=2000, ttl=7200)
 _kb_confirm_pending: TTLCache = TTLCache(maxsize=500, ttl=3600)
 
 
-def _get_context_key(chat_id: int, user_id: int) -> tuple[int, int]:
-    """Возвращает ключ для хранения контекста."""
-    return (chat_id, user_id)
+def _get_context_key(chat_id: Any, user_id: Any) -> tuple[str, str]:
+    """Возвращает ключ для хранения контекста (строки — единообразно с MAX)."""
+    return (str(chat_id), str(user_id))
 
 
-def _get_user_context(chat_id: int, user_id: int) -> Dict[str, Any]:
+def _get_user_context(chat_id: Any, user_id: Any) -> Dict[str, Any]:
     """Получает контекст диалога пользователя."""
     key = _get_context_key(chat_id, user_id)
     try:
@@ -80,7 +81,7 @@ def _get_user_context(chat_id: int, user_id: int) -> Dict[str, Any]:
         return default
 
 
-def _update_user_context(chat_id: int, user_id: int, updates: Dict[str, Any]) -> None:
+def _update_user_context(chat_id: Any, user_id: Any, updates: Dict[str, Any]) -> None:
     """Обновляет контекст диалога пользователя."""
     context = _get_user_context(chat_id, user_id)
     context.update(updates)
@@ -88,6 +89,43 @@ def _update_user_context(chat_id: int, user_id: int, updates: Dict[str, Any]) ->
     # Ограничиваем историю последними 10 сообщениями
     if "conversation_history" in updates:
         context["conversation_history"] = context["conversation_history"][-10:]
+
+
+def passes_group_kb_content_filters(question_text: str) -> bool:
+    """Те же ранние фильтры, что у Telegram group RAG: не только ссылка, не слишком коротко."""
+    _url_re = re.compile(r"https?://\S+")
+    without_urls = _url_re.sub(" ", question_text)
+    if not without_urls.strip():
+        return False
+    content_chars = re.sub(r"[^\w\s]", "", without_urls)
+    if len(content_chars.strip()) < 5:
+        return False
+    return True
+
+
+def rag_chat_matches_restriction(chat_id: Any, rag_test_chat_id: Optional[int]) -> bool:
+    """True если RAG в этом чате разрешён (None в env — все чаты)."""
+    if rag_test_chat_id is None:
+        return True
+    try:
+        return int(chat_id) == int(rag_test_chat_id)
+    except (TypeError, ValueError):
+        return str(chat_id).strip() == str(rag_test_chat_id).strip()
+
+
+@dataclass
+class GroupChatQaSink:
+    """Отправка ответов группового RAG (Telegram Message.answer или MAX adapter)."""
+
+    chat_id: Any
+    user_id: Any
+    username: Optional[str]
+    user_first_name: str
+    source_message_id: Any
+    send: Callable[[str], Awaitable[Any]]
+
+    async def send_reply(self, text: str) -> Any:
+        return await self.send(text)
 
 
 def _is_top_score_sufficient_for_answer(found_chunks: List[Dict[str, Any]], min_score: float) -> bool:
@@ -488,14 +526,14 @@ async def _should_escalate_to_manager(
 
 
 def _add_awaiting_answer(
-    chat_id: int,
-    message_id: int,
+    chat_id: Any,
+    message_id: Any,
     question_text: str,
     top_score: Optional[float] = None,
     reason: Optional[str] = None,
 ) -> None:
     """Регистрирует сообщение как «вопрос без ответа» для последующей связки с ответом менеджера."""
-    key = (chat_id, message_id)
+    key = (str(chat_id), str(message_id))
     _awaiting_answer_cache[key] = {"question_text": question_text, "timestamp": time.time()}
     logger.info(
         "[GROUP_CHAT_QA] Вопрос без ответа добавлен в кэш awaiting_answer: chat_id=%s message_id=%s top_score=%s reason=%s",
@@ -511,6 +549,15 @@ async def _maybe_send_no_answer_reply(message: Message) -> None:
         await message.answer("Пока не нашёл ответ в базе. Менеджер может ответить позже.")
     except Exception as e:
         logger.warning("[GROUP_CHAT_QA] Не удалось отправить no_answer_reply: %s", e)
+
+
+async def _maybe_send_no_answer_reply_sink(sink: GroupChatQaSink) -> None:
+    if not RAG_SEND_NO_ANSWER_REPLY:
+        return
+    try:
+        await sink.send_reply("Пока не нашёл ответ в базе. Менеджер может ответить позже.")
+    except Exception as e:
+        logger.warning("[GROUP_CHAT_QA] Не удалось отправить no_answer_reply (sink): %s", e)
 
 
 async def _reformulate_question_for_retry(original_query: str) -> Optional[str]:
@@ -544,18 +591,18 @@ async def _reformulate_question_for_retry(original_query: str) -> Optional[str]:
         return None
 
 
-def _get_awaiting_answer(chat_id: int, message_id: int) -> Optional[Dict[str, Any]]:
+def _get_awaiting_answer(chat_id: Any, message_id: Any) -> Optional[Dict[str, Any]]:
     """Возвращает данные по сообщению из кэша «ожидающих ответа» или None."""
-    key = (chat_id, message_id)
+    key = (str(chat_id), str(message_id))
     try:
         return _awaiting_answer_cache[key]
     except KeyError:
         return None
 
 
-def _pop_awaiting_answer(chat_id: int, message_id: int) -> Optional[Dict[str, Any]]:
+def _pop_awaiting_answer(chat_id: Any, message_id: Any) -> Optional[Dict[str, Any]]:
     """Извлекает и удаляет запись из кэша «ожидающих ответа»."""
-    key = (chat_id, message_id)
+    key = (str(chat_id), str(message_id))
     try:
         data = _awaiting_answer_cache.pop(key)
         return data
@@ -595,16 +642,13 @@ async def _tag_manager_in_chat(message: Message, question: str) -> None:
     )
 
 
-async def process_question_in_group_chat(message: Message, question_text_override: Optional[str] = None) -> None:
-    """Обрабатывает вопрос в групповом чате. question_text_override: текст вопроса (для голоса/фото с подписью)."""
-    if not message.from_user:
-        return
-    
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    question = (question_text_override or (message.text or "")).strip()
+async def process_group_chat_question_with_sink(sink: GroupChatQaSink, question: str) -> bool:
+    """Общий групповой RAG (Telegram / MAX). True если пользователю ушло сообщение (ответ или no_answer_reply)."""
+    question = (question or "").strip()
     if not question:
-        return
+        return False
+    chat_id = sink.chat_id
+    user_id = sink.user_id
     
     # Получаем контекст диалога
     context = _get_user_context(chat_id, user_id)
@@ -687,7 +731,7 @@ async def process_question_in_group_chat(message: Message, question_text_overrid
         document = get_full_file_context()
         if USE_FULL_FILE_CONTEXT and document:
             is_first_turn = not any(m.get("role") == "assistant" for m in conversation_history)
-            user_name = (message.from_user.first_name or "пользователь") if message.from_user else "пользователь"
+            user_name = sink.user_first_name
             answer = await asyncio.to_thread(
                 generate_answer_from_full_document,
                 question,
@@ -696,17 +740,17 @@ async def process_question_in_group_chat(message: Message, question_text_overrid
                 user_name=user_name,
                 is_first_turn=is_first_turn,
             )
-            await message.answer(answer)
+            await sink.send_reply(answer)
             conversation_history.append({"role": "assistant", "text": answer})
             _update_user_context(chat_id, user_id, {"conversation_history": conversation_history})
             _qh = str(hash((query_text or question).strip().lower()[:200]))
             await alog_event(
                 user_id=user_id,
-                username=message.from_user.username,
+                username=sink.username,
                 event="rag_pipeline",
                 meta={"question_hash": _qh, "chunks_found": 0, "outcome": "answer", "source": "full_file"},
             )
-            return
+            return True
 
         # Усиленный RAG: расширение запроса, несколько поисков, re-ranking (как в приватном чате)
         from app.services.rag_query_cache import get_cached_chunks, set_cached_chunks
@@ -717,9 +761,9 @@ async def process_question_in_group_chat(message: Message, question_text_overrid
                 reformulated = await _reformulate_question_for_retry(query_text)
                 if not reformulated or reformulated.strip().lower() == query_text.strip().lower():
                     logger.info("[GROUP_CHAT_QA] Переформулировка не дала отличий, пропускаем retry")
-                    await _maybe_send_no_answer_reply(message)
-                    _add_awaiting_answer(chat_id, message.message_id, query_text, top_score=last_no_answer_top_score, reason=last_no_answer_reason or "reformulate_failed")
-                    return
+                    await _maybe_send_no_answer_reply_sink(sink)
+                    _add_awaiting_answer(chat_id, sink.source_message_id, query_text, top_score=last_no_answer_top_score, reason=last_no_answer_reason or "reformulate_failed")
+                    return bool(RAG_SEND_NO_ANSWER_REPLY)
                 current_query = reformulated
                 logger.info("[GROUP_CHAT_QA] No answer (attempt 1), retry with reformulated query: %s", current_query[:80])
             else:
@@ -733,14 +777,14 @@ async def process_question_in_group_chat(message: Message, question_text_overrid
                     last_no_answer_top_score = None
                     last_no_answer_reason = "from_cache_no_chunks"
                     _qh = str(hash(current_query.strip().lower()[:200])) if current_query else ""
-                    await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": _qh, "chunks_found": 0, "outcome": "no_answer_silent", "from_cache": True, "retry_attempt": attempt})
+                    await alog_event(user_id=user_id, username=sink.username, event="rag_pipeline", meta={"question_hash": _qh, "chunks_found": 0, "outcome": "no_answer_silent", "from_cache": True, "retry_attempt": attempt})
                     if attempt < MAX_SILENT_RETRIES:
                         continue
-                    await _maybe_send_no_answer_reply(message)
-                    _add_awaiting_answer(chat_id, message.message_id, query_text, reason=last_no_answer_reason)
-                    return
+                    await _maybe_send_no_answer_reply_sink(sink)
+                    _add_awaiting_answer(chat_id, sink.source_message_id, query_text, reason=last_no_answer_reason)
+                    return bool(RAG_SEND_NO_ANSWER_REPLY)
                 question_hash = str(hash(current_query.strip().lower()[:200])) if current_query else ""
-                await alog_event(user_id=user_id, username=message.from_user.username, event="kb_search_performed", meta={"question_hash": question_hash, "chunks_found": len(found_chunks), "top_scores": [round(c.get("score", 0), 3) for c in found_chunks[:3]], "top_sources": [str((c.get("metadata") or {}).get("source", ""))[:50] for c in found_chunks[:3]], "from_cache": True, "retry_attempt": attempt})
+                await alog_event(user_id=user_id, username=sink.username, event="kb_search_performed", meta={"question_hash": question_hash, "chunks_found": len(found_chunks), "top_scores": [round(c.get("score", 0), 3) for c in found_chunks[:3]], "top_sources": [str((c.get("metadata") or {}).get("source", ""))[:50] for c in found_chunks[:3]], "from_cache": True, "retry_attempt": attempt})
             else:
                 expanded_query = await _expand_query_for_search(current_query)
                 qdrant_service = get_qdrant_service()
@@ -826,17 +870,17 @@ async def process_question_in_group_chat(message: Message, question_text_overrid
                     last_no_answer_top_score = None
                     last_no_answer_reason = "no_chunks_after_rerank"
                     _qh = str(hash(current_query.strip().lower()[:200])) if current_query else ""
-                    await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": _qh, "chunks_found": 0, "outcome": "no_answer_silent", "retry_attempt": attempt})
+                    await alog_event(user_id=user_id, username=sink.username, event="rag_pipeline", meta={"question_hash": _qh, "chunks_found": 0, "outcome": "no_answer_silent", "retry_attempt": attempt})
                     if attempt < MAX_SILENT_RETRIES:
                         continue
-                    await _maybe_send_no_answer_reply(message)
-                    _add_awaiting_answer(chat_id, message.message_id, query_text, reason=last_no_answer_reason)
-                    return
+                    await _maybe_send_no_answer_reply_sink(sink)
+                    _add_awaiting_answer(chat_id, sink.source_message_id, query_text, reason=last_no_answer_reason)
+                    return bool(RAG_SEND_NO_ANSWER_REPLY)
                 set_cached_chunks(current_query, found_chunks)
                 question_hash = str(hash(current_query.strip().lower()[:200])) if current_query else ""
                 await alog_event(
                     user_id=user_id,
-                    username=message.from_user.username,
+                    username=sink.username,
                     event="kb_search_performed",
                     meta={
                         "question_hash": question_hash,
@@ -853,12 +897,12 @@ async def process_question_in_group_chat(message: Message, question_text_overrid
                 logger.info("[GROUP_CHAT_QA] Топ score %.3f < MIN_TOP_SCORE_FOR_ANSWER, молчим", top_score)
                 last_no_answer_top_score = top_score
                 last_no_answer_reason = "low_top_score"
-                await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": question_hash, "outcome": "no_answer_silent", "top_score": top_score, "retry_attempt": attempt})
+                await alog_event(user_id=user_id, username=sink.username, event="rag_pipeline", meta={"question_hash": question_hash, "outcome": "no_answer_silent", "top_score": top_score, "retry_attempt": attempt})
                 if attempt < MAX_SILENT_RETRIES:
                     continue
-                await _maybe_send_no_answer_reply(message)
-                _add_awaiting_answer(chat_id, message.message_id, query_text, top_score=top_score, reason="low_top_score")
-                return
+                await _maybe_send_no_answer_reply_sink(sink)
+                _add_awaiting_answer(chat_id, sink.source_message_id, query_text, top_score=top_score, reason="low_top_score")
+                return bool(RAG_SEND_NO_ANSWER_REPLY)
 
             # Проверка достаточности данных (используем эффективный вопрос: объединённый при ответе на уточнение)
             sufficient, missing_info = await _check_sufficient_data(current_query, found_chunks)
@@ -867,12 +911,12 @@ async def process_question_in_group_chat(message: Message, question_text_overrid
             if await _should_escalate_to_manager(found_chunks, (sufficient, missing_info)):
                 last_no_answer_top_score = top_score
                 last_no_answer_reason = "escalate"
-                await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": question_hash, "outcome": "no_answer_silent", "top_score": top_score, "reason": "escalate", "retry_attempt": attempt})
+                await alog_event(user_id=user_id, username=sink.username, event="rag_pipeline", meta={"question_hash": question_hash, "outcome": "no_answer_silent", "top_score": top_score, "reason": "escalate", "retry_attempt": attempt})
                 if attempt < MAX_SILENT_RETRIES:
                     continue
-                await _maybe_send_no_answer_reply(message)
-                _add_awaiting_answer(chat_id, message.message_id, query_text, top_score=top_score, reason="escalate")
-                return
+                await _maybe_send_no_answer_reply_sink(sink)
+                _add_awaiting_answer(chat_id, sink.source_message_id, query_text, top_score=top_score, reason="escalate")
+                return bool(RAG_SEND_NO_ANSWER_REPLY)
 
             # Если данных недостаточно — не задаём уточняющий вопрос в группе (молчим), считаем что нет ответа
             clarification_rounds = context.get("clarification_rounds", 0)
@@ -883,16 +927,16 @@ async def process_question_in_group_chat(message: Message, question_text_overrid
                 else:
                     last_no_answer_top_score = top_score
                     last_no_answer_reason = "insufficient_data"
-                    await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": question_hash, "outcome": "no_answer_silent", "top_score": top_score, "reason": "insufficient_data", "retry_attempt": attempt})
+                    await alog_event(user_id=user_id, username=sink.username, event="rag_pipeline", meta={"question_hash": question_hash, "outcome": "no_answer_silent", "top_score": top_score, "reason": "insufficient_data", "retry_attempt": attempt})
                     if attempt < MAX_SILENT_RETRIES:
                         continue
-                    await _maybe_send_no_answer_reply(message)
-                    _add_awaiting_answer(chat_id, message.message_id, query_text, top_score=top_score, reason="insufficient_data")
-                    return
+                    await _maybe_send_no_answer_reply_sink(sink)
+                    _add_awaiting_answer(chat_id, sink.source_message_id, query_text, top_score=top_score, reason="insufficient_data")
+                    return bool(RAG_SEND_NO_ANSWER_REPLY)
 
             # Первое обращение в диалоге — приветствие в ответе
             is_first_turn = not any(m.get("role") == "assistant" for m in conversation_history)
-            user_name = (message.from_user.first_name or "пользователь") if message.from_user else "пользователь"
+            user_name = sink.user_first_name
 
             # Генерируем ответ (используем эффективный вопрос)
             answer = await _generate_answer_from_chunks(
@@ -905,12 +949,12 @@ async def process_question_in_group_chat(message: Message, question_text_overrid
                 logger.warning("[GROUP_CHAT_QA] Ответ не обоснован фрагментами (grounding), молчим")
                 last_no_answer_top_score = top_score
                 last_no_answer_reason = "grounding_fail"
-                await alog_event(user_id=user_id, username=message.from_user.username, event="rag_pipeline", meta={"question_hash": question_hash, "outcome": "no_answer_silent", "top_score": top_score, "reason": "grounding_fail", "retry_attempt": attempt})
+                await alog_event(user_id=user_id, username=sink.username, event="rag_pipeline", meta={"question_hash": question_hash, "outcome": "no_answer_silent", "top_score": top_score, "reason": "grounding_fail", "retry_attempt": attempt})
                 if attempt < MAX_SILENT_RETRIES:
                     continue
-                await _maybe_send_no_answer_reply(message)
-                _add_awaiting_answer(chat_id, message.message_id, query_text, top_score=top_score, reason="grounding_fail")
-                return
+                await _maybe_send_no_answer_reply_sink(sink)
+                _add_awaiting_answer(chat_id, sink.source_message_id, query_text, top_score=top_score, reason="grounding_fail")
+                return bool(RAG_SEND_NO_ANSWER_REPLY)
 
             kilbil_urls = get_article_urls_from_chunks(found_chunks, only_if_top_from_kilbil=True)
             if kilbil_urls:
@@ -920,7 +964,7 @@ async def process_question_in_group_chat(message: Message, question_text_overrid
                     answer = answer + "\n\n📎 Подробнее:\n" + "\n".join(kilbil_urls)
 
             # Отправляем ответ (единственное сообщение в группу при успехе)
-            await message.answer(answer)
+            await sink.send_reply(answer)
 
             # Добавляем ответ в историю
             conversation_history.append({"role": "assistant", "text": answer})
@@ -928,7 +972,7 @@ async def process_question_in_group_chat(message: Message, question_text_overrid
 
             await alog_event(
                 user_id=user_id,
-                username=message.from_user.username,
+                username=sink.username,
                 event="kb_answer_generated",
                 meta={
                     "question_hash": question_hash,
@@ -937,11 +981,30 @@ async def process_question_in_group_chat(message: Message, question_text_overrid
                     "retry_attempt": attempt,
                 },
             )
-            return  # success — выходим из process_question_in_group_chat
+            return True
 
     except Exception as e:
         logger.exception(f"[GROUP_CHAT_QA] Ошибка обработки вопроса: {e}")
         # Молчим: не отправляем сообщение об ошибке в группу
+    return False
+
+
+async def process_question_in_group_chat(message: Message, question_text_override: Optional[str] = None) -> None:
+    """Обрабатывает вопрос в групповом чате. question_text_override: текст вопроса (для голоса/фото с подписью)."""
+    if not message.from_user:
+        return
+    question = (question_text_override or (message.text or "")).strip()
+    if not question:
+        return
+    sink = GroupChatQaSink(
+        chat_id=message.chat.id,
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        user_first_name=(message.from_user.first_name or "пользователь"),
+        source_message_id=message.message_id,
+        send=message.answer,
+    )
+    await process_group_chat_question_with_sink(sink, question)
 
 
 async def _get_question_text_from_message(message: Message) -> Optional[str]:
@@ -988,17 +1051,11 @@ async def handle_group_chat_message(message: Message):
     if not question_text:
         return
 
-    # Ранние фильтры: только ссылка или только эмодзи/короткое
-    _url_re = re.compile(r"https?://\S+")
-    without_urls = _url_re.sub(" ", question_text)
-    if not without_urls.strip():
-        return
-    content_chars = re.sub(r"[^\w\s]", "", without_urls)
-    if len(content_chars.strip()) < 5:
+    if not passes_group_kb_content_filters(question_text):
         return
 
     rag_test_chat_id = get_rag_test_chat_id()
-    if rag_test_chat_id is not None and message.chat.id != rag_test_chat_id:
+    if not rag_chat_matches_restriction(message.chat.id, rag_test_chat_id):
         return
 
     context = _get_user_context(message.chat.id, message.from_user.id if message.from_user else 0)
@@ -1046,7 +1103,7 @@ _kb_waiting_edit: TTLCache = TTLCache(maxsize=300, ttl=3600)
 async def handle_manager_reply_to_user_question(message: Message):
     """Менеджер ответил на сообщение пользователя (по которому бот не нашёл ответа) — отправляем в группу менеджеров предложение записать в базу."""
     rag_test_chat_id = get_rag_test_chat_id()
-    if rag_test_chat_id is not None and message.chat.id != rag_test_chat_id:
+    if not rag_chat_matches_restriction(message.chat.id, rag_test_chat_id):
         return
     if message.from_user and message.from_user.is_bot:
         return
@@ -1082,18 +1139,17 @@ async def handle_manager_reply_to_user_question(message: Message):
 @router.message(F.chat.type.in_(["group", "supergroup"]), F.reply_to_message)
 async def handle_manager_reply_in_group_chat(message: Message):
     """Перехватывает ответы менеджеров на вопросы в групповых чатах (reply на сообщение бота с тегом «Не нашел ответа»)."""
-    # Если указан тестовый чат, обрабатываем только его
     rag_test_chat_id = get_rag_test_chat_id()
-    if rag_test_chat_id is not None and message.chat.id != rag_test_chat_id:
+    if not rag_chat_matches_restriction(message.chat.id, rag_test_chat_id):
         return
-    
+
     # Игнорируем сообщения от бота
     if message.from_user and message.from_user.is_bot:
         return
-    
+
     if not _is_manager_message(message):
         return
-    
+
     # Проверяем, является ли reply_to_message от бота с тегом менеджера
     reply_to = message.reply_to_message
     if not reply_to or not reply_to.from_user or not reply_to.from_user.is_bot:
