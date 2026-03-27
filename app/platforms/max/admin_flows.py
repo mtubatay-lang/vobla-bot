@@ -362,6 +362,29 @@ def _max_broadcast_item_from_attachment(a: Dict[str, Any]) -> Optional[Dict[str,
     return item
 
 
+# Лимит текста тела сообщения MAX (NewMessageBody.text)
+_MAX_OUTGOING_MESSAGE_TEXT = 4000
+
+
+def _max_variant_choice_message(improved_text: str, media_json: str, max_total: int = _MAX_OUTGOING_MESSAGE_TEXT) -> str:
+    """Текст шага выбора оригинал/улучшенный — как в Telegram _process_broadcast_text, с усечением под лимит API."""
+    head = "📋 <b>Превью (улучшенный вариант)</b>\n\n"
+    suffix = ""
+    if (media_json or "").strip():
+        suffix += "\n\n📎 Медиа прикреплено"
+    suffix += "\n\nВыберите вариант текста:"
+    overhead = len(head) + len(suffix)
+    budget = max_total - overhead
+    if budget < 1:
+        budget = 1
+    imp = improved_text or ""
+    if len(imp) <= budget:
+        body_imp = imp
+    else:
+        body_imp = imp[: max(budget - 1, 0)] + "…"
+    return head + body_imp + suffix
+
+
 def _merge_max_media_json(existing: str, max_items: list) -> str:
     try:
         data = json.loads(existing) if existing.strip() else {}
@@ -865,10 +888,11 @@ async def _after_text_media(adapter, chat_id, is_g, uid: int, s: Dict, text_orig
     if need:
         s["improved_text"] = improved_text
         s["step"] = "pick_variant"
+        variant_body = _max_variant_choice_message(improved_text, media_json)
         await _send(
             adapter,
             chat_id,
-            "Выберите вариант текста:",
+            variant_body,
             _rows(
                 ("Оригинал", "broadcast:variant:original"),
                 ("Улучшенный", "broadcast:variant:improved"),
