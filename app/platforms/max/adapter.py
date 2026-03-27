@@ -215,6 +215,36 @@ def _message_body_text(msg: Dict[str, Any]) -> str:
     return str(msg.get("text") or msg.get("message") or "").strip()
 
 
+def _attachment_file_ref(att: Any) -> tuple[Optional[str], str]:
+    """Идентификатор файла/URL для вложения MAX (в т.ч. внутри payload или вложенных объектов)."""
+    if not isinstance(att, dict):
+        return None, "file"
+    att_type = str(att.get("type") or att.get("media_type") or "file").lower()
+
+    def pick(d: dict) -> Optional[str]:
+        for key in ("file_id", "id", "url", "token", "photo_id", "media_id"):
+            v = d.get(key)
+            if v is not None and str(v).strip():
+                return str(v).strip()
+        return None
+
+    fid = pick(att)
+    if fid:
+        return fid, att_type
+    pl = att.get("payload")
+    if isinstance(pl, dict):
+        fid = pick(pl)
+        if fid:
+            return fid, att_type
+    for subk in ("photo", "file", "image", "video", "document", "media", "sticker"):
+        sub = att.get(subk)
+        if isinstance(sub, dict):
+            fid = pick(sub)
+            if fid:
+                return fid, att_type
+    return None, att_type
+
+
 def _incoming_attachments(msg: Dict[str, Any]) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     body = msg.get("body")
@@ -223,14 +253,33 @@ def _incoming_attachments(msg: Dict[str, Any]) -> List[Dict[str, Any]]:
         atts = body.get("attachments") or []
     if not atts:
         atts = msg.get("attachments") or msg.get("media") or []
+    if isinstance(body, dict) and not atts:
+        for key in ("photo", "image", "video", "file", "document", "audio"):
+            block = body.get(key)
+            if isinstance(block, dict):
+                merged = dict(block)
+                merged.setdefault("type", key)
+                atts = [merged]
+                break
     for att in atts:
         if not isinstance(att, dict):
             continue
-        att_type = att.get("type") or att.get("media_type") or "document"
-        file_id = att.get("file_id") or att.get("id") or att.get("url")
+        file_id, att_type = _attachment_file_ref(att)
         if file_id:
             out.append({"type": att_type, "file_id": file_id, "id_or_url": file_id})
     return out
+
+
+def message_attachments_from_incoming(event: IncomingMessage) -> List[Dict[str, Any]]:
+    """Вложения входящего сообщения: приоритет полного разбора raw.message (как в webhook)."""
+    raw = getattr(event, "raw", None)
+    if isinstance(raw, dict):
+        msg = raw.get("message")
+        if isinstance(msg, dict):
+            parsed = _incoming_attachments(msg)
+            if parsed:
+                return parsed
+    return list(event.attachments or [])
 
 
 def _reply_to_mid(msg: Dict[str, Any]) -> Optional[str | int]:

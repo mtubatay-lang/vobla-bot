@@ -246,3 +246,25 @@ def test_parse_callback_peer_is_sender_in_dm():
     assert ev is not None
     assert ev.chat.id == 42
     assert ev.chat.is_group is False
+
+
+def test_parse_message_attachment_payload_file_id():
+    """Вложения MAX: file_id часто внутри payload."""
+    body = {
+        "update_type": "message_created",
+        "message": {
+            "sender": {"user_id": 1, "name": "U"},
+            "recipient": {"type": "user", "user_id": 1},
+            "body": {
+                "text": "caption",
+                "attachments": [
+                    {"type": "image", "payload": {"file_id": "abc-123"}},
+                ],
+            },
+        },
+    }
+    ev = parse_max_update(body)
+    assert ev is not None
+    assert len(ev.attachments) == 1
+    assert ev.attachments[0]["file_id"] == "abc-123"
+    assert ev.attachments[0]["type"] == "image"

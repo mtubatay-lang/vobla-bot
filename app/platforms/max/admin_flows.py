@@ -58,6 +58,7 @@ from app.services.scheduled_broadcast_service import (
     read_active_scheduled_broadcasts_for_list,
     set_scheduled_broadcast_inactive,
 )
+from app.platforms.max.adapter import message_attachments_from_incoming
 from app.ui.keyboards import max_admin_menu_rows, max_main_menu_rows
 
 logger = logging.getLogger(__name__)
@@ -904,6 +905,24 @@ async def handle_admin_message(adapter, max_client: Any, event: IncomingMessage,
     if s.get("kind") == "broadcast":
         if s.get("step") == "wait_text":
             to = "" if text == "-" else text
+            atts = message_attachments_from_incoming(event)
+            if atts:
+                items = []
+                for a in atts:
+                    fid = a.get("id_or_url") or a.get("file_id")
+                    if not fid:
+                        continue
+                    items.append(
+                        {
+                            "type": str(a.get("type", "file")).lower(),
+                            "file_id": str(fid),
+                            "id_or_url": str(fid),
+                        }
+                    )
+                if items:
+                    mj = _merge_max_media_json(s.get("media_json", ""), items)
+                    await _after_text_media(adapter, event.chat.id, is_g, uid, s, to, mj)
+                    return True
             s["text_original"] = to
             s["step"] = "wait_media"
             await _send(
@@ -914,23 +933,26 @@ async def handle_admin_message(adapter, max_client: Any, event: IncomingMessage,
                 is_group=is_g,
             )
             return True
-        if s.get("step") == "wait_media" and event.attachments:
-            items = []
-            for a in event.attachments:
-                fid = a.get("id_or_url") or a.get("file_id")
-                if not fid:
-                    continue
-                items.append(
-                    {
-                        "type": str(a.get("type", "file")).lower(),
-                        "file_id": str(fid),
-                        "id_or_url": str(fid),
-                    }
-                )
-            mj = _merge_max_media_json(s.get("media_json", ""), items)
-            to = s.get("text_original", "")
-            await _after_text_media(adapter, event.chat.id, is_g, uid, s, to, mj)
-            return True
+        if s.get("step") == "wait_media":
+            atts = message_attachments_from_incoming(event)
+            if atts:
+                items = []
+                for a in atts:
+                    fid = a.get("id_or_url") or a.get("file_id")
+                    if not fid:
+                        continue
+                    items.append(
+                        {
+                            "type": str(a.get("type", "file")).lower(),
+                            "file_id": str(fid),
+                            "id_or_url": str(fid),
+                        }
+                    )
+                if items:
+                    mj = _merge_max_media_json(s.get("media_json", ""), items)
+                    to = s.get("text_original", "")
+                    await _after_text_media(adapter, event.chat.id, is_g, uid, s, to, mj)
+                    return True
         if s.get("step") == "wait_month_day":
             try:
                 day = int(text)
