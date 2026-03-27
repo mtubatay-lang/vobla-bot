@@ -151,7 +151,9 @@ python scripts/max_subscribe_webhook.py --url https://<домен>/webhook/max
 - После авторизации `qa_start` запускает упрощённый одношаговый RAG по Qdrant (см. `app/services/max_qa_simple.py`), `qa_exit` завершает сессию. Пока идёт поиск и генерация ответа, бот сразу шлёт короткое сообщение «ищу в базе знаний…» (и при необходимости индикатор набора), затем полный ответ отдельным сообщением — так видно, что бот не завис.
 - `kilbil` работает как отдельный вопрос в режиме знаний `help.kilbil.ru`; перед ответом также отправляется статус «ищу в базе Kilbil…».
 - **`/admin`** в MAX открывает тот же набор функций, что в Telegram (рассылка, плановые рассылки, загрузка в базу знаний, генерация DOCX). Состояние шагов хранится в памяти процесса webhook (при нескольких репликах возможны расхождения — держите 1 реплику или sticky session).
-- Рассылка из MAX: медиа кладётся в `media_json` формата **v2** (`{"version":2,"telegram":[],"max":[...]}`), чтобы для MAX-получателей использовались **file_id MAX**, для Telegram — свои вложения. См. `parse_broadcast_media_for_platform` в `app/services/broadcast_service.py`.
+- Рассылка из MAX: после теста — аудитория «пользователи / все чаты / оба», плюс **«Чаты и регионы»** (как в Telegram: **по регионам** или **мультивыбор чатов**). Учитываются только строки `recipients_chats` с **`platform=max`**; для регионов нужна колонка **`region`**. Плановые рассылки из MAX сохраняют выбор в `mode_extra` (`audience_platform=max`).
+- Медиа кладётся в `media_json` формата **v2** (`{"version":2,"telegram":[],"max":[...]}`), чтобы для MAX-получателей использовались **file_id MAX**, для Telegram — свои вложения. См. `parse_broadcast_media_for_platform` в `app/services/broadcast_service.py`.
+- Параллельность отправок в `execute_broadcast_multi` настраивается **`BROADCAST_SEND_CONCURRENCY`** (по умолчанию 10), если упираетесь в лимиты API.
 - В листах **`recipients_users`** и **`recipients_chats`** (таблица `STATS_SHEET_ID`) добавьте колонку **`platform`**: значения `telegram` или `max`. Без колонки все строки считаются Telegram. Для MAX-рассылок пользователи должны попасть в таблицу (после `/start` у авторизованного бот делает upsert строки `platform=max`). **Групповые чаты MAX** попадают в `recipients_chats` автоматически при первом (и следующих) сообщениях в группе или нажатии inline-кнопки там же (`platform=max`, `chat_id` из MAX). Парсер учитывает `message.recipient.chat`, плоский **`recipient.chat_type`** (`chat` / `channel` / `dialog` и т.д.), **`update.chat`** на корне webhook, дублирование в **`message.chat`**, опционально **`body.recipient`**, верхнеуровневый **`recipient.chat_id`** без `user_id`, а также `participants_count > 2`. Если в webhook нет названия группы, после upsert вызывается **`GET /chats/{chatId}`** и колонка title обновляется (в логах: `title updated via API`). В логах: успех записи — `MAX recipients_chats: upsert scheduled`; если событие всё ещё считается личкой — строка `MAX message_created parsed as direct chat`.
 - Команда **`/kb_migrate`** и тяжёлые обслуживающие сценарии по-прежнему удобнее запускать из Telegram.
 - **`POST /answers`**: клиент перебирает варианты тела запроса (без тела, `{}`, `notification: ""` и т.д.) — у разных версий API MAX требования различаются.
@@ -187,7 +189,7 @@ python scripts/max_subscribe_webhook.py --url https://<домен>/webhook/max
 python -m app.jobs.scheduled_broadcasts
 ```
 
-Используется тот же `execute_broadcast`, что и ручная рассылка; получатели берутся из Google Sheets (пока только Telegram).
+Используется тот же `execute_broadcast`, что и ручная рассылка; получатели берутся из Google Sheets по колонке `platform` (Telegram и MAX).
 
 **Отчёты в чат менеджеров:**
 

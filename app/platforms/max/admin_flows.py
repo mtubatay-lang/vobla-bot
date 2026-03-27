@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.config import BOT_TOKEN
 from app.core.callbacks import (
@@ -37,6 +37,8 @@ from app.services.broadcast_service import (
     execute_broadcast_multi,
     get_broadcast_recipients_list,
     parse_broadcast_media_for_platform,
+    read_active_recipients_chats_with_names,
+    read_active_regions,
 )
 from app.services.document_template_service import (
     fill_docx_template,
@@ -65,6 +67,21 @@ _sessions: Dict[int, Dict[str, Any]] = {}
 
 MAX_ADMIN_HOME = "max:admin:home"
 
+# Сегментация рассылки MAX (callback_data — короткие префиксы)
+_MAXBC_SEG = "maxbc:seg"
+_MAXBC_REG = "maxbc:reg"
+_MAXBC_CHT = "maxbc:cht"
+_MAXBC_BACK_SEG = "maxbc:bseg"
+_MAXBC_RT = "maxbc:rt:"  # + индекс региона в полном списке
+_MAXBC_RP = "maxbc:rp:"  # + страница
+_MAXBC_RGO = "maxbc:rgo"
+_MAXBC_CT = "maxbc:ct:"  # + chat_id (в т.ч. отрицательный)
+_MAXBC_CP = "maxbc:cp:"
+_MAXBC_CGO = "maxbc:cgo"
+_MAX_REGIONS_PAGE = 8
+_MAX_CHATS_PAGE = 6
+_MAX_AUDIENCE_PLATFORM = "max"
+
 
 def _clear(uid: int) -> None:
     _sessions.pop(uid, None)
@@ -76,6 +93,257 @@ def _busy(uid: int) -> bool:
 
 def _rows(*pairs: Tuple[str, str]) -> list[KeyboardRow]:
     return [[KeyboardButton(text=t, callback_data=c)] for t, c in pairs]
+
+
+def _max_audience_final_kb() -> list[KeyboardRow]:
+    return _rows(
+        ("👥 Пользователям", "broadcast:send:users"),
+        ("💬 Во все чаты", "broadcast:send:chats"),
+        ("👥💬 Бот и чаты", "broadcast:send:users_chats"),
+        ("📋 Чаты и регионы", _MAXBC_SEG),
+        ("❌ Отмена", "broadcast:cancel_send"),
+    )
+
+
+async def _send_maxbc_segmentation_menu(adapter, chat_id: Any, is_g: bool) -> None:
+    await _send(
+        adapter,
+        chat_id,
+        "📋 <b>Как выбрать получателей?</b>",
+        _rows(
+            ("🌍 По регионам", _MAXBC_REG),
+            ("🏢 По чатам", _MAXBC_CHT),
+            ("⬅️ Назад", _MAXBC_BACK_SEG),
+        ),
+        is_group=is_g,
+    )
+
+
+def _region_toggle_row(name: str, idx: int, selected: List[str]) -> KeyboardRow:
+    mark = "☑" if name in selected else "☐"
+    short = (name[:35] + "…") if len(name) > 35 else name
+    return [KeyboardButton(text=f"{mark} {short}", callback_data=f"{_MAXBC_RT}{idx}")]
+
+
+async def _render_max_regions(adapter, chat_id: Any, is_g: bool, s: Dict[str, Any]) -> None:
+    regions: List[str] = s.get("available_regions") or []
+    selected: List[str] = list(s.get("selected_regions") or [])
+    page = int(s.get("regions_page") or 0)
+    n = len(regions)
+    per = _MAX_REGIONS_PAGE
+    start = page * per
+    chunk = regions[start : start + per]
+    kb: list[KeyboardRow] = []
+    for i, rname in enumerate(chunk):
+        gidx = start + i
+        kb.append(_region_toggle_row(rname, gidx, selected))
+    nav: KeyboardRow = []
+    if page > 0:
+        nav.append(KeyboardButton(text="◀", callback_data=f"{_MAXBC_RP}{page - 1}"))
+    if start + per < n:
+        nav.append(KeyboardButton(text="▶", callback_data=f"{_MAXBC_RP}{page + 1}"))
+    if nav:
+        kb.append(nav)
+    kb.append([KeyboardButton(text="✅ Далее (к отправке)", callback_data=_MAXBC_RGO)])
+    kb.append([KeyboardButton(text="⬅️ Назад", callback_data=_MAXBC_BACK_SEG)])
+    body = (
+        "🌍 <b>Регионы</b> (строки с <code>platform=max</code> в recipients_chats)\n\n"
+        f"Выбрано регионов: {len(selected)}. В списке: {n}.\n"
+        "Отметьте регионы, затем «Далее»."
+    )
+    await _send(adapter, chat_id, body, kb, is_group=is_g)
+
+
+async def _render_max_chats(adapter, chat_id: Any, is_g: bool, s: Dict[str, Any]) -> None:
+    chats: List[Dict[str, Any]] = s.get("available_chats") or []
+    sel_ids: List[int] = list(s.get("selected_chat_ids") or [])
+    page = int(s.get("chats_page") or 0)
+    n = len(chats)
+    per = _MAX_CHATS_PAGE
+    start = page * per
+    chunk = chats[start : start + per]
+    kb: list[KeyboardRow] = []
+    for c in chunk:
+        cid = int(c["chat_id"])
+        nm = str(c.get("name") or cid)[:32]
+        mark = "☑" if cid in sel_ids else "☐"
+        kb.append([KeyboardButton(text=f"{mark} {nm}", callback_data=f"{_MAXBC_CT}{cid}")])
+    nav: KeyboardRow = []
+    if page > 0:
+        nav.append(KeyboardButton(text="◀", callback_data=f"{_MAXBC_CP}{page - 1}"))
+    if start + per < n:
+        nav.append(KeyboardButton(text="▶", callback_data=f"{_MAXBC_CP}{page + 1}"))
+    if nav:
+        kb.append(nav)
+    kb.append([KeyboardButton(text="✅ Далее (к отправке)", callback_data=_MAXBC_CGO)])
+    kb.append([KeyboardButton(text="⬅️ Назад", callback_data=_MAXBC_BACK_SEG)])
+    body = (
+        "🏢 <b>Чаты</b> (platform=max)\n\n"
+        f"Выбрано чатов: {len(sel_ids)} из {n}."
+    )
+    await _send(adapter, chat_id, body, kb, is_group=is_g)
+
+
+async def _send_broadcast_send_type(adapter, chat_id: Any, is_g: bool) -> None:
+    await _send(
+        adapter,
+        chat_id,
+        "⏰ Как отправить?",
+        _rows(
+            ("📤 Сейчас", "broadcast:send_now"),
+            ("📅 Раз в неделю (10:00)", "broadcast:schedule:weekly"),
+            ("📆 Раз в месяц (10:00)", "broadcast:schedule:monthly"),
+            ("❌ Отмена", "broadcast:cancel_send"),
+        ),
+        is_group=is_g,
+    )
+
+
+async def _try_maxbc_broadcast(
+    adapter,
+    event: CallbackEvent,
+    uid: int,
+    data: str,
+    s: Dict[str, Any],
+    chat_id: Any,
+    is_g: bool,
+) -> bool:
+    if s.get("kind") != "broadcast" or not data.startswith("maxbc:"):
+        return False
+
+    if data == _MAXBC_SEG and s.get("step") == "audience_final":
+        s["step"] = "choose_segmentation"
+        await _send_maxbc_segmentation_menu(adapter, chat_id, is_g)
+        return True
+
+    if data == _MAXBC_BACK_SEG:
+        if s.get("step") in ("choose_segmentation", "select_regions", "select_chats"):
+            s["step"] = "audience_final"
+            await _send(
+                adapter,
+                chat_id,
+                "✅ Тест отправлен. Кому разослать?",
+                _max_audience_final_kb(),
+                is_group=is_g,
+            )
+            return True
+
+    if data == _MAXBC_REG and s.get("step") == "choose_segmentation":
+        regions = await asyncio.to_thread(read_active_regions, "max")
+        if not regions:
+            await _send(
+                adapter,
+                chat_id,
+                "❌ Нет регионов для platform=max в recipients_chats (колонки region, platform).",
+                [[KeyboardButton(text="⬅️ Назад", callback_data=_MAXBC_BACK_SEG)]],
+                is_group=is_g,
+            )
+            return True
+        s["step"] = "select_regions"
+        s["available_regions"] = regions
+        s["selected_regions"] = []
+        s["regions_page"] = 0
+        await _render_max_regions(adapter, chat_id, is_g, s)
+        return True
+
+    if data == _MAXBC_CHT and s.get("step") == "choose_segmentation":
+        chats = await asyncio.to_thread(read_active_recipients_chats_with_names, "max")
+        if not chats:
+            await _send(
+                adapter,
+                chat_id,
+                "❌ Нет чатов с platform=max в recipients_chats.",
+                [[KeyboardButton(text="⬅️ Назад", callback_data=_MAXBC_BACK_SEG)]],
+                is_group=is_g,
+            )
+            return True
+        s["step"] = "select_chats"
+        s["available_chats"] = chats
+        s["selected_chat_ids"] = []
+        s["chats_page"] = 0
+        await _render_max_chats(adapter, chat_id, is_g, s)
+        return True
+
+    if data.startswith(_MAXBC_RT) and s.get("step") == "select_regions":
+        try:
+            idx = int(data[len(_MAXBC_RT) :])
+        except ValueError:
+            return True
+        regions = s.get("available_regions") or []
+        if idx < 0 or idx >= len(regions):
+            return True
+        sel = list(s.get("selected_regions") or [])
+        name = regions[idx]
+        if name in sel:
+            sel.remove(name)
+        else:
+            sel.append(name)
+        s["selected_regions"] = sel
+        await _render_max_regions(adapter, chat_id, is_g, s)
+        return True
+
+    if data.startswith(_MAXBC_RP) and s.get("step") == "select_regions":
+        try:
+            page = int(data[len(_MAXBC_RP) :])
+        except ValueError:
+            return True
+        s["regions_page"] = max(0, page)
+        await _render_max_regions(adapter, chat_id, is_g, s)
+        return True
+
+    if data == _MAXBC_RGO and s.get("step") == "select_regions":
+        sel = s.get("selected_regions") or []
+        if not sel:
+            await _send(adapter, chat_id, "Выберите хотя бы один регион.", None, is_group=is_g)
+            return True
+        s["pending_send_mode"] = "selected_regions"
+        s["pending_mode_extra"] = {
+            "selected_regions": list(sel),
+            "audience_platform": _MAX_AUDIENCE_PLATFORM,
+        }
+        s["step"] = "send_type"
+        await _send_broadcast_send_type(adapter, chat_id, is_g)
+        return True
+
+    if data.startswith(_MAXBC_CT) and s.get("step") == "select_chats":
+        tail = data[len(_MAXBC_CT) :]
+        try:
+            cid = int(tail)
+        except ValueError:
+            return True
+        sel_ids = list(s.get("selected_chat_ids") or [])
+        if cid in sel_ids:
+            sel_ids.remove(cid)
+        else:
+            sel_ids.append(cid)
+        s["selected_chat_ids"] = sel_ids
+        await _render_max_chats(adapter, chat_id, is_g, s)
+        return True
+
+    if data.startswith(_MAXBC_CP) and s.get("step") == "select_chats":
+        try:
+            page = int(data[len(_MAXBC_CP) :])
+        except ValueError:
+            return True
+        s["chats_page"] = max(0, page)
+        await _render_max_chats(adapter, chat_id, is_g, s)
+        return True
+
+    if data == _MAXBC_CGO and s.get("step") == "select_chats":
+        sel_ids = s.get("selected_chat_ids") or []
+        if not sel_ids:
+            await _send(adapter, chat_id, "Выберите хотя бы один чат.", None, is_group=is_g)
+            return True
+        s["pending_send_mode"] = "selected_chats"
+        s["pending_mode_extra"] = {
+            "selected_chat_ids": list(sel_ids),
+            "audience_platform": _MAX_AUDIENCE_PLATFORM,
+        }
+        s["step"] = "send_type"
+        await _send_broadcast_send_type(adapter, chat_id, is_g)
+        return True
+
+    return False
 
 
 def _merge_max_media_json(existing: str, max_items: list) -> str:
@@ -233,6 +501,7 @@ async def handle_admin_callback(
             "media_json": "",
             "selected_variant": "original",
             "pending_send_mode": "",
+            "pending_mode_extra": None,
         }
         await _send(
             adapter,
@@ -303,6 +572,9 @@ async def handle_admin_callback(
     if not s or s.get("kind") != "broadcast":
         return False
 
+    if await _try_maxbc_broadcast(adapter, event, uid, data, s, chat_id, is_g):
+        return True
+
     if data == BROADCAST_CANCEL:
         _clear(uid)
         await _send(adapter, chat_id, "❌ Рассылка отменена.", max_admin_menu_rows(), is_group=is_g)
@@ -350,12 +622,7 @@ async def handle_admin_callback(
                 adapter,
                 chat_id,
                 "✅ Тест отправлен. Кому разослать?",
-                _rows(
-                    ("👥 Пользователям", "broadcast:send:users"),
-                    ("💬 Во все чаты", "broadcast:send:chats"),
-                    ("👥💬 Бот и чаты", "broadcast:send:users_chats"),
-                    ("❌ Отмена", "broadcast:cancel_send"),
-                ),
+                _max_audience_final_kb(),
                 is_group=is_g,
             )
         except Exception as e:
@@ -364,33 +631,13 @@ async def handle_admin_callback(
         return True
 
     if data.startswith(BROADCAST_SEND_PREFIX) and s.get("step") == "audience_final":
-        if data in ("broadcast:send:selected_chats", "broadcast:send:selected_regions"):
-            await _send(
-                adapter,
-                chat_id,
-                "Выбор чатов/регионов в MAX пока недоступен — используйте Telegram.",
-                max_admin_menu_rows(),
-                is_group=is_g,
-            )
-            _clear(uid)
-            return True
         mode = data.rsplit(":", 1)[-1]
         if mode not in ("users", "chats", "users_chats"):
             return True
         s["pending_send_mode"] = mode
+        s["pending_mode_extra"] = None
         s["step"] = "send_type"
-        await _send(
-            adapter,
-            chat_id,
-            "⏰ Как отправить?",
-            _rows(
-                ("📤 Сейчас", "broadcast:send_now"),
-                ("📅 Раз в неделю (10:00)", "broadcast:schedule:weekly"),
-                ("📆 Раз в месяц (10:00)", "broadcast:schedule:monthly"),
-                ("❌ Отмена", "broadcast:cancel_send"),
-            ),
-            is_group=is_g,
-        )
+        await _send_broadcast_send_type(adapter, chat_id, is_g)
         return True
 
     if data == "broadcast:cancel_send":
@@ -400,13 +647,19 @@ async def handle_admin_callback(
 
     if data == "broadcast:send_now" and s.get("step") == "send_type":
         mode = s.get("pending_send_mode", "users")
+        extra = (
+            s.get("pending_mode_extra")
+            if mode in ("selected_chats", "selected_regions")
+            else None
+        )
+        pf = "max" if mode in ("selected_chats", "selected_regions") else None
         tf = s.get("text_final", "")
         mj = s.get("media_json", "")
         uname = event.user.username
         try:
             bid, okc, fl = await _run_broadcast_multi(
                 adapter,
-                await asyncio.to_thread(get_broadcast_recipients_list, mode, None),
+                await asyncio.to_thread(get_broadcast_recipients_list, mode, extra, pf),
                 tf,
                 mj,
                 uid,
@@ -465,7 +718,12 @@ async def handle_admin_callback(
         mode = s.get("pending_send_mode", "chats")
         tf = s.get("text_final", "")
         mj = s.get("media_json", "")
-        mode_extra_str = "{}"
+        extra = (
+            s.get("pending_mode_extra")
+            if mode in ("selected_chats", "selected_regions")
+            else None
+        )
+        mode_extra_str = json.dumps(extra, ensure_ascii=False) if extra else "{}"
         title = await asyncio.to_thread(generate_broadcast_title, tf or "Рассылка")
         schedule_id = await asyncio.to_thread(
             create_scheduled_broadcast,
@@ -685,6 +943,12 @@ async def handle_admin_message(adapter, max_client: Any, event: IncomingMessage,
             mode = s.get("pending_send_mode", "chats")
             tf = s.get("text_final", "")
             mj = s.get("media_json", "")
+            extra = (
+                s.get("pending_mode_extra")
+                if mode in ("selected_chats", "selected_regions")
+                else None
+            )
+            mode_extra_str = json.dumps(extra, ensure_ascii=False) if extra else "{}"
             title = await asyncio.to_thread(generate_broadcast_title, tf or "Рассылка")
             schedule_id = await asyncio.to_thread(
                 create_scheduled_broadcast,
@@ -693,7 +957,7 @@ async def handle_admin_message(adapter, max_client: Any, event: IncomingMessage,
                 text_final=tf,
                 media_json=mj,
                 mode=mode,
-                mode_extra="{}",
+                mode_extra=mode_extra_str,
                 schedule_type="monthly",
                 schedule_config={"day": day},
                 title=title,

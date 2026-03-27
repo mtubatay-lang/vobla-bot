@@ -95,6 +95,8 @@ SCHEDULED_BROADCASTS_TAB = os.getenv("SCHEDULED_BROADCASTS_TAB", "SCHEDULED_BROA
 BROADCAST_SCHEDULE_TIMEZONE = os.getenv("BROADCAST_SCHEDULE_TIMEZONE", "Europe/Moscow")
 BROADCAST_SCHEDULE_HOUR = int(os.getenv("BROADCAST_SCHEDULE_HOUR", "10"))
 BROADCAST_SCHEDULE_MINUTE = int(os.getenv("BROADCAST_SCHEDULE_MINUTE", "0"))
+# Параллельные отправки в execute_broadcast_multi (Telegram + MAX)
+BROADCAST_SEND_CONCURRENCY = max(1, min(50, int(os.getenv("BROADCAST_SEND_CONCURRENCY", "10"))))
 
 # --- OpenAI timeouts (seconds) ---
 OPENAI_TIMEOUT = float(os.getenv("OPENAI_TIMEOUT", "60"))

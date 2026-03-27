@@ -15,7 +15,7 @@ def test_resolve_max_id_column_prefers_canonical():
     assert name == "max_user_id"
 
 
-def test_find_user_by_platform_id_uses_force_reload_for_max(monkeypatch):
+def test_find_user_by_platform_id_load_users_and_ttl_cache(monkeypatch):
     called = []
     user = auth_service.User(
         row=2,
@@ -35,6 +35,9 @@ def test_find_user_by_platform_id_uses_force_reload_for_max(monkeypatch):
         return [user]
 
     monkeypatch.setattr(auth_service, "load_users", fake_load_users)
+    auth_service._find_user_ttl_cache.clear()
     assert auth_service.find_user_by_platform_id("max", 42) is not None
     assert auth_service.find_user_by_platform_id("telegram", 1) is not None
-    assert called == [True, False]
+    assert called == [False, False]
+    assert auth_service.find_user_by_platform_id("max", 42) is not None
+    assert len(called) == 2

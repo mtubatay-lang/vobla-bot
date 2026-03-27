@@ -10,7 +10,14 @@ from typing import Any, Dict, List, Optional, Tuple
 from aiogram.enums import ParseMode
 from aiogram.types import InputMediaPhoto, InputMediaVideo
 
-from app.config import STATS_SHEET_ID, BROADCASTS_TAB, BROADCAST_LOGS_TAB, RECIPIENTS_USERS_TAB, RECIPIENTS_CHATS_TAB
+from app.config import (
+    STATS_SHEET_ID,
+    BROADCASTS_TAB,
+    BROADCAST_LOGS_TAB,
+    RECIPIENTS_USERS_TAB,
+    RECIPIENTS_CHATS_TAB,
+    BROADCAST_SEND_CONCURRENCY,
+)
 from app.services.sheets_client import get_sheets_client
 from app.core.types import Recipient, Platform, OutgoingMessage
 
@@ -69,6 +76,25 @@ def _row_platform_value(row: List[str], headers: List[str]) -> Platform:
         return "telegram"
     p = (row[idx] or "").strip().lower()
     return "max" if p == "max" else "telegram"
+
+
+def _row_matches_target_platform(row: List[str], headers: List[str], target: Platform) -> bool:
+    """Строка recipients_chats относится к нужной платформе (колонка platform)."""
+    return _row_platform_value(row, headers) == target
+
+
+def _effective_audience_platform(
+    mode_extra: Optional[Dict[str, Any]],
+    platform_filter: Optional[Platform],
+) -> Platform:
+    """Платформа получателей для selected_chats / selected_regions."""
+    if platform_filter in ("telegram", "max"):
+        return platform_filter
+    extra = mode_extra or {}
+    ap = (extra.get("audience_platform") or extra.get("target_platform") or "").strip().lower()
+    if ap == "max":
+        return "max"
+    return "telegram"
 
 
 def _utc_now_iso() -> str:
@@ -362,9 +388,10 @@ def read_active_recipients_chats() -> List[int]:
     return [r.chat_or_user_id for r in read_active_chat_recipients() if r.platform == "telegram"]
 
 
-def read_active_recipients_chats_with_names() -> List[Dict[str, Any]]:
+def read_active_recipients_chats_with_names(target_platform: Platform = "telegram") -> List[Dict[str, Any]]:
     """Читает активных получателей-чатов с названиями из recipients_chats.
     
+    target_platform: "telegram" | "max" — фильтр по колонке platform (по умолчанию telegram).
     Возвращает список dict: [{"chat_id": int, "name": str}, ...]
     """
     if not STATS_SHEET_ID:
@@ -394,48 +421,44 @@ def read_active_recipients_chats_with_names() -> List[Dict[str, Any]]:
         for row in values[1:]:
             if len(row) <= chat_id_idx:
                 continue
-            if _row_platform_value(row, headers) != "telegram":
+            if not _row_matches_target_platform(row, headers, target_platform):
                 continue
-            
+
             chat_id_str = row[chat_id_idx].strip()
             if not chat_id_str:
                 continue
-            
-            # Проверяем is_active
+
             is_active = ""
             if is_active_idx >= 0 and len(row) > is_active_idx:
                 is_active = row[is_active_idx].strip().lower()
-            
-            # Активен, если is_active пусто, "1", "true"
+
             if is_active and is_active not in ("1", "true"):
                 continue
-            
+
             try:
                 chat_id = int(chat_id_str)
-                
-                # Получаем название чата
+
                 chat_name = ""
                 if title_idx >= 0 and len(row) > title_idx:
                     chat_name = row[title_idx].strip()
-                
-                # Если название пустое, используем fallback
+
                 if not chat_name:
                     chat_name = f"Чат {chat_id}"
-                
+
                 result.append({
                     "chat_id": chat_id,
                     "name": chat_name
                 })
             except ValueError:
                 continue
-        
+
         return result
     except Exception as e:
         logger.warning("[BROADCAST_SERVICE] read_active_recipients_chats_with_names: %s", e, exc_info=True)
         return []
 
 
-def read_active_regions() -> List[str]:
+def read_active_regions(target_platform: Platform = "telegram") -> List[str]:
     """Читает список уникальных активных регионов из recipients_chats.
     
     Возвращает отсортированный список уникальных регионов: ["Башкирия", "Москва", ...]
@@ -470,9 +493,9 @@ def read_active_regions() -> List[str]:
         for row in values[1:]:
             if len(row) <= chat_id_idx or len(row) <= region_idx:
                 continue
-            if _row_platform_value(row, headers) != "telegram":
+            if not _row_matches_target_platform(row, headers, target_platform):
                 continue
-            
+
             chat_id_str = row[chat_id_idx].strip()
             if not chat_id_str:
                 continue
@@ -497,11 +520,12 @@ def read_active_regions() -> List[str]:
         return []
 
 
-def read_chats_by_regions(regions: List[str]) -> List[int]:
+def read_chats_by_regions(regions: List[str], target_platform: Platform = "telegram") -> List[int]:
     """Читает chat_id активных чатов из указанных регионов.
     
     Args:
         regions: Список названий регионов
+        target_platform: фильтр по колонке platform в recipients_chats
     
     Returns:
         Список chat_id чатов из указанных регионов
@@ -552,17 +576,16 @@ def read_chats_by_regions(regions: List[str]) -> List[int]:
             if is_active and is_active not in ("1", "true"):
                 continue
             
-            # Проверяем регион
             region = row[region_idx].strip()
             if region in regions_set:
-                if _row_platform_value(row, headers) != "telegram":
+                if not _row_matches_target_platform(row, headers, target_platform):
                     continue
                 try:
                     chat_id = int(chat_id_str)
                     result.append(chat_id)
                 except ValueError:
                     continue
-        
+
         return result
     except Exception as e:
         logger.warning("[BROADCAST_SERVICE] read_chats_by_regions: %s", e, exc_info=True)
@@ -733,15 +756,17 @@ def get_broadcast_recipients_list(
         result = read_active_user_recipients() + read_active_chat_recipients()
     elif mode == "selected_chats" and mode_extra:
         chat_ids = mode_extra.get("chat_ids") or mode_extra.get("selected_chat_ids") or []
+        dest = _effective_audience_platform(mode_extra, platform_filter)
         for x in chat_ids:
             try:
-                result.append(Recipient(platform="telegram", chat_or_user_id=int(x), is_chat=True))
+                result.append(Recipient(platform=dest, chat_or_user_id=int(x), is_chat=True))
             except (TypeError, ValueError):
                 continue
     elif mode == "selected_regions" and mode_extra:
         regions = mode_extra.get("regions") or mode_extra.get("selected_regions") or []
-        for cid in read_chats_by_regions(regions):
-            result.append(Recipient(platform="telegram", chat_or_user_id=cid, is_chat=True))
+        dest = _effective_audience_platform(mode_extra, platform_filter)
+        for cid in read_chats_by_regions(regions, target_platform=dest):
+            result.append(Recipient(platform=dest, chat_or_user_id=cid, is_chat=True))
     if platform_filter:
         result = [r for r in result if r.platform == platform_filter]
     return result
@@ -884,7 +909,7 @@ async def execute_broadcast_multi(
 
     sent_ok = 0
     sent_fail = 0
-    semaphore = asyncio.Semaphore(10)
+    semaphore = asyncio.Semaphore(BROADCAST_SEND_CONCURRENCY)
 
     async def send_to_recipient(r: Recipient) -> None:
         nonlocal sent_ok, sent_fail

@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 # Кэш списка пользователей: TTL 5 минут, при bind_* инвалидируется
 _users_cache: TTLCache = TTLCache(maxsize=1, ttl=300)
 _USERS_CACHE_KEY = "users"
+# Быстрый кэш результата find_user_by_platform_id (секунды), снижает повторные проходы по листу в MAX webhook
+_find_user_ttl_cache: TTLCache = TTLCache(maxsize=512, ttl=60)
 
 
 @dataclass
@@ -159,13 +161,21 @@ def load_users(force_reload: bool = False) -> List[User]:
 def find_user_by_platform_id(platform: Platform, user_id: int | str) -> Optional[User]:
     """Ищет пользователя по ID на указанной платформе. Возвращает User или None."""
     uid = int(user_id) if isinstance(user_id, str) else user_id
-    force_reload = platform == "max"
-    for user in load_users(force_reload=force_reload):
+    cache_key = (platform, uid)
+    try:
+        return _find_user_ttl_cache[cache_key]
+    except KeyError:
+        pass
+    found: Optional[User] = None
+    for user in load_users(force_reload=False):
         if platform == "telegram" and user.telegram_id == uid:
-            return user
+            found = user
+            break
         if platform == "max" and user.max_user_id is not None and user.max_user_id == uid:
-            return user
-    return None
+            found = user
+            break
+    _find_user_ttl_cache[cache_key] = found
+    return found
 
 
 def find_user_by_telegram_id(telegram_id: int) -> Optional[User]:
@@ -214,6 +224,7 @@ def bind_platform_id(user: User, platform: Platform, platform_user_id: int | str
     ws.update_cell(user.row, used_at_col, now_str)
 
     _users_cache.pop(_USERS_CACHE_KEY, None)
+    _find_user_ttl_cache.clear()
 
 
 def bind_telegram_id(user: User, telegram_id: int) -> None:
