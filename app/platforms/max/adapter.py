@@ -247,14 +247,20 @@ def _attachment_file_ref(att: Any) -> tuple[Optional[str], str, str]:
 
 def _max_outgoing_payload(att_type: str, ref_key: str, value: str) -> Dict[str, str]:
     """
-    Поле payload для POST /messages по документации MAX:
-    video/audio — token; часть входящих картинок приходит только с token в payload.
+    Поле payload для POST /messages (Platform API MAX).
+    Для image/sticker сервер требует photos | url | token — не file_id (proto.payload).
     """
     t = att_type.lower()
     if t == "photo":
         t = "image"
+    if ref_key == "url":
+        return {"url": value}
     if t in ("video", "audio"):
         return {"token": value}
+    if t in ("image", "sticker"):
+        return {"token": value}
+    if t in ("file", "document"):
+        return {"file_id": value}
     if ref_key == "token":
         return {"token": value}
     return {"file_id": value}
@@ -263,6 +269,19 @@ def _max_outgoing_payload(att_type: str, ref_key: str, value: str) -> Dict[str, 
 def normalize_max_send_attachment_type(t: str) -> str:
     x = (t or "file").lower()
     return "image" if x == "photo" else x
+
+
+def _normalize_max_send_payload(normalized_type: str, payload: Dict[str, str]) -> Dict[str, str]:
+    """Старый media_json мог содержать max_payload с file_id для картинки — API ждёт token."""
+    typ = normalize_max_send_attachment_type(normalized_type)
+    if typ not in ("image", "sticker"):
+        return payload
+    if "token" in payload or "url" in payload or "photos" in payload:
+        return payload
+    fid = payload.get("file_id")
+    if fid:
+        return {"token": fid}
+    return payload
 
 
 def _incoming_attachments(msg: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -557,10 +576,11 @@ class MaxAdapter:
             mp = att.get("max_payload")
             if isinstance(mp, dict) and mp:
                 payload = {k: str(v) for k, v in mp.items() if v is not None}
-            elif typ in ("video", "audio"):
-                payload = {"token": str(file_id)}
             else:
-                payload = {"file_id": str(file_id)}
+                payload = _max_outgoing_payload(
+                    str(att.get("type", "file")), "file_id", str(file_id)
+                )
+            payload = _normalize_max_send_payload(typ, payload)
             max_atts.append({"type": typ, "payload": payload})
         if not max_atts:
             return None

@@ -1,6 +1,6 @@
 """Тесты разбора webhook MAX (parse_max_update)."""
 
-from app.platforms.max.adapter import parse_max_update
+from app.platforms.max.adapter import _normalize_max_send_payload, parse_max_update
 
 
 def test_parse_message_created_minimal():
@@ -268,7 +268,7 @@ def test_parse_message_attachment_payload_file_id():
     assert len(ev.attachments) == 1
     assert ev.attachments[0]["file_id"] == "abc-123"
     assert ev.attachments[0]["type"] == "image"
-    assert ev.attachments[0]["max_payload"] == {"file_id": "abc-123"}
+    assert ev.attachments[0]["max_payload"] == {"token": "abc-123"}
 
 
 def test_parse_message_attachment_payload_token():
@@ -303,3 +303,9 @@ def test_parse_message_video_attachment_outgoing_token():
     ev = parse_max_update(body)
     assert ev is not None
     assert ev.attachments[0]["max_payload"] == {"token": "vid-1"}
+
+
+def test_normalize_legacy_image_max_payload_file_id_to_token():
+    assert _normalize_max_send_payload("image", {"file_id": "legacy-1"}) == {"token": "legacy-1"}
+    assert _normalize_max_send_payload("image", {"token": "keep"}) == {"token": "keep"}
+    assert _normalize_max_send_payload("file", {"file_id": "f"}) == {"file_id": "f"}
