@@ -26,6 +26,7 @@ from app.core.callbacks import (
     KB_ADD,
 )
 from app.core.types import CallbackEvent, IncomingMessage, KeyboardButton, KeyboardRow, OutgoingMessage
+from app.platforms.max.adapter import incoming_max_message_id, max_attachment_https_url
 from app.handlers.document_generator import (
     DOC_GEN_FIELD_ORDER,
     DOC_GEN_PROMPTS,
@@ -1028,8 +1029,13 @@ async def handle_admin_message(adapter, max_client: Any, event: IncomingMessage,
         fid = att.get("id_or_url") or att.get("file_id")
         if not fid:
             return True
+        du = max_attachment_https_url(att)
+        mid = incoming_max_message_id(event)
         try:
-            content = await adapter.download_file(str(fid))
+            if du:
+                content = await adapter.download_file(du)
+            else:
+                content = await adapter.download_file(str(fid), message_id=mid)
         except Exception as e:
             logger.exception("[MAX_ADMIN] kb download: %s", e)
             await _send(adapter, event.chat.id, "❌ Не удалось скачать файл.", max_admin_menu_rows(), is_group=is_g)
@@ -1135,8 +1141,13 @@ async def handle_admin_doc_attachment(adapter, event: IncomingMessage, uid: int)
     fid = att.get("id_or_url") or att.get("file_id")
     if not fid:
         return False
+    du = max_attachment_https_url(att)
+    mid = incoming_max_message_id(event)
     try:
-        raw = await adapter.download_file(str(fid))
+        if du:
+            raw = await adapter.download_file(du)
+        else:
+            raw = await adapter.download_file(str(fid), message_id=mid)
     except Exception as e:
         logger.exception("[MAX_ADMIN] doc att: %s", e)
         return True

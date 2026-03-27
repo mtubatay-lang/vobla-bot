@@ -34,7 +34,11 @@ from app.services.broadcast_recipients_service import upsert_chat_recipient, ups
 from app.services.kilbil_service import find_kilbil_answer
 from app.services.max_qa_simple import max_simple_rag_answer
 from app.platforms.max import admin_flows
-from app.platforms.max.adapter import _extract_chat_title_from_peer
+from app.platforms.max.adapter import (
+    _extract_chat_title_from_peer,
+    incoming_max_message_id,
+    max_attachment_https_url,
+)
 from app.platforms.max.voice_attachment import (
     first_max_voice_attachment,
     max_voice_attachment_declared_size,
@@ -432,8 +436,13 @@ class MaxActionRouter:
                 is_group_chat=is_g,
             )
         )
+        du = max_attachment_https_url(att)
+        mid = incoming_max_message_id(event)
         try:
-            raw = await adapter.download_file(str(fid))
+            if du:
+                raw = await adapter.download_file(du)
+            else:
+                raw = await adapter.download_file(str(fid), message_id=mid)
         except Exception as e:
             logger.exception("[MAX_VOICE_TO_TEXT] download: %s", e)
             await adapter.send_message(

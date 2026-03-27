@@ -19,9 +19,87 @@ from app.core.types import (
     Platform,
 )
 
-from app.platforms.max.client import MaxApiClient
+from app.platforms.max.client import MaxApiClient, MaxApiClientError
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_https_download_url(att: Any, depth: int = 0) -> Optional[str]:
+    """Прямая ссылка на файл во вложении webhook MAX (GET /files/{id} часто отсутствует в API)."""
+    if depth > 6 or not isinstance(att, dict):
+        return None
+    for k in ("url", "download_url", "file_url", "audio_url", "voice_url", "media_url"):
+        v = att.get(k)
+        if isinstance(v, str) and v.startswith(("http://", "https://")):
+            return v
+    pl = att.get("payload")
+    if isinstance(pl, dict):
+        u = _extract_https_download_url(pl, depth + 1)
+        if u:
+            return u
+    for sk in ("audio", "voice", "file", "image", "document"):
+        sub = att.get(sk)
+        if isinstance(sub, dict):
+            u = _extract_https_download_url(sub, depth + 1)
+            if u:
+                return u
+    return None
+
+
+def _find_attachment_download_url_in_api_message(
+    data: Dict[str, Any], file_id: Optional[str] = None
+) -> Optional[str]:
+    """Ищет https URL в теле сообщения из GET /messages/{id}."""
+    msg = data.get("message") if isinstance(data.get("message"), dict) else data
+    if not isinstance(msg, dict):
+        return None
+    body = msg.get("body")
+    if not isinstance(body, dict):
+        body = msg
+    atts = body.get("attachments")
+    if not isinstance(atts, list):
+        return None
+    pairs: list[tuple[str, str]] = []
+    for att in atts:
+        if not isinstance(att, dict):
+            continue
+        pl = att.get("payload") if isinstance(att.get("payload"), dict) else att
+        if not isinstance(pl, dict):
+            continue
+        fid = str(pl.get("file_id") or pl.get("id") or "")
+        for key in ("url", "download_url", "file_url"):
+            u = pl.get(key)
+            if isinstance(u, str) and u.startswith(("http://", "https://")):
+                pairs.append((fid, u))
+    if not pairs:
+        return None
+    if file_id:
+        for fid, u in pairs:
+            if fid == str(file_id):
+                return u
+    return pairs[0][1]
+
+
+def max_attachment_https_url(att: Any) -> Optional[str]:
+    """Прямая HTTPS-ссылка на файл: нормализованное поле или рекурсивный разбор вложения."""
+    if isinstance(att, dict):
+        for k in ("download_url", "url"):
+            u = att.get(k)
+            if isinstance(u, str) and u.startswith(("http://", "https://")):
+                return u
+    return _extract_https_download_url(att)
+
+
+def incoming_max_message_id(event: IncomingMessage) -> Optional[str]:
+    """id входящего сообщения MAX из сырого webhook (для GET /messages/{id})."""
+    raw = getattr(event, "raw", None)
+    if not isinstance(raw, dict):
+        return None
+    msg = raw.get("message")
+    if not isinstance(msg, dict):
+        return None
+    mid = msg.get("id") or msg.get("message_id")
+    return str(mid) if mid is not None else None
 
 
 def _norm_recipient_from_message(
@@ -305,14 +383,16 @@ def _incoming_attachments(msg: Dict[str, Any]) -> List[Dict[str, Any]]:
             continue
         file_id, att_type, ref_key = _attachment_file_ref(att)
         if file_id:
-            out.append(
-                {
-                    "type": att_type,
-                    "file_id": file_id,
-                    "id_or_url": file_id,
-                    "max_payload": _max_outgoing_payload(att_type, ref_key, file_id),
-                }
-            )
+            item: Dict[str, Any] = {
+                "type": att_type,
+                "file_id": file_id,
+                "id_or_url": file_id,
+                "max_payload": _max_outgoing_payload(att_type, ref_key, file_id),
+            }
+            du = _extract_https_download_url(att)
+            if du:
+                item["download_url"] = du
+            out.append(item)
     return out
 
 
@@ -592,20 +672,58 @@ class MaxAdapter:
             attachments=max_atts,
         )
 
-    async def download_file(self, file_id_or_url: str) -> bytes:
-        """Скачать файл по file_id или URL."""
+    async def download_file(
+        self,
+        file_id_or_url: str,
+        *,
+        message_id: Optional[str | int] = None,
+    ) -> bytes:
+        """
+        Скачать файл: прямой URL, затем GET /messages/{mid} (url во вложении),
+        затем устаревший GET /files/{id} (часто 404 на актуальном API MAX).
+        """
         import aiohttp
 
-        if file_id_or_url.startswith("http://") or file_id_or_url.startswith("https://"):
+        fid = (file_id_or_url or "").strip()
+        if fid.startswith("http://") or fid.startswith("https://"):
             async with aiohttp.ClientSession() as session:
-                async with session.get(file_id_or_url) as resp:
+                async with session.get(fid) as resp:
                     resp.raise_for_status()
                     return await resp.read()
-        result = await self._client._request("GET", f"/files/{file_id_or_url}")
-        url = result.get("url") or result.get("file_url")
-        if url:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url) as resp:
-                    resp.raise_for_status()
-                    return await resp.read()
-        raise ValueError("MAX API did not return file content or URL")
+
+        mid = str(message_id).strip() if message_id is not None else ""
+        if mid:
+            try:
+                api_msg = await self._client.get_message(mid)
+                dl = _find_attachment_download_url_in_api_message(api_msg, file_id=fid)
+                if dl:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(dl) as resp:
+                            resp.raise_for_status()
+                            return await resp.read()
+            except MaxApiClientError as e:
+                logger.warning(
+                    "MAX download_file: get_message mid=%s file_id=%s failed: %s",
+                    mid,
+                    fid,
+                    e,
+                )
+
+        try:
+            result = await self._client._request("GET", f"/files/{fid}")
+            url = result.get("url") or result.get("file_url")
+            if url:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url) as resp:
+                        resp.raise_for_status()
+                        return await resp.read()
+        except MaxApiClientError as e:
+            if e.status != 404:
+                raise
+            logger.debug("MAX GET /files/%s -> 404 (ожидаемо для части сборок API)", fid)
+
+        raise MaxApiClientError(
+            "MAX: не удалось скачать вложение: нет прямого url, GET /messages не вернул ссылку, /files недоступен",
+            status=404,
+            body=f"file_id={fid!r} message_id={mid!r}",
+        )

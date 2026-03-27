@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import aiohttp
 
@@ -99,6 +99,12 @@ class MaxApiClient:
                 return str(mid)
         mid = result.get("message_id") or result.get("id")
         return str(mid) if mid is not None else None
+
+    async def get_message(self, message_id: str | int) -> Dict[str, Any]:
+        """GET /messages/{messageId} — метаданные и body с вложениями (в т.ч. url для скачивания)."""
+        mid = str(message_id).strip()
+        path_mid = quote(mid, safe="-_.")
+        return await self._request("GET", f"/messages/{path_mid}")
 
     async def send_message(
         self,
