@@ -672,15 +672,23 @@ class MaxAdapter:
             attachments=max_atts,
         )
 
+    @staticmethod
+    def _http_content_type_mime(resp: Any) -> Optional[str]:
+        h = resp.headers.get("Content-Type")
+        if not h:
+            return None
+        base = h.split(";")[0].strip().lower()
+        return base or None
+
     async def download_file(
         self,
         file_id_or_url: str,
         *,
         message_id: Optional[str | int] = None,
-    ) -> bytes:
+    ) -> tuple[bytes, Optional[str]]:
         """
-        Скачать файл: прямой URL, затем GET /messages/{mid} (url во вложении),
-        затем устаревший GET /files/{id} (часто 404 на актуальном API MAX).
+        Скачать файл: прямой URL, GET /messages/{mid}, либо URL из /files/{id}.
+        Возвращает (байты, MIME из Content-Type ответа скачивания или None).
         """
         import aiohttp
 
@@ -689,7 +697,8 @@ class MaxAdapter:
             async with aiohttp.ClientSession() as session:
                 async with session.get(fid) as resp:
                     resp.raise_for_status()
-                    return await resp.read()
+                    data = await resp.read()
+                    return data, self._http_content_type_mime(resp)
 
         mid = str(message_id).strip() if message_id is not None else ""
         if mid:
@@ -700,7 +709,8 @@ class MaxAdapter:
                     async with aiohttp.ClientSession() as session:
                         async with session.get(dl) as resp:
                             resp.raise_for_status()
-                            return await resp.read()
+                            data = await resp.read()
+                            return data, self._http_content_type_mime(resp)
             except MaxApiClientError as e:
                 logger.warning(
                     "MAX download_file: get_message mid=%s file_id=%s failed: %s",
@@ -716,7 +726,8 @@ class MaxAdapter:
                 async with aiohttp.ClientSession() as session:
                     async with session.get(url) as resp:
                         resp.raise_for_status()
-                        return await resp.read()
+                        data = await resp.read()
+                        return data, self._http_content_type_mime(resp)
         except MaxApiClientError as e:
             if e.status != 404:
                 raise

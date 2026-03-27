@@ -4,6 +4,7 @@ import logging
 from io import BytesIO
 
 from pydub import AudioSegment
+from pydub.exceptions import CouldntDecodeError
 
 from app.config import WHISPER_MODEL
 from app.services.openai_client import client, CHAT_MODEL
@@ -24,21 +25,44 @@ STRUCTURE_TRANSCRIPT_SYSTEM = """Ты — редактор расшифрово�
 - Пиши только то, что есть в расшифровке. Нет задач — не пиши блок про задачи. Нет вопросов — не пиши про вопросы. Нет цифр/дат — не пиши этот блок.
 - Сохраняй язык оригинала. Будь лаконичен: один короткий абзац остаётся одним коротким абзацем, не раздувай."""
 
-
-def _ogg_to_mp3_bytes(ogg_bytes: bytes) -> bytes:
-    """Конвертирует OGG/Opus в MP3 в памяти. Требует ffmpeg."""
-    audio = AudioSegment.from_ogg(BytesIO(ogg_bytes))
-    buffer = BytesIO()
-    audio.export(buffer, format="mp3")
-    buffer.seek(0)
-    return buffer.read()
+_OGG_MIMES = frozenset(
+    {"audio/ogg", "application/ogg", "audio/opus", "audio/x-opus+ogg"}
+)
 
 
-def _audio_bytes_to_mp3(data: bytes, mime_type: str) -> bytes:
-    """Любой поддерживаемый аудиоформат → MP3 для Whisper."""
+def _sniff_container(data: bytes) -> str | None:
+    """Сигнатура контейнера для pydub/ffmpeg (не доверять только MIME из вебхука MAX)."""
+    if len(data) < 12:
+        return None
+    if data[:4] == b"OggS":
+        return "ogg"
+    if data[:3] == b"ID3" or (data[0] == 0xFF and (data[1] & 0xE0) == 0xE0):
+        return "mp3"
+    if data[:4] == b"fLaC":
+        return "flac"
+    if data[:4] == b"RIFF" and data[8:12] == b"WAVE":
+        return "wav"
+    if len(data) >= 8 and data[4:8] == b"ftyp":
+        return "mp4"
+    if data[:4] == b"\x1a\x45\xdf\xa3":
+        return "webm"
+    return None
+
+
+def _load_audio_segment(data: bytes, mime_type: str) -> AudioSegment:
+    """Декодирует байты в AudioSegment: сначала по сигнатуре, затем по MIME, с fallback ffmpeg."""
     mt = (mime_type or "").strip().lower()
-    if mt in ("audio/ogg", "application/ogg", "audio/opus", "audio/x-opus+ogg"):
-        return _ogg_to_mp3_bytes(data)
+    sniff = _sniff_container(data)
+
+    if sniff == "ogg":
+        try:
+            return AudioSegment.from_ogg(BytesIO(data))
+        except CouldntDecodeError as e:
+            logger.warning("transcribe: сигнатура OggS, но from_ogg не удался, пробуем авто: %s", e)
+            return AudioSegment.from_file(BytesIO(data))
+
+    if sniff in ("mp3", "mp4", "wav", "flac", "webm"):
+        return AudioSegment.from_file(BytesIO(data), format=sniff)
 
     pydub_format_by_mime: dict[str, str] = {
         "audio/mpeg": "mp3",
@@ -51,15 +75,28 @@ def _audio_bytes_to_mp3(data: bytes, mime_type: str) -> bytes:
         "audio/webm": "webm",
         "audio/flac": "flac",
     }
+
+    if mt in _OGG_MIMES:
+        try:
+            return AudioSegment.from_file(BytesIO(data))
+        except Exception as e:
+            logger.warning("transcribe: MIME ogg/opus без сигнатуры OggS, авто не вышло, mp3: %s", e)
+            return AudioSegment.from_file(BytesIO(data), format="mp3")
+
     fmt = pydub_format_by_mime.get(mt)
     if fmt:
-        audio = AudioSegment.from_file(BytesIO(data), format=fmt)
-    else:
-        try:
-            audio = AudioSegment.from_file(BytesIO(data))
-        except Exception as e:
-            logger.warning("transcribe: неизвестный MIME %r, пробуем mp3: %s", mime_type, e)
-            audio = AudioSegment.from_file(BytesIO(data), format="mp3")
+        return AudioSegment.from_file(BytesIO(data), format=fmt)
+
+    try:
+        return AudioSegment.from_file(BytesIO(data))
+    except Exception as e:
+        logger.warning("transcribe: неизвестный MIME %r, пробуем mp3: %s", mime_type, e)
+        return AudioSegment.from_file(BytesIO(data), format="mp3")
+
+
+def _audio_bytes_to_mp3(data: bytes, mime_type: str) -> bytes:
+    """Любой поддерживаемый аудиоформат → MP3 для Whisper."""
+    audio = _load_audio_segment(data, mime_type)
     buffer = BytesIO()
     audio.export(buffer, format="mp3")
     buffer.seek(0)

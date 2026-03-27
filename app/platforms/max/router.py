@@ -42,7 +42,7 @@ from app.platforms.max.adapter import (
 from app.platforms.max.voice_attachment import (
     first_max_voice_attachment,
     max_voice_attachment_declared_size,
-    mime_from_max_voice_attachment,
+    max_voice_effective_mime,
 )
 from app.platforms.max.client import MaxApiClientError
 from app.ui.keyboards import max_main_menu_rows, qa_kb_rows
@@ -440,9 +440,9 @@ class MaxActionRouter:
         mid = incoming_max_message_id(event)
         try:
             if du:
-                raw = await adapter.download_file(du)
+                raw, dl_ct = await adapter.download_file(du)
             else:
-                raw = await adapter.download_file(str(fid), message_id=mid)
+                raw, dl_ct = await adapter.download_file(str(fid), message_id=mid)
         except Exception as e:
             logger.exception("[MAX_VOICE_TO_TEXT] download: %s", e)
             await adapter.send_message(
@@ -464,7 +464,7 @@ class MaxActionRouter:
                 )
             )
             return True
-        mime = mime_from_max_voice_attachment(att)
+        mime = max_voice_effective_mime(att, dl_ct)
         try:
             text = await asyncio.to_thread(transcribe_audio_bytes, raw, mime)
         except Exception as e:

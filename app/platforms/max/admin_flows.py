@@ -1033,9 +1033,9 @@ async def handle_admin_message(adapter, max_client: Any, event: IncomingMessage,
         mid = incoming_max_message_id(event)
         try:
             if du:
-                content = await adapter.download_file(du)
+                content, _ = await adapter.download_file(du)
             else:
-                content = await adapter.download_file(str(fid), message_id=mid)
+                content, _ = await adapter.download_file(str(fid), message_id=mid)
         except Exception as e:
             logger.exception("[MAX_ADMIN] kb download: %s", e)
             await _send(adapter, event.chat.id, "❌ Не удалось скачать файл.", max_admin_menu_rows(), is_group=is_g)
@@ -1145,9 +1145,9 @@ async def handle_admin_doc_attachment(adapter, event: IncomingMessage, uid: int)
     mid = incoming_max_message_id(event)
     try:
         if du:
-            raw = await adapter.download_file(du)
+            raw, _ = await adapter.download_file(du)
         else:
-            raw = await adapter.download_file(str(fid), message_id=mid)
+            raw, _ = await adapter.download_file(str(fid), message_id=mid)
     except Exception as e:
         logger.exception("[MAX_ADMIN] doc att: %s", e)
         return True

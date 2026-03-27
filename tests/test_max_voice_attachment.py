@@ -4,6 +4,7 @@ from app.core.types import IncomingMessage, InternalChat, InternalUser
 from app.platforms.max.voice_attachment import (
     first_max_voice_attachment,
     max_voice_attachment_declared_size,
+    max_voice_effective_mime,
     mime_from_max_voice_attachment,
 )
 
@@ -47,3 +48,13 @@ def test_mime_from_payload():
 def test_declared_size_from_payload():
     att = {"type": "voice", "payload": {"file_size": 12345}}
     assert max_voice_attachment_declared_size(att) == 12345
+
+
+def test_max_voice_effective_mime_prefers_download_content_type():
+    att = {"type": "voice", "file_id": "1"}
+    assert max_voice_effective_mime(att, "audio/mp4; charset=utf-8") == "audio/mp4"
+
+
+def test_max_voice_effective_mime_falls_back_on_octet_stream():
+    att = {"type": "voice", "payload": {"mime_type": "audio/ogg"}}
+    assert max_voice_effective_mime(att, "application/octet-stream") == "audio/ogg"

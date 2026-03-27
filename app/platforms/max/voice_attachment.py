@@ -24,6 +24,19 @@ def mime_from_max_voice_attachment(att: Dict[str, Any]) -> str:
     return "audio/ogg"
 
 
+def max_voice_effective_mime(att: Dict[str, Any], download_content_type: Optional[str]) -> str:
+    """MIME для транскрипции: заголовок ответа CDN при скачивании приоритетнее вебхука, если это audio/video."""
+    fb = mime_from_max_voice_attachment(att)
+    if not download_content_type:
+        return fb
+    base = download_content_type.split(";")[0].strip().lower()
+    if not base or base in ("application/octet-stream", "binary/octet-stream"):
+        return fb
+    if base.startswith("audio/") or base.startswith("video/"):
+        return base
+    return fb
+
+
 def max_voice_attachment_declared_size(att: Dict[str, Any]) -> Optional[int]:
     for k in ("file_size", "size", "bytes"):
         v = att.get(k)
