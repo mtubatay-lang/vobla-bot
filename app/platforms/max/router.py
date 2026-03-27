@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
@@ -25,13 +26,20 @@ from app.core.handlers import (
     handle_start_auth_callback,
     is_pending_auth,
 )
+from app.config import VOICE_STRUCTURE_OUTPUT, VOICE_TO_TEXT_ENABLED, WHISPER_MAX_FILE_BYTES
 from app.core.types import CallbackEvent, IncomingMessage, OutgoingMessage
 from app.services.auth_service import find_user_by_platform_id
+from app.services.voice_transcription_service import structure_transcript, transcribe_audio_bytes
 from app.services.broadcast_recipients_service import upsert_chat_recipient, upsert_user_recipient
 from app.services.kilbil_service import find_kilbil_answer
 from app.services.max_qa_simple import max_simple_rag_answer
 from app.platforms.max import admin_flows
 from app.platforms.max.adapter import _extract_chat_title_from_peer
+from app.platforms.max.voice_attachment import (
+    first_max_voice_attachment,
+    max_voice_attachment_declared_size,
+    mime_from_max_voice_attachment,
+)
 from app.platforms.max.client import MaxApiClientError
 from app.ui.keyboards import max_main_menu_rows, qa_kb_rows
 
@@ -40,6 +48,11 @@ logger = logging.getLogger(__name__)
 # Видимая обратная связь в MAX: индикатор набора часто не отображается в клиенте.
 MAX_QA_SEARCHING_TEXT = "🔍 Ищу в базе знаний…"
 MAX_KILBIL_SEARCHING_TEXT = "🔍 Ищу в базе Kilbil…"
+
+_MAX_VTT_CONVERTING = "Преобразую в текст."
+_MAX_VTT_ERROR = "Не удалось преобразовать голос в текст. Попробуйте ещё раз."
+_MAX_VTT_TOO_LARGE = "Голосовое сообщение слишком длинное (лимит 25 МБ)."
+_MAX_VTT_CHUNK_LEN = 4090
 
 
 def _max_chat_id_for_sheets(chat_id: int | str) -> int | None:
@@ -389,6 +402,100 @@ class MaxActionRouter:
         )
         return True
 
+    async def _max_voice_to_text_turn(self, adapter, event: IncomingMessage) -> bool:
+        """Голос/аудио → текст (как Telegram voice_to_text), до admin/QA."""
+        if not VOICE_TO_TEXT_ENABLED:
+            return False
+        att = first_max_voice_attachment(event)
+        if not att:
+            return False
+        fid = att.get("id_or_url") or att.get("file_id")
+        if not fid:
+            return False
+        is_g = event.chat.is_group
+        declared = max_voice_attachment_declared_size(att)
+        if declared is not None and declared > WHISPER_MAX_FILE_BYTES:
+            await adapter.send_message(
+                OutgoingMessage(
+                    chat_id=event.chat.id,
+                    platform="max",
+                    text=_MAX_VTT_TOO_LARGE,
+                    is_group_chat=is_g,
+                )
+            )
+            return True
+        await adapter.send_message(
+            OutgoingMessage(
+                chat_id=event.chat.id,
+                platform="max",
+                text=_MAX_VTT_CONVERTING,
+                is_group_chat=is_g,
+            )
+        )
+        try:
+            raw = await adapter.download_file(str(fid))
+        except Exception as e:
+            logger.exception("[MAX_VOICE_TO_TEXT] download: %s", e)
+            await adapter.send_message(
+                OutgoingMessage(
+                    chat_id=event.chat.id,
+                    platform="max",
+                    text=_MAX_VTT_ERROR,
+                    is_group_chat=is_g,
+                )
+            )
+            return True
+        if len(raw) > WHISPER_MAX_FILE_BYTES:
+            await adapter.send_message(
+                OutgoingMessage(
+                    chat_id=event.chat.id,
+                    platform="max",
+                    text=_MAX_VTT_TOO_LARGE,
+                    is_group_chat=is_g,
+                )
+            )
+            return True
+        mime = mime_from_max_voice_attachment(att)
+        try:
+            text = await asyncio.to_thread(transcribe_audio_bytes, raw, mime)
+        except Exception as e:
+            logger.exception("[MAX_VOICE_TO_TEXT] transcribe: %s", e)
+            await adapter.send_message(
+                OutgoingMessage(
+                    chat_id=event.chat.id,
+                    platform="max",
+                    text=_MAX_VTT_ERROR,
+                    is_group_chat=is_g,
+                )
+            )
+            return True
+        if not text:
+            await adapter.send_message(
+                OutgoingMessage(
+                    chat_id=event.chat.id,
+                    platform="max",
+                    text="Текст не распознан.",
+                    is_group_chat=is_g,
+                )
+            )
+            return True
+        if VOICE_STRUCTURE_OUTPUT:
+            try:
+                text = await asyncio.to_thread(structure_transcript, text)
+            except Exception as e:
+                logger.warning("[MAX_VOICE_TO_TEXT] structure: %s", e)
+        for i in range(0, len(text), _MAX_VTT_CHUNK_LEN):
+            chunk = text[i : i + _MAX_VTT_CHUNK_LEN]
+            await adapter.send_message(
+                OutgoingMessage(
+                    chat_id=event.chat.id,
+                    platform="max",
+                    text=chunk,
+                    is_group_chat=is_g,
+                )
+            )
+        return True
+
     async def route(self, adapter, event: IncomingMessage | CallbackEvent) -> MaxRouteResult:
         update_type = None
         if getattr(event, "raw", None) and isinstance(event.raw, dict):
@@ -487,6 +594,8 @@ class MaxActionRouter:
             if ok:
                 await admin_flows.show_admin_menu(adapter, event)
             handled, action = ok, "cmd_admin"
+        elif await self._max_voice_to_text_turn(adapter, event):
+            handled, action = True, "voice_to_text"
         elif await admin_flows.handle_admin_message(adapter, self._max_client, event, uid):
             handled, action = True, "admin_msg"
         elif event.attachments and await admin_flows.handle_admin_doc_attachment(adapter, event, uid):
