@@ -354,6 +354,33 @@ def normalize_max_send_attachment_type(t: str) -> str:
 
 
 _MAX_SPREADSHEET_SUFFIXES = (".xlsx", ".xls", ".csv", ".ods")
+_MAX_SPREADSHEET_MIMES = frozenset(
+    {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel",
+        "text/csv",
+        "text/comma-separated-values",
+        "application/csv",
+        "application/vnd.oasis.opendocument.spreadsheet",
+    }
+)
+_ATTACHMENT_FILENAME_KEYS = (
+    "filename",
+    "file_name",
+    "name",
+    "title",
+    "original_filename",
+    "originalFileName",
+    "fileName",
+)
+
+
+def _first_nonempty_str_from_dict(d: Dict[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        v = d.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
 
 
 def _max_payload_photos_non_empty(payload: Dict[str, str]) -> bool:
@@ -370,35 +397,72 @@ def _max_payload_photos_non_empty(payload: Dict[str, str]) -> bool:
 
 def max_attachment_filename_from_raw(att: Dict[str, Any]) -> str:
     """Имя файла из вложения webhook MAX (для коэрции таблиц, ошибочно помеченных как video)."""
-    for key in ("filename", "file_name", "name"):
-        v = att.get(key)
-        if isinstance(v, str) and v.strip():
-            return v.strip()
+    s = _first_nonempty_str_from_dict(att, _ATTACHMENT_FILENAME_KEYS)
+    if s:
+        return s
     pl = att.get("payload")
     if isinstance(pl, dict):
-        for key in ("filename", "file_name", "name"):
-            v = pl.get(key)
-            if isinstance(v, str) and v.strip():
-                return v.strip()
-    for subk in ("file", "document", "video", "image"):
+        s = _first_nonempty_str_from_dict(pl, _ATTACHMENT_FILENAME_KEYS)
+        if s:
+            return s
+    for subk in ("file", "document", "video", "image", "media"):
         sub = att.get(subk)
         if isinstance(sub, dict):
-            for key in ("filename", "file_name", "name"):
-                v = sub.get(key)
-                if isinstance(v, str) and v.strip():
-                    return v.strip()
+            s = _first_nonempty_str_from_dict(sub, _ATTACHMENT_FILENAME_KEYS)
+            if s:
+                return s
     return ""
 
 
-def coerce_spreadsheet_max_send_type(att_type: str, filename: str) -> str:
+_MIME_KEYS = ("mime_type", "content_type", "mimetype", "mimeType", "media_type")
+
+
+def max_attachment_mime_from_raw(att: Dict[str, Any]) -> str:
+    """MIME из вложения webhook MAX."""
+    s = _first_nonempty_str_from_dict(att, _MIME_KEYS)
+    if s:
+        return s.split(";")[0].strip().lower()
+    pl = att.get("payload")
+    if isinstance(pl, dict):
+        s = _first_nonempty_str_from_dict(pl, _MIME_KEYS)
+        if s:
+            return s.split(";")[0].strip().lower()
+    for subk in ("file", "document", "video", "image", "media"):
+        sub = att.get(subk)
+        if isinstance(sub, dict):
+            s = _first_nonempty_str_from_dict(sub, _MIME_KEYS)
+            if s:
+                return s.split(";")[0].strip().lower()
+    return ""
+
+
+def spreadsheet_mime_indicates_table(mime: str) -> bool:
+    m = (mime or "").strip().lower().split(";")[0].strip()
+    if not m:
+        return False
+    if m in _MAX_SPREADSHEET_MIMES:
+        return True
+    return m.startswith("application/vnd.openxmlformats-officedocument.spreadsheetml")
+
+
+def coerce_spreadsheet_max_send_type(att_type: str, filename: str, mime_type: str = "") -> str:
     """Таблицы, пришедшие как video/audio, отправлять как file + file_id."""
     typ = normalize_max_send_attachment_type(att_type)
-    fn = (filename or "").strip().lower()
-    if typ not in ("video", "audio") or not fn:
+    if typ not in ("video", "audio"):
         return typ
-    if any(fn.endswith(suf) for suf in _MAX_SPREADSHEET_SUFFIXES):
+    if spreadsheet_mime_indicates_table(mime_type):
+        return "file"
+    fn = (filename or "").strip().lower()
+    if fn and any(fn.endswith(suf) for suf in _MAX_SPREADSHEET_SUFFIXES):
         return "file"
     return typ
+
+
+def _is_max_missing_video_token_error(exc: BaseException) -> bool:
+    if not isinstance(exc, MaxApiClientError):
+        return False
+    blob = f"{exc} {(getattr(exc, 'body', None) or '')}".lower()
+    return "video" in blob and "token" in blob and "missing" in blob
 
 
 def _normalize_max_send_payload(normalized_type: str, payload: Dict[str, str]) -> Dict[str, str]:
@@ -468,6 +532,9 @@ def _incoming_attachments(msg: Dict[str, Any]) -> List[Dict[str, Any]]:
             fn = max_attachment_filename_from_raw(att)
             if fn:
                 item["filename"] = fn
+            mt = max_attachment_mime_from_raw(att)
+            if mt:
+                item["mime_type"] = mt
             du = _extract_https_download_url(att)
             if du:
                 item["download_url"] = du
@@ -714,18 +781,49 @@ class MaxAdapter:
         """Показать индикатор набора (лучшее усилие; эндпоинт может отличаться)."""
         await self._client.send_typing(str(chat_id), is_group_chat=is_group_chat)
 
-    async def send_media(
-        self,
-        chat_id: int | str,
-        attachments: List[Dict[str, Any]],
-        caption: Optional[str] = None,
-        reply_to_message_id: Optional[int | str] = None,
-        *,
-        is_group_chat: bool = False,
-    ) -> None:
-        """Отправить медиа через POST /messages с вложениями."""
-        if not attachments:
+    async def _reupload_max_attachment_as_file(self, att: Dict[str, Any], file_id: str) -> Optional[str]:
+        """Скачать вложение и залить через POST /upload — новый file_id для отправки как file."""
+        du = str(att.get("download_url") or "").strip()
+        mid = att.get("source_message_id")
+        mid_s = str(mid).strip() if mid not in (None, "") else None
+        try:
+            if du:
+                data, ct = await self.download_file(du)
+            else:
+                data, ct = await self.download_file(str(file_id), message_id=mid_s)
+        except Exception as e:
+            logger.warning("MAX re-upload: download failed: %s", e)
             return None
+        if not data:
+            return None
+        fn = str(att.get("filename") or att.get("file_name") or "").strip() or "upload.bin"
+        mime = str(att.get("mime_type") or "").strip().lower().split(";")[0].strip()
+        if not mime:
+            mime = ((ct or "").strip().lower().split(";")[0].strip() if ct else "")
+        if not mime or mime == "application/octet-stream":
+            low = fn.lower()
+            if low.endswith(".xlsx"):
+                mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            elif low.endswith(".xls"):
+                mime = "application/vnd.ms-excel"
+            elif low.endswith(".csv"):
+                mime = "text/csv"
+            elif low.endswith(".ods"):
+                mime = "application/vnd.oasis.opendocument.spreadsheet"
+            else:
+                mime = mime or "application/octet-stream"
+        try:
+            return await self.upload_document_bytes(data, fn, mime)
+        except Exception as e:
+            logger.warning("MAX re-upload: upload failed: %s", e)
+            return None
+
+    async def _assemble_max_attachments_for_send(
+        self,
+        attachments: List[Dict[str, Any]],
+        *,
+        force_reupload_video_audio: bool,
+    ) -> List[Dict[str, Any]]:
         max_atts: List[Dict[str, Any]] = []
         for att in attachments:
             file_id = att.get("id_or_url") or att.get("file_id")
@@ -733,9 +831,22 @@ class MaxAdapter:
                 continue
             raw_type = str(att.get("type", "file"))
             fn = str(att.get("filename") or att.get("file_name") or "").strip()
-            typ = coerce_spreadsheet_max_send_type(raw_type, fn)
+            mime_stored = str(att.get("mime_type") or "").strip()
+            typ = coerce_spreadsheet_max_send_type(raw_type, fn, mime_stored)
             norm_from_raw = normalize_max_send_attachment_type(raw_type)
             coerced_to_file = typ == "file" and norm_from_raw in ("video", "audio")
+
+            if force_reupload_video_audio and typ in ("video", "audio"):
+                new_id = await self._reupload_max_attachment_as_file(att, str(file_id))
+                if new_id:
+                    max_atts.append(
+                        {
+                            "type": "file",
+                            "payload": _max_outgoing_payload("file", "file_id", new_id),
+                        }
+                    )
+                    continue
+
             if coerced_to_file:
                 payload = _max_outgoing_payload("file", "file_id", str(file_id))
             else:
@@ -747,26 +858,60 @@ class MaxAdapter:
                         if v is not None and str(v).strip() != ""
                     }
                 else:
-                    payload = _max_outgoing_payload(
-                        raw_type, "file_id", str(file_id)
-                    )
+                    payload = _max_outgoing_payload(raw_type, "file_id", str(file_id))
                 payload = _normalize_max_send_payload(typ, payload)
                 payload = _finalize_max_token_payload(typ, payload, str(file_id))
             max_atts.append({"type": typ, "payload": payload})
-        if not max_atts:
+        return max_atts
+
+    async def send_media(
+        self,
+        chat_id: int | str,
+        attachments: List[Dict[str, Any]],
+        caption: Optional[str] = None,
+        reply_to_message_id: Optional[int | str] = None,
+        *,
+        is_group_chat: bool = False,
+        reupload_untrusted_video: bool = False,
+    ) -> None:
+        """Отправить медиа через POST /messages с вложениями.
+        reupload_untrusted_video: для рассылки — скачать video/audio и перезалить как file.
+        При 400 Missing token — одна повторная попытка с принудительным re-upload.
+        """
+        if not attachments:
             return None
-        if MAX_DEBUG_ATTACHMENTS:
-            logger.info(
-                "MAX send_media debug: %s",
-                [{"type": x["type"], "payload_keys": sorted(x["payload"].keys())} for x in max_atts],
-            )
+        force_reup = reupload_untrusted_video
         body_text = caption or ""
-        await self._client.send_message(
-            chat_id,
-            body_text,
-            is_group_chat=is_group_chat,
-            attachments=max_atts,
-        )
+        last_err: Optional[BaseException] = None
+        for attempt in (0, 1):
+            max_atts = await self._assemble_max_attachments_for_send(
+                attachments,
+                force_reupload_video_audio=force_reup,
+            )
+            if not max_atts:
+                return None
+            if MAX_DEBUG_ATTACHMENTS:
+                logger.info(
+                    "MAX send_media debug (attempt %s): %s",
+                    attempt,
+                    [{"type": x["type"], "payload_keys": sorted(x["payload"].keys())} for x in max_atts],
+                )
+            try:
+                await self._client.send_message(
+                    chat_id,
+                    body_text,
+                    is_group_chat=is_group_chat,
+                    attachments=max_atts,
+                )
+                return
+            except MaxApiClientError as e:
+                last_err = e
+                if attempt == 0 and _is_max_missing_video_token_error(e):
+                    force_reup = True
+                    continue
+                raise
+        if last_err:
+            raise last_err
 
     @staticmethod
     def _http_content_type_mime(resp: Any) -> Optional[str]:

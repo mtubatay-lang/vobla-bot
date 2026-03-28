@@ -56,6 +56,15 @@ def parse_broadcast_media_for_platform(media_json: str, platform: Platform) -> L
                 fn = a.get("filename") or a.get("file_name")
                 if fn and str(fn).strip():
                     row["filename"] = str(fn).strip()
+                mt = a.get("mime_type")
+                if mt and str(mt).strip():
+                    row["mime_type"] = str(mt).strip().lower().split(";")[0].strip()
+                du = a.get("download_url")
+                if du and str(du).strip():
+                    row["download_url"] = str(du).strip()
+                sid = a.get("source_message_id")
+                if sid is not None and str(sid).strip():
+                    row["source_message_id"] = str(sid).strip()
                 mp = a.get("max_payload")
                 if isinstance(mp, dict) and mp:
                     row["max_payload"] = mp
@@ -944,6 +953,7 @@ async def execute_broadcast_multi(
                                 atts,
                                 caption=text_final,
                                 is_group_chat=r.is_chat,
+                                reupload_untrusted_video=True,
                             )
                         else:
                             await adapter.send_media(

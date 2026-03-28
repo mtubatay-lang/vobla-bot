@@ -75,6 +75,29 @@ def test_v2_max_preserves_filename_for_spreadsheet_coerce():
     assert mx[0]["filename"] == "Тестовая.xlsx"
 
 
+def test_v2_max_preserves_mime_download_url_source_mid():
+    raw = json.dumps(
+        {
+            "version": 2,
+            "telegram": [],
+            "max": [
+                {
+                    "type": "video",
+                    "file_id": "f1",
+                    "id_or_url": "f1",
+                    "mime_type": "text/csv",
+                    "download_url": "https://cdn.example/f",
+                    "source_message_id": "mid-42",
+                }
+            ],
+        }
+    )
+    mx = parse_broadcast_media_for_platform(raw, "max")
+    assert mx[0]["mime_type"] == "text/csv"
+    assert mx[0]["download_url"] == "https://cdn.example/f"
+    assert mx[0]["source_message_id"] == "mid-42"
+
+
 def test_invalid_json_empty():
     assert parse_broadcast_media_for_platform("not json", "telegram") == []
     assert parse_broadcast_media_for_platform("", "max") == []

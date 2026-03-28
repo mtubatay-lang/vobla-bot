@@ -6,7 +6,9 @@ from app.platforms.max.adapter import (
     _normalize_max_send_payload,
     coerce_spreadsheet_max_send_type,
     max_attachment_filename_from_raw,
+    max_attachment_mime_from_raw,
     parse_max_update,
+    spreadsheet_mime_indicates_table,
 )
 
 
@@ -356,9 +358,32 @@ def test_coerce_spreadsheet_max_send_type():
     assert coerce_spreadsheet_max_send_type("video", "clip.mp4") == "video"
     assert coerce_spreadsheet_max_send_type("video", "") == "video"
     assert coerce_spreadsheet_max_send_type("file", "x.xlsx") == "file"
+    assert (
+        coerce_spreadsheet_max_send_type(
+            "video",
+            "",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        == "file"
+    )
+    assert coerce_spreadsheet_max_send_type("video", "", "video/mp4") == "video"
+
+
+def test_spreadsheet_mime_indicates_table():
+    assert spreadsheet_mime_indicates_table("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    assert spreadsheet_mime_indicates_table("text/csv")
+    assert not spreadsheet_mime_indicates_table("video/mp4")
+
+
+def test_max_attachment_mime_from_raw_payload():
+    assert (
+        max_attachment_mime_from_raw({"payload": {"mime_type": "text/csv; charset=utf-8"}})
+        == "text/csv"
+    )
 
 
 def test_max_attachment_filename_from_raw_nested():
     assert max_attachment_filename_from_raw({"payload": {"filename": "a.xlsx"}}) == "a.xlsx"
     assert max_attachment_filename_from_raw({"file": {"name": "b.xls"}}) == "b.xls"
+    assert max_attachment_filename_from_raw({"payload": {"title": "sheet.xlsx"}}) == "sheet.xlsx"
     assert max_attachment_filename_from_raw({"type": "video"}) == ""

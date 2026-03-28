@@ -360,6 +360,15 @@ def _max_broadcast_item_from_attachment(a: Dict[str, Any]) -> Optional[Dict[str,
     fn = a.get("filename") or a.get("file_name")
     if fn and str(fn).strip():
         item["filename"] = str(fn).strip()
+    mt = a.get("mime_type")
+    if mt and str(mt).strip():
+        item["mime_type"] = str(mt).strip().lower().split(";")[0].strip()
+    du = a.get("download_url")
+    if du and str(du).strip():
+        item["download_url"] = str(du).strip()
+    sid = a.get("source_message_id")
+    if sid is not None and str(sid).strip():
+        item["source_message_id"] = str(sid).strip()
     mp = a.get("max_payload")
     if isinstance(mp, dict) and mp:
         item["max_payload"] = mp
@@ -657,7 +666,13 @@ async def handle_admin_callback(
         atts = parse_broadcast_media_for_platform(mj, "max")
         try:
             if atts:
-                await adapter.send_media(chat_id, atts, caption=tf, is_group_chat=is_g)
+                await adapter.send_media(
+                    chat_id,
+                    atts,
+                    caption=tf,
+                    is_group_chat=is_g,
+                    reupload_untrusted_video=True,
+                )
             elif tf:
                 await _send(adapter, chat_id, tf, None, is_group=is_g)
             s["step"] = "audience_final"
@@ -956,6 +971,10 @@ async def handle_admin_message(adapter, max_client: Any, event: IncomingMessage,
                     if it:
                         items.append(it)
                 if items:
+                    mid = incoming_max_message_id(event)
+                    if mid:
+                        for it in items:
+                            it["source_message_id"] = str(mid)
                     mj = _merge_max_media_json(s.get("media_json", ""), items)
                     await _after_text_media(adapter, event.chat.id, is_g, uid, s, to, mj)
                     return True
@@ -978,6 +997,10 @@ async def handle_admin_message(adapter, max_client: Any, event: IncomingMessage,
                     if it:
                         items.append(it)
                 if items:
+                    mid = incoming_max_message_id(event)
+                    if mid:
+                        for it in items:
+                            it["source_message_id"] = str(mid)
                     mj = _merge_max_media_json(s.get("media_json", ""), items)
                     to = s.get("text_original", "")
                     await _after_text_media(adapter, event.chat.id, is_g, uid, s, to, mj)

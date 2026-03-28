@@ -198,7 +198,7 @@ MAX_WEBHOOK_SECRET = os.getenv("MAX_WEBHOOK_SECRET", "").strip()
 # Логировать типы вложений и ключи payload перед POST /messages (диагностика proto.payload).
 MAX_DEBUG_ATTACHMENTS = _env_bool("MAX_DEBUG_ATTACHMENTS", False)
 
-# Ревизия деплоя (задаётся в CI/Railway, например git SHA) — видно в логах при старте.
+# Ревизия деплоя: APP_REVISION вручную или RAILWAY_GIT_COMMIT_SHA на Railway; в логах main/max_entrypoint — сверка с git при подозрении на старый образ.
 APP_REVISION = os.getenv("APP_REVISION", "").strip() or os.getenv("RAILWAY_GIT_COMMIT_SHA", "").strip()
 
 # --- Document templates (генерация документов из шаблонов) ---
