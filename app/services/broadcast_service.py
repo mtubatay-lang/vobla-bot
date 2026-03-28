@@ -53,6 +53,9 @@ def parse_broadcast_media_for_platform(media_json: str, platform: Platform) -> L
                     continue
                 typ = str(a.get("type", "file")).lower()
                 row: Dict[str, Any] = {"type": typ, "id_or_url": str(fid), "file_id": str(fid)}
+                fn = a.get("filename") or a.get("file_name")
+                if fn and str(fn).strip():
+                    row["filename"] = str(fn).strip()
                 mp = a.get("max_payload")
                 if isinstance(mp, dict) and mp:
                     row["max_payload"] = mp

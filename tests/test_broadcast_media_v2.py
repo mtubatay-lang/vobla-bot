@@ -56,6 +56,25 @@ def test_v2_max_video_with_legacy_file_id_payload_preserved_for_adapter():
     assert mx[0]["max_payload"] == {"file_id": "vid-fid"}
 
 
+def test_v2_max_preserves_filename_for_spreadsheet_coerce():
+    raw = json.dumps(
+        {
+            "version": 2,
+            "telegram": [],
+            "max": [
+                {
+                    "type": "video",
+                    "file_id": "x1",
+                    "id_or_url": "x1",
+                    "filename": "Тестовая.xlsx",
+                }
+            ],
+        }
+    )
+    mx = parse_broadcast_media_for_platform(raw, "max")
+    assert mx[0]["filename"] == "Тестовая.xlsx"
+
+
 def test_invalid_json_empty():
     assert parse_broadcast_media_for_platform("not json", "telegram") == []
     assert parse_broadcast_media_for_platform("", "max") == []

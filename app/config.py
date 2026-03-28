@@ -195,6 +195,11 @@ MAX_WEBHOOK_PATH = os.getenv("MAX_WEBHOOK_PATH", "/webhook/max")
 MAX_AUTH_BEARER_PREFIX = os.getenv("MAX_AUTH_BEARER_PREFIX", "false").lower() == "true"
 # Если задан при подписке (POST /subscriptions secret), webhook должен сверять заголовок X-Max-Bot-Api-Secret
 MAX_WEBHOOK_SECRET = os.getenv("MAX_WEBHOOK_SECRET", "").strip()
+# Логировать типы вложений и ключи payload перед POST /messages (диагностика proto.payload).
+MAX_DEBUG_ATTACHMENTS = _env_bool("MAX_DEBUG_ATTACHMENTS", False)
+
+# Ревизия деплоя (задаётся в CI/Railway, например git SHA) — видно в логах при старте.
+APP_REVISION = os.getenv("APP_REVISION", "").strip() or os.getenv("RAILWAY_GIT_COMMIT_SHA", "").strip()
 
 # --- Document templates (генерация документов из шаблонов) ---
 # Папка с DOCX-шаблонами и config.json (относительно корня проекта)

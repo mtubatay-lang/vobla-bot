@@ -13,6 +13,7 @@ import logging
 import os
 
 from app.config import (
+    APP_REVISION,
     ENABLE_MAX,
     LOG_LEVEL,
     MAX_BOT_TOKEN,
@@ -33,6 +34,8 @@ if isinstance(_root_lvl, int) and _root_lvl >= logging.INFO:
     for _name in ("httpx", "httpcore"):
         logging.getLogger(_name).setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
+if APP_REVISION:
+    logger.info("[MAX_ENTRYPOINT] APP_REVISION=%s (сверьте с main при отладке деплоя)", APP_REVISION)
 
 
 def _is_google_sheets_quota_error(exc: BaseException) -> bool:

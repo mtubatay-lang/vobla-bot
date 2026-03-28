@@ -10,7 +10,7 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, Update
 
-from app.config import BOT_TOKEN, LOG_LEVEL, SENTRY_DSN, TELEGRAM_POLLING_ENABLED
+from app.config import APP_REVISION, BOT_TOKEN, LOG_LEVEL, SENTRY_DSN, TELEGRAM_POLLING_ENABLED
 from app.handlers.debug_passthrough import router as debug_router
 from app.handlers.start import router as start_router
 from app.handlers.help import router as help_router
@@ -49,6 +49,8 @@ async def main() -> None:
         for _name in ("httpx", "httpcore"):
             logging.getLogger(_name).setLevel(logging.WARNING)
     logger = logging.getLogger(__name__)
+    if APP_REVISION:
+        logger.info("[MAIN] APP_REVISION=%s (сверьте с main при отладке деплоя)", APP_REVISION)
 
     # --- Создаём бота и диспетчер ---
     bot = Bot(

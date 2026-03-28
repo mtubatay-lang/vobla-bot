@@ -8,6 +8,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
+from app.config import MAX_DEBUG_ATTACHMENTS
+
 from app.core.types import (
     CallbackEvent,
     IncomingMessage,
@@ -351,6 +353,54 @@ def normalize_max_send_attachment_type(t: str) -> str:
     return "image" if x == "photo" else x
 
 
+_MAX_SPREADSHEET_SUFFIXES = (".xlsx", ".xls", ".csv", ".ods")
+
+
+def _max_payload_photos_non_empty(payload: Dict[str, str]) -> bool:
+    """Пустой photos / \"[]\" не должен блокировать перенос file_id в token."""
+    if "photos" not in payload:
+        return False
+    raw = str(payload.get("photos") or "").strip()
+    if not raw:
+        return False
+    if raw in ("[]", "{}", "null"):
+        return False
+    return True
+
+
+def max_attachment_filename_from_raw(att: Dict[str, Any]) -> str:
+    """Имя файла из вложения webhook MAX (для коэрции таблиц, ошибочно помеченных как video)."""
+    for key in ("filename", "file_name", "name"):
+        v = att.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    pl = att.get("payload")
+    if isinstance(pl, dict):
+        for key in ("filename", "file_name", "name"):
+            v = pl.get(key)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+    for subk in ("file", "document", "video", "image"):
+        sub = att.get(subk)
+        if isinstance(sub, dict):
+            for key in ("filename", "file_name", "name"):
+                v = sub.get(key)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+    return ""
+
+
+def coerce_spreadsheet_max_send_type(att_type: str, filename: str) -> str:
+    """Таблицы, пришедшие как video/audio, отправлять как file + file_id."""
+    typ = normalize_max_send_attachment_type(att_type)
+    fn = (filename or "").strip().lower()
+    if typ not in ("video", "audio") or not fn:
+        return typ
+    if any(fn.endswith(suf) for suf in _MAX_SPREADSHEET_SUFFIXES):
+        return "file"
+    return typ
+
+
 def _normalize_max_send_payload(normalized_type: str, payload: Dict[str, str]) -> Dict[str, str]:
     """Старый media_json мог содержать max_payload с file_id там, где API ждёт token (image, sticker, video, audio)."""
     typ = normalize_max_send_attachment_type(normalized_type)
@@ -359,7 +409,7 @@ def _normalize_max_send_payload(normalized_type: str, payload: Dict[str, str]) -
     if (
         str(payload.get("token") or "").strip()
         or str(payload.get("url") or "").strip()
-        or "photos" in payload
+        or _max_payload_photos_non_empty(payload)
     ):
         return payload
     fid = payload.get("file_id")
@@ -379,7 +429,7 @@ def _finalize_max_token_payload(typ: str, payload: Dict[str, str], file_id: str)
     if (
         str(payload.get("token") or "").strip()
         or str(payload.get("url") or "").strip()
-        or "photos" in payload
+        or _max_payload_photos_non_empty(payload)
     ):
         return payload
     fid = str(file_id or "").strip()
@@ -415,6 +465,9 @@ def _incoming_attachments(msg: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "id_or_url": file_id,
                 "max_payload": _max_outgoing_payload(att_type, ref_key, file_id),
             }
+            fn = max_attachment_filename_from_raw(att)
+            if fn:
+                item["filename"] = fn
             du = _extract_https_download_url(att)
             if du:
                 item["download_url"] = du
@@ -678,23 +731,35 @@ class MaxAdapter:
             file_id = att.get("id_or_url") or att.get("file_id")
             if not file_id:
                 continue
-            typ = normalize_max_send_attachment_type(str(att.get("type", "file")))
-            mp = att.get("max_payload")
-            if isinstance(mp, dict) and mp:
-                payload = {
-                    k: str(v)
-                    for k, v in mp.items()
-                    if v is not None and str(v).strip() != ""
-                }
+            raw_type = str(att.get("type", "file"))
+            fn = str(att.get("filename") or att.get("file_name") or "").strip()
+            typ = coerce_spreadsheet_max_send_type(raw_type, fn)
+            norm_from_raw = normalize_max_send_attachment_type(raw_type)
+            coerced_to_file = typ == "file" and norm_from_raw in ("video", "audio")
+            if coerced_to_file:
+                payload = _max_outgoing_payload("file", "file_id", str(file_id))
             else:
-                payload = _max_outgoing_payload(
-                    str(att.get("type", "file")), "file_id", str(file_id)
-                )
-            payload = _normalize_max_send_payload(typ, payload)
-            payload = _finalize_max_token_payload(typ, payload, str(file_id))
+                mp = att.get("max_payload")
+                if isinstance(mp, dict) and mp:
+                    payload = {
+                        k: str(v)
+                        for k, v in mp.items()
+                        if v is not None and str(v).strip() != ""
+                    }
+                else:
+                    payload = _max_outgoing_payload(
+                        raw_type, "file_id", str(file_id)
+                    )
+                payload = _normalize_max_send_payload(typ, payload)
+                payload = _finalize_max_token_payload(typ, payload, str(file_id))
             max_atts.append({"type": typ, "payload": payload})
         if not max_atts:
             return None
+        if MAX_DEBUG_ATTACHMENTS:
+            logger.info(
+                "MAX send_media debug: %s",
+                [{"type": x["type"], "payload_keys": sorted(x["payload"].keys())} for x in max_atts],
+            )
         body_text = caption or ""
         await self._client.send_message(
             chat_id,

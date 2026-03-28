@@ -2,7 +2,10 @@
 
 from app.platforms.max.adapter import (
     _finalize_max_token_payload,
+    _max_payload_photos_non_empty,
     _normalize_max_send_payload,
+    coerce_spreadsheet_max_send_type,
+    max_attachment_filename_from_raw,
     parse_max_update,
 )
 
@@ -334,3 +337,28 @@ def test_finalize_max_token_payload_fills_from_file_id():
     assert _finalize_max_token_payload("video", {"token": ""}, "fid-9") == {"token": "fid-9"}
     assert _finalize_max_token_payload("file", {"file_id": "f"}, "x") == {"file_id": "f"}
     assert _finalize_max_token_payload("video", {"token": "ok"}, "ignored") == {"token": "ok"}
+
+
+def test_max_payload_photos_non_empty_and_normalize_video():
+    assert _max_payload_photos_non_empty({"photos": "[]"}) is False
+    assert _max_payload_photos_non_empty({"photos": ""}) is False
+    assert _max_payload_photos_non_empty({"photos": "{}"}) is False
+    assert _max_payload_photos_non_empty({"photos": "null"}) is False
+    assert _max_payload_photos_non_empty({"photos": "[1]"}) is True
+    assert _normalize_max_send_payload("video", {"photos": "[]", "file_id": "z"}) == {"token": "z"}
+    assert _finalize_max_token_payload("video", {"photos": "[]"}, "fid") == {"token": "fid"}
+
+
+def test_coerce_spreadsheet_max_send_type():
+    assert coerce_spreadsheet_max_send_type("video", "Тестовая.xlsx") == "file"
+    assert coerce_spreadsheet_max_send_type("video", "t.CSV") == "file"
+    assert coerce_spreadsheet_max_send_type("audio", "a.ods") == "file"
+    assert coerce_spreadsheet_max_send_type("video", "clip.mp4") == "video"
+    assert coerce_spreadsheet_max_send_type("video", "") == "video"
+    assert coerce_spreadsheet_max_send_type("file", "x.xlsx") == "file"
+
+
+def test_max_attachment_filename_from_raw_nested():
+    assert max_attachment_filename_from_raw({"payload": {"filename": "a.xlsx"}}) == "a.xlsx"
+    assert max_attachment_filename_from_raw({"file": {"name": "b.xls"}}) == "b.xls"
+    assert max_attachment_filename_from_raw({"type": "video"}) == ""

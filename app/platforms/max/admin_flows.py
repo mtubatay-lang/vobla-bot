@@ -357,6 +357,9 @@ def _max_broadcast_item_from_attachment(a: Dict[str, Any]) -> Optional[Dict[str,
         "file_id": str(fid),
         "id_or_url": str(fid),
     }
+    fn = a.get("filename") or a.get("file_name")
+    if fn and str(fn).strip():
+        item["filename"] = str(fn).strip()
     mp = a.get("max_payload")
     if isinstance(mp, dict) and mp:
         item["max_payload"] = mp
