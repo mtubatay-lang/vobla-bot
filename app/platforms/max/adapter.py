@@ -48,6 +48,30 @@ def _extract_https_download_url(att: Any, depth: int = 0) -> Optional[str]:
     return None
 
 
+def _attachment_dicts_to_url_pairs(att: Dict[str, Any]) -> list[tuple[str, str]]:
+    """Собирает (file_id_or_empty, https_url) из одного вложения API (payload, вложенные блоки)."""
+    pairs: list[tuple[str, str]] = []
+    url_keys = ("url", "download_url", "file_url", "voice_url", "audio_url", "media_url")
+
+    def add_from_pl(pl: Any, default_fid: str = "") -> None:
+        if not isinstance(pl, dict):
+            return
+        fid = str(pl.get("file_id") or pl.get("id") or pl.get("token") or default_fid or "")
+        for key in url_keys:
+            u = pl.get(key)
+            if isinstance(u, str) and u.startswith(("http://", "https://")):
+                pairs.append((fid, u))
+
+    add_from_pl(att, str(att.get("file_id") or att.get("id") or ""))
+    if isinstance(att.get("payload"), dict):
+        add_from_pl(att["payload"])
+    for subk in ("file", "video", "document", "image", "audio", "media"):
+        sub = att.get(subk)
+        if isinstance(sub, dict):
+            add_from_pl(sub)
+    return pairs
+
+
 def _find_attachment_download_url_in_api_message(
     data: Dict[str, Any], file_id: Optional[str] = None
 ) -> Optional[str]:
@@ -60,19 +84,13 @@ def _find_attachment_download_url_in_api_message(
         body = msg
     atts = body.get("attachments")
     if not isinstance(atts, list):
+        atts = msg.get("attachments")
+    if not isinstance(atts, list):
         return None
     pairs: list[tuple[str, str]] = []
     for att in atts:
-        if not isinstance(att, dict):
-            continue
-        pl = att.get("payload") if isinstance(att.get("payload"), dict) else att
-        if not isinstance(pl, dict):
-            continue
-        fid = str(pl.get("file_id") or pl.get("id") or "")
-        for key in ("url", "download_url", "file_url"):
-            u = pl.get(key)
-            if isinstance(u, str) and u.startswith(("http://", "https://")):
-                pairs.append((fid, u))
+        if isinstance(att, dict):
+            pairs.extend(_attachment_dicts_to_url_pairs(att))
     if not pairs:
         return None
     if file_id:
@@ -462,7 +480,11 @@ def _is_max_missing_video_token_error(exc: BaseException) -> bool:
     if not isinstance(exc, MaxApiClientError):
         return False
     blob = f"{exc} {(getattr(exc, 'body', None) or '')}".lower()
-    return "video" in blob and "token" in blob and "missing" in blob
+    if "video" not in blob or "token" not in blob:
+        return False
+    if "missing" in blob or "proto.payload" in blob:
+        return True
+    return "video attachment" in blob
 
 
 def _normalize_max_send_payload(normalized_type: str, payload: Dict[str, str]) -> Dict[str, str]:
@@ -845,7 +867,17 @@ class MaxAdapter:
                             "payload": _max_outgoing_payload("file", "file_id", new_id),
                         }
                     )
-                    continue
+                else:
+                    logger.warning(
+                        "MAX send: re-upload video/audio не удался, отправляем как file с исходным file_id"
+                    )
+                    max_atts.append(
+                        {
+                            "type": "file",
+                            "payload": _max_outgoing_payload("file", "file_id", str(file_id)),
+                        }
+                    )
+                continue
 
             if coerced_to_file:
                 payload = _max_outgoing_payload("file", "file_id", str(file_id))

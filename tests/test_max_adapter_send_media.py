@@ -73,3 +73,34 @@ async def test_send_media_reupload_flag_avoids_double_send_when_ok():
     atts = client.send_message.call_args[1]["attachments"]
     assert atts[0]["type"] == "file"
     assert atts[0]["payload"]["file_id"] == "up-1"
+
+
+@pytest.mark.asyncio
+async def test_send_media_reupload_failure_falls_back_to_original_file_id():
+    """При неудачном скачивании/загрузке не отправляем video — только file + исходный id."""
+    client = MagicMock(spec=MaxApiClient)
+    client.send_message = AsyncMock(return_value={"message": {"id": "1"}})
+    adapter = MaxAdapter(client)
+    adapter.download_file = AsyncMock(
+        side_effect=MaxApiClientError("no file", status=404, body="{}")
+    )
+    adapter.upload_document_bytes = AsyncMock()
+
+    await adapter.send_media(
+        1,
+        [
+            {
+                "type": "video",
+                "file_id": "orig-fid",
+                "id_or_url": "orig-fid",
+                "source_message_id": "m1",
+            }
+        ],
+        reupload_untrusted_video=True,
+    )
+
+    assert client.send_message.call_count == 1
+    atts = client.send_message.call_args[1]["attachments"]
+    assert atts[0]["type"] == "file"
+    assert atts[0]["payload"] == {"file_id": "orig-fid"}
+    adapter.upload_document_bytes.assert_not_called()

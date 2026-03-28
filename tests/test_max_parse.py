@@ -1,7 +1,12 @@
 """Тесты разбора webhook MAX (parse_max_update)."""
 
+from app.platforms.max.client import MaxApiClientError
+
 from app.platforms.max.adapter import (
+    _attachment_dicts_to_url_pairs,
     _finalize_max_token_payload,
+    _find_attachment_download_url_in_api_message,
+    _is_max_missing_video_token_error,
     _max_payload_photos_non_empty,
     _normalize_max_send_payload,
     coerce_spreadsheet_max_send_type,
@@ -380,6 +385,34 @@ def test_max_attachment_mime_from_raw_payload():
         max_attachment_mime_from_raw({"payload": {"mime_type": "text/csv; charset=utf-8"}})
         == "text/csv"
     )
+
+
+def test_is_max_missing_video_token_error_relaxed():
+    e1 = MaxApiClientError(
+        "x",
+        400,
+        '{"code":"proto.payload","message":"Missing `token` in video attachment"}',
+    )
+    assert _is_max_missing_video_token_error(e1)
+    e2 = MaxApiClientError("x", 400, '{"message":"problem with video attachment token"}')
+    assert _is_max_missing_video_token_error(e2)
+    e3 = MaxApiClientError("x", 400, '{"message":"other"}')
+    assert not _is_max_missing_video_token_error(e3)
+
+
+def test_attachment_dicts_to_url_pairs_nested_video():
+    att = {"type": "video", "video": {"file_id": "v1", "url": "https://cdn.example/f"}}
+    pairs = _attachment_dicts_to_url_pairs(att)
+    assert ("v1", "https://cdn.example/f") in pairs
+
+
+def test_find_attachment_download_url_falls_back_to_msg_attachments():
+    data = {
+        "message": {
+            "attachments": [{"video": {"id": "x", "url": "https://example.com/a"}}],
+        }
+    }
+    assert _find_attachment_download_url_in_api_message(data, file_id="x") == "https://example.com/a"
 
 
 def test_max_attachment_filename_from_raw_nested():
