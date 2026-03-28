@@ -1,6 +1,10 @@
 """Тесты разбора webhook MAX (parse_max_update)."""
 
-from app.platforms.max.adapter import _normalize_max_send_payload, parse_max_update
+from app.platforms.max.adapter import (
+    _finalize_max_token_payload,
+    _normalize_max_send_payload,
+    parse_max_update,
+)
 
 
 def test_parse_message_created_minimal():
@@ -317,3 +321,16 @@ def test_normalize_legacy_video_audio_max_payload_file_id_to_token():
     assert _normalize_max_send_payload("video", {"token": "keep-v"}) == {"token": "keep-v"}
     assert _normalize_max_send_payload("audio", {"token": "keep-a"}) == {"token": "keep-a"}
     assert _normalize_max_send_payload("video", {"url": "https://x"}) == {"url": "https://x"}
+
+
+def test_normalize_video_empty_token_still_maps_file_id():
+    """Пустой token не должен блокировать перенос file_id (как у xlsx, пришедшего как video)."""
+    assert _normalize_max_send_payload("video", {"token": "", "file_id": "abc"}) == {"token": "abc"}
+    assert _normalize_max_send_payload("video", {"token": "  ", "file_id": "abc"}) == {"token": "abc"}
+
+
+def test_finalize_max_token_payload_fills_from_file_id():
+    assert _finalize_max_token_payload("video", {}, "fid-9") == {"token": "fid-9"}
+    assert _finalize_max_token_payload("video", {"token": ""}, "fid-9") == {"token": "fid-9"}
+    assert _finalize_max_token_payload("file", {"file_id": "f"}, "x") == {"file_id": "f"}
+    assert _finalize_max_token_payload("video", {"token": "ok"}, "ignored") == {"token": "ok"}

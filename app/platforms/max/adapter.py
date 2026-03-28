@@ -356,9 +356,33 @@ def _normalize_max_send_payload(normalized_type: str, payload: Dict[str, str]) -
     typ = normalize_max_send_attachment_type(normalized_type)
     if typ not in ("image", "sticker", "video", "audio"):
         return payload
-    if "token" in payload or "url" in payload or "photos" in payload:
+    if (
+        str(payload.get("token") or "").strip()
+        or str(payload.get("url") or "").strip()
+        or "photos" in payload
+    ):
         return payload
     fid = payload.get("file_id")
+    if fid is not None and str(fid).strip():
+        return {"token": str(fid).strip()}
+    return payload
+
+
+def _finalize_max_token_payload(typ: str, payload: Dict[str, str], file_id: str) -> Dict[str, str]:
+    """
+    MAX 400 «Missing token in video attachment»: если после нормализации token пустой,
+    подставить идентификатор вложения из file_id/id_or_url (как в входящем сообщении).
+    """
+    t = normalize_max_send_attachment_type(typ)
+    if t not in ("image", "sticker", "video", "audio"):
+        return payload
+    if (
+        str(payload.get("token") or "").strip()
+        or str(payload.get("url") or "").strip()
+        or "photos" in payload
+    ):
+        return payload
+    fid = str(file_id or "").strip()
     if fid:
         return {"token": fid}
     return payload
@@ -657,12 +681,17 @@ class MaxAdapter:
             typ = normalize_max_send_attachment_type(str(att.get("type", "file")))
             mp = att.get("max_payload")
             if isinstance(mp, dict) and mp:
-                payload = {k: str(v) for k, v in mp.items() if v is not None}
+                payload = {
+                    k: str(v)
+                    for k, v in mp.items()
+                    if v is not None and str(v).strip() != ""
+                }
             else:
                 payload = _max_outgoing_payload(
                     str(att.get("type", "file")), "file_id", str(file_id)
                 )
             payload = _normalize_max_send_payload(typ, payload)
+            payload = _finalize_max_token_payload(typ, payload, str(file_id))
             max_atts.append({"type": typ, "payload": payload})
         if not max_atts:
             return None
