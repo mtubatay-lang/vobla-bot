@@ -352,9 +352,9 @@ def normalize_max_send_attachment_type(t: str) -> str:
 
 
 def _normalize_max_send_payload(normalized_type: str, payload: Dict[str, str]) -> Dict[str, str]:
-    """Старый media_json мог содержать max_payload с file_id для картинки — API ждёт token."""
+    """Старый media_json мог содержать max_payload с file_id там, где API ждёт token (image, sticker, video, audio)."""
     typ = normalize_max_send_attachment_type(normalized_type)
-    if typ not in ("image", "sticker"):
+    if typ not in ("image", "sticker", "video", "audio"):
         return payload
     if "token" in payload or "url" in payload or "photos" in payload:
         return payload

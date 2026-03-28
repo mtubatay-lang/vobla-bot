@@ -309,3 +309,11 @@ def test_normalize_legacy_image_max_payload_file_id_to_token():
     assert _normalize_max_send_payload("image", {"file_id": "legacy-1"}) == {"token": "legacy-1"}
     assert _normalize_max_send_payload("image", {"token": "keep"}) == {"token": "keep"}
     assert _normalize_max_send_payload("file", {"file_id": "f"}) == {"file_id": "f"}
+
+
+def test_normalize_legacy_video_audio_max_payload_file_id_to_token():
+    assert _normalize_max_send_payload("video", {"file_id": "v-1"}) == {"token": "v-1"}
+    assert _normalize_max_send_payload("audio", {"file_id": "a-1"}) == {"token": "a-1"}
+    assert _normalize_max_send_payload("video", {"token": "keep-v"}) == {"token": "keep-v"}
+    assert _normalize_max_send_payload("audio", {"token": "keep-a"}) == {"token": "keep-a"}
+    assert _normalize_max_send_payload("video", {"url": "https://x"}) == {"url": "https://x"}

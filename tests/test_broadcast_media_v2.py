@@ -34,6 +34,28 @@ def test_v2_split_platforms():
     assert mx[0]["max_payload"] == {"token": "m1"}
 
 
+def test_v2_max_video_with_legacy_file_id_payload_preserved_for_adapter():
+    """Как в media_json из рассылки: type video + max_payload с file_id — send_media нормализует в token."""
+    raw = json.dumps(
+        {
+            "version": 2,
+            "telegram": [],
+            "max": [
+                {
+                    "type": "video",
+                    "file_id": "vid-fid",
+                    "id_or_url": "vid-fid",
+                    "max_payload": {"file_id": "vid-fid"},
+                }
+            ],
+        }
+    )
+    mx = parse_broadcast_media_for_platform(raw, "max")
+    assert len(mx) == 1
+    assert mx[0]["type"] == "video"
+    assert mx[0]["max_payload"] == {"file_id": "vid-fid"}
+
+
 def test_invalid_json_empty():
     assert parse_broadcast_media_for_platform("not json", "telegram") == []
     assert parse_broadcast_media_for_platform("", "max") == []
