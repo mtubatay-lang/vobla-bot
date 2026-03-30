@@ -60,8 +60,8 @@ class BroadcastState(StatesGroup):
     waiting_text = State()
     waiting_media = State()
     choosing_variant = State()  # Выбор варианта текста (оригинал/улучшенный)
-    choosing_audience = State()  # Первичный выбор аудитории (с "тест себе")
-    choosing_audience_final = State()  # Финальный выбор аудитории (после теста)
+    choosing_audience = State()  # Превью / тест себе (тест необязателен)
+    choosing_audience_final = State()  # После «тест себе»; шаг сохраняется для совместимости
     choosing_send_type = State()  # Отправить сейчас / раз в неделю / раз в месяц
     choosing_weekday = State()  # День недели для еженедельной рассылки
     choosing_month_day = State()  # Число месяца для ежемесячной рассылки
@@ -701,7 +701,11 @@ async def handle_test_self(callback: CallbackQuery, state: FSMContext) -> None:
     
     # Отправляем тест инициатору
     created_by_user_id = callback.from_user.id if callback.from_user else 0
-    
+    prev_state = await state.get_state()
+    # Состояние «после теста» до долгой отправки — уже в общем FSM (Redis); при MemoryStorage
+    # по-прежнему нужен один воркер или REDIS_URL.
+    await state.set_state(BroadcastState.choosing_audience_final)
+
     try:
         # Парсим медиа
         attachments = []
@@ -731,9 +735,8 @@ async def handle_test_self(callback: CallbackQuery, state: FSMContext) -> None:
             reply_markup=keyboard
         )
         
-        await state.set_state(BroadcastState.choosing_audience_final)
-        
     except Exception as e:
+        await state.set_state(prev_state)
         logger.exception(f"[BROADCAST] Error sending test: {e}")
         await callback.message.answer(f"❌ Ошибка при отправке теста: {str(e)[:200]}")
 
@@ -968,12 +971,6 @@ async def handle_send_broadcast(callback: CallbackQuery, state: FSMContext) -> N
         return
     
     if not await _check_user_owns_broadcast(callback, state):
-        return
-    
-    # Проверка, что мы в финальном состоянии
-    current_state = await state.get_state()
-    if current_state != BroadcastState.choosing_audience_final:
-        await callback.answer("❌ Сначала отправьте тестовую рассылку", show_alert=True)
         return
     
     data = await state.get_data()

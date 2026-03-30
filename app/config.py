@@ -22,7 +22,13 @@ def _env_bool(name: str, default: bool = True) -> bool:
 
 
 # False — не вызывать getUpdates в этом процессе (второй сервис только под MAX webhook и т.п.).
+# Должен быть ровно один активный long poll на BOT_TOKEN; иначе TelegramConflictError и рассинхрон FSM
+# (см. REDIS_URL). На инстансе только под MAX webhook выставьте TELEGRAM_POLLING_ENABLED=false.
 TELEGRAM_POLLING_ENABLED = _env_bool("TELEGRAM_POLLING_ENABLED", True)
+
+# Опционально: общее FSM-хранилище для aiogram при нескольких репликах/процессах Telegram-бота.
+# Пусто — MemoryStorage (состояние только внутри процесса; «тест отправлен» + другой воркер = баг).
+REDIS_URL = (os.getenv("REDIS_URL") or "").strip()
 
 # --- OpenAI ---
 

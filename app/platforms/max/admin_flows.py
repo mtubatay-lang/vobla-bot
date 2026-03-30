@@ -1,6 +1,10 @@
 """
 Админ-сценарии в MAX: рассылка, плановые, база знаний, документы.
-Состояние в памяти процесса (как QA-сессии); при нескольких репликах — sticky session или одна реплика.
+
+Состояние `_sessions` — только память процесса (как QA-сессии). Несколько реплик uvicorn/webhook
+без sticky routing: шаги рассылки «пропадают», аналогично Telegram FSM на MemoryStorage
+(см. app/main.py: для Telegram задайте REDIS_URL). Варианты: одна реплика на MAX webhook,
+sticky sessions, либо вынести сессии в Redis/БД.
 """
 
 from __future__ import annotations

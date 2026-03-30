@@ -10,7 +10,7 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, Update
 
-from app.config import APP_REVISION, BOT_TOKEN, LOG_LEVEL, SENTRY_DSN, TELEGRAM_POLLING_ENABLED
+from app.config import APP_REVISION, BOT_TOKEN, LOG_LEVEL, REDIS_URL, SENTRY_DSN, TELEGRAM_POLLING_ENABLED
 from app.handlers.debug_passthrough import router as debug_router
 from app.handlers.start import router as start_router
 from app.handlers.help import router as help_router
@@ -57,7 +57,19 @@ async def main() -> None:
         token=BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
-    dp = Dispatcher(storage=MemoryStorage())
+    if REDIS_URL:
+        from aiogram.fsm.storage.redis import RedisStorage
+
+        storage = RedisStorage.from_url(REDIS_URL)
+        logger.info("[MAIN] FSM storage: Redis (REDIS_URL задан — состояние общее для всех воркеров)")
+    else:
+        storage = MemoryStorage()
+        logger.warning(
+            "[MAIN] FSM storage: MemoryStorage. Несколько процессов с getUpdates по одному BOT_TOKEN "
+            "(TelegramConflictError) или несколько реплик без Redis — FSM рассылки и других сценариев "
+            "может рассинхронизироваться. Задайте REDIS_URL или один инстанс polling."
+        )
+    dp = Dispatcher(storage=storage)
 
     # --- Middleware для логирования команд ---
     class CommandLoggingMiddleware(BaseMiddleware):
@@ -107,7 +119,8 @@ async def main() -> None:
     if not TELEGRAM_POLLING_ENABLED:
         logger.warning(
             "[MAIN] TELEGRAM_POLLING_ENABLED=false — long polling не запускается в этом процессе. "
-            "Убедитесь, что другой инстанс один получает апдейты, иначе Telegram-бот не ответит."
+            "Должен работать ровно один другой процесс/реплика с polling на этот BOT_TOKEN; "
+            "при двух поллерах — TelegramConflictError. Для FSM при нескольких воркерах нужен REDIS_URL."
         )
         stop = asyncio.Event()
         await stop.wait()
