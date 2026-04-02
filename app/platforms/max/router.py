@@ -27,6 +27,7 @@ from app.core.handlers import (
     is_pending_auth,
 )
 from app.config import (
+    MAX_GROUP_CHAT_QA_ENABLED,
     RAG_SKIP_SENDER_IDS,
     VOICE_STRUCTURE_OUTPUT,
     VOICE_TO_TEXT_ENABLED,
@@ -442,6 +443,8 @@ class MaxActionRouter:
         transcript_followup: True для голоса — вернуть True только если пользователю уже отправили ответ
         (иначе ниже покажем расшифровку). Для текста после пайплайна всегда True (сообщение обработано)."""
         if not event.chat.is_group:
+            return False
+        if not MAX_GROUP_CHAT_QA_ENABLED:
             return False
         if getattr(event.user, "is_bot", False):
             return False

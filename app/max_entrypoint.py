@@ -20,6 +20,7 @@ from app.config import (
     MAX_API_BASE_URL,
     MAX_WEBHOOK_PATH,
     MAX_AUTH_BEARER_PREFIX,
+    MAX_GROUP_CHAT_QA_ENABLED,
     MAX_WEBHOOK_SECRET,
 )
 from app.platforms.max import MaxApiClient, MaxAdapter, parse_max_update
@@ -36,6 +37,10 @@ if isinstance(_root_lvl, int) and _root_lvl >= logging.INFO:
 logger = logging.getLogger(__name__)
 if APP_REVISION:
     logger.info("[MAX_ENTRYPOINT] APP_REVISION=%s (сверьте с main при отладке деплоя)", APP_REVISION)
+if not MAX_GROUP_CHAT_QA_ENABLED:
+    logger.warning(
+        "[MAX_ENTRYPOINT] MAX_GROUP_CHAT_QA_ENABLED=false — ответы RAG в групповых чатах MAX отключены"
+    )
 
 
 def _is_google_sheets_quota_error(exc: BaseException) -> bool:

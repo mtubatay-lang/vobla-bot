@@ -203,6 +203,8 @@ MAX_AUTH_BEARER_PREFIX = os.getenv("MAX_AUTH_BEARER_PREFIX", "false").lower() ==
 MAX_WEBHOOK_SECRET = os.getenv("MAX_WEBHOOK_SECRET", "").strip()
 # Логировать типы вложений и ключи payload перед POST /messages (диагностика proto.payload).
 MAX_DEBUG_ATTACHMENTS = _env_bool("MAX_DEBUG_ATTACHMENTS", False)
+# False — временно отключить ответы на вопросы в групповых чатах MAX (RAG, голос→RAG). Личка /ask и Kilbil не трогаем.
+MAX_GROUP_CHAT_QA_ENABLED = _env_bool("MAX_GROUP_CHAT_QA_ENABLED", True)
 
 # Ревизия деплоя: APP_REVISION вручную или RAILWAY_GIT_COMMIT_SHA на Railway; в логах main/max_entrypoint — сверка с git при подозрении на старый образ.
 APP_REVISION = os.getenv("APP_REVISION", "").strip() or os.getenv("RAILWAY_GIT_COMMIT_SHA", "").strip()
