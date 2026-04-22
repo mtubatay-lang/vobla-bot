@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import uuid
+import random
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -18,7 +19,7 @@ from app.config import (
     RECIPIENTS_CHATS_TAB,
     BROADCAST_SEND_CONCURRENCY,
 )
-from app.services.sheets_client import get_sheets_client
+from app.services.sheets_client import get_sheets_client, run_with_retry_on_429
 from app.core.types import Recipient, Platform, OutgoingMessage
 
 logger = logging.getLogger(__name__)
@@ -122,9 +123,22 @@ def _get_ws(tab_name: str):
     """Открывает STATS_SHEET_ID и возвращает worksheet(tab_name)."""
     if not STATS_SHEET_ID:
         raise RuntimeError("STATS_SHEET_ID не задан")
-    client = get_sheets_client()
-    sh = client.open_by_key(STATS_SHEET_ID)
-    return sh.worksheet(tab_name)
+    def _open():
+        client = get_sheets_client()
+        sh = client.open_by_key(STATS_SHEET_ID)
+        return sh.worksheet(tab_name)
+    return run_with_retry_on_429(_open)
+
+
+def _parse_created_by_user_id(raw_created_by: str) -> Optional[int]:
+    """Парсит created_by формата '<id> (@username)'."""
+    if not raw_created_by:
+        return None
+    first_part = str(raw_created_by).strip().split(" ", 1)[0]
+    try:
+        return int(first_part)
+    except (TypeError, ValueError):
+        return None
 
 
 def _get_headers(ws) -> Dict[str, int]:
@@ -207,6 +221,87 @@ def create_broadcast_draft(
     
     ws.append_row(row, value_input_option="RAW")
     return broadcast_id
+
+
+def get_broadcast_draft_by_id(broadcast_id: str) -> Optional[Dict[str, Any]]:
+    """Возвращает draft по broadcast_id, если найден."""
+    if not STATS_SHEET_ID or not broadcast_id:
+        return None
+    try:
+        ws = _get_ws(BROADCASTS_TAB)
+        values = ws.get_all_values()
+        if len(values) < 2:
+            return None
+        headers = [h.strip() for h in values[0]]
+        if "broadcast_id" not in headers:
+            return None
+        b_idx = headers.index("broadcast_id")
+        for row in values[1:]:
+            if len(row) <= b_idx:
+                continue
+            if (row[b_idx] or "").strip() != broadcast_id:
+                continue
+            record: Dict[str, Any] = {}
+            for i, header in enumerate(headers):
+                record[header] = row[i] if i < len(row) else ""
+            return record
+    except Exception as e:
+        logger.warning("[BROADCAST_SERVICE] get_broadcast_draft_by_id: %s", e, exc_info=True)
+    return None
+
+
+def find_latest_draft_by_creator(created_by_user_id: int) -> Optional[Dict[str, Any]]:
+    """Возвращает последний draft/cancelled от автора (для восстановления FSM)."""
+    if not STATS_SHEET_ID or not created_by_user_id:
+        return None
+    try:
+        ws = _get_ws(BROADCASTS_TAB)
+        values = ws.get_all_values()
+        if len(values) < 2:
+            return None
+        headers = [h.strip() for h in values[0]]
+        created_idx = headers.index("created_by") if "created_by" in headers else -1
+        status_idx = headers.index("status") if "status" in headers else -1
+        if created_idx < 0:
+            return None
+        # Идём с конца — берём самый свежий.
+        for row in reversed(values[1:]):
+            if len(row) <= created_idx:
+                continue
+            parsed_id = _parse_created_by_user_id(row[created_idx])
+            if parsed_id != created_by_user_id:
+                continue
+            status = (row[status_idx].strip().lower() if status_idx >= 0 and len(row) > status_idx else "")
+            if status and status not in ("draft", "cancelled"):
+                continue
+            record: Dict[str, Any] = {}
+            for i, header in enumerate(headers):
+                record[header] = row[i] if i < len(row) else ""
+            return record
+    except Exception as e:
+        logger.warning("[BROADCAST_SERVICE] find_latest_draft_by_creator: %s", e, exc_info=True)
+    return None
+
+
+def _classify_send_error(error_text: str) -> str:
+    text = (error_text or "").lower()
+    if "conflict" in text and "getupdates" in text:
+        return "conflict"
+    if "timeout" in text or "timed out" in text:
+        return "timeout"
+    if "network" in text or "server disconnected" in text:
+        return "network"
+    if "429" in text or "too many requests" in text:
+        return "rate_limit"
+    if "bad gateway" in text or "502" in text or "503" in text or "504" in text:
+        return "upstream_5xx"
+    if "forbidden" in text or "blocked" in text:
+        return "forbidden"
+    return "unknown"
+
+
+def _is_retryable_reason(reason: str) -> bool:
+    return reason in {"conflict", "timeout", "network", "rate_limit", "upstream_5xx"}
 
 
 def finalize_broadcast(
@@ -944,8 +1039,21 @@ async def execute_broadcast_multi(
             return
         atts = parse_broadcast_media_for_platform(media_json or "", r.platform)
         async with semaphore:
-            try:
-                if text_final or atts:
+            if not (text_final or atts):
+                await asyncio.to_thread(
+                    log_broadcast_recipient,
+                    broadcast_id,
+                    "user" if not r.is_chat else "chat",
+                    _recipient_id_for_log(r.chat_or_user_id),
+                    "fail",
+                    "reason=empty_message",
+                )
+                sent_fail += 1
+                return
+
+            max_attempts = 3
+            for attempt in range(1, max_attempts + 1):
+                try:
                     if atts:
                         if r.platform == "max":
                             await adapter.send_media(
@@ -978,34 +1086,43 @@ async def execute_broadcast_multi(
                         "ok",
                     )
                     sent_ok += 1
-                else:
+                    return
+                except Exception as e:
+                    err = str(e)[:500]
+                    reason = _classify_send_error(err)
+                    retryable = _is_retryable_reason(reason)
+                    if retryable and attempt < max_attempts:
+                        backoff = (0.8 * (2 ** (attempt - 1))) + random.uniform(0.0, 0.4)
+                        logger.warning(
+                            "[BROADCAST_SERVICE] retry broadcast_id=%s recipient=%s platform=%s reason=%s attempt=%s/%s sleep=%.2fs",
+                            broadcast_id,
+                            r.chat_or_user_id,
+                            r.platform,
+                            reason,
+                            attempt,
+                            max_attempts,
+                            backoff,
+                        )
+                        await asyncio.sleep(backoff)
+                        continue
+
+                    await asyncio.to_thread(
+                        mark_recipient_failed,
+                        r.platform,
+                        r.chat_or_user_id,
+                        err,
+                        r.is_chat,
+                    )
                     await asyncio.to_thread(
                         log_broadcast_recipient,
                         broadcast_id,
                         "user" if not r.is_chat else "chat",
-                        _recipient_id_for_log(r.chat_or_user_id),
+                        r.chat_or_user_id,
                         "fail",
-                        "empty message",
+                        f"reason={reason}; error={err}",
                     )
                     sent_fail += 1
-            except Exception as e:
-                err = str(e)[:500]
-                await asyncio.to_thread(
-                    mark_recipient_failed,
-                    r.platform,
-                    r.chat_or_user_id,
-                    err,
-                    r.is_chat,
-                )
-                await asyncio.to_thread(
-                    log_broadcast_recipient,
-                    broadcast_id,
-                    "user" if not r.is_chat else "chat",
-                    r.chat_or_user_id,
-                    "fail",
-                    err,
-                )
-                sent_fail += 1
+                    return
 
     if recipients:
         await asyncio.gather(*[send_to_recipient(r) for r in recipients], return_exceptions=True)

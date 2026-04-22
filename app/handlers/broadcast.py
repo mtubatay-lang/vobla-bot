@@ -24,6 +24,8 @@ from aiogram.types import (
 from app.services.admin_access import is_admin_for_platform
 from app.services.auth_service import find_user_by_telegram_id
 from app.services.broadcast_service import (
+    find_latest_draft_by_creator,
+    get_broadcast_draft_by_id,
     create_broadcast_draft,
     execute_broadcast,
     finalize_broadcast,
@@ -68,6 +70,20 @@ class BroadcastState(StatesGroup):
     selecting_chats = State()  # Выбор конкретных чатов
     choosing_segmentation_type = State()  # Выбор типа сегментации (По Регионам / По ИП)
     selecting_regions = State()  # Выбор регионов
+
+
+def _broadcast_trace_id(data: Dict[str, Any]) -> str:
+    return str(data.get("broadcast_id") or "n/a")
+
+
+def _log_broadcast_step(step: str, data: Dict[str, Any]) -> None:
+    logger.info(
+        "[BROADCAST_TRACE] step=%s broadcast_id=%s owner_id=%s state_keys=%s",
+        step,
+        _broadcast_trace_id(data),
+        data.get("owner_id"),
+        sorted(list(data.keys())),
+    )
 
 
 def _check_admin(user) -> bool:
@@ -206,6 +222,44 @@ async def _check_user_owns_broadcast(callback: CallbackQuery, state: FSMContext)
         await callback.answer("❌ Это не ваша рассылка", show_alert=True)
         return False
     return True
+
+
+async def _ensure_broadcast_payload(
+    state: FSMContext,
+    owner_id: int,
+    *,
+    fallback_broadcast_id: Optional[str] = None,
+) -> tuple[str, str, Optional[str], bool]:
+    """
+    Возвращает (text_final, media_json, broadcast_id, recovered).
+    recovered=True, если payload восстановлен не из текущего state.
+    """
+    data = await state.get_data()
+    text_final = data.get("text_final", "")
+    media_json = data.get("media_json", "")
+    broadcast_id = data.get("broadcast_id") or fallback_broadcast_id
+    if text_final or media_json:
+        return text_final, media_json, broadcast_id, False
+
+    recovered = None
+    if broadcast_id:
+        recovered = await asyncio.to_thread(get_broadcast_draft_by_id, broadcast_id)
+    if not recovered and owner_id:
+        recovered = await asyncio.to_thread(find_latest_draft_by_creator, owner_id)
+
+    if recovered:
+        text_final = (recovered.get("text") or recovered.get("text_final") or "").strip()
+        media_json = (recovered.get("media_json") or "").strip()
+        recovered_broadcast_id = (recovered.get("broadcast_id") or "").strip()
+        await state.update_data(
+            text_final=text_final,
+            media_json=media_json,
+            broadcast_id=recovered_broadcast_id or broadcast_id,
+            restored_from_draft=True,
+        )
+        return text_final, media_json, (recovered_broadcast_id or broadcast_id), True
+
+    return "", "", broadcast_id, False
 
 
 async def _build_scheduled_list() -> tuple[str, InlineKeyboardMarkup | None]:
@@ -534,12 +588,30 @@ async def _process_broadcast_text(message: Message, state: FSMContext, text_orig
         return
 
     text_final = improved_text if improved_text else text_original
+    data_before = await state.get_data()
+    owner_id = int(data_before.get("owner_id") or (message.from_user.id if message.from_user else 0))
+    broadcast_id = data_before.get("broadcast_id")
+    if not broadcast_id:
+        created_by_username = message.from_user.username if message.from_user else None
+        users_count = len(await asyncio.to_thread(read_active_recipients_users))
+        chats_count = len(await asyncio.to_thread(read_active_recipients_chats))
+        broadcast_id = await asyncio.to_thread(
+            create_broadcast_draft,
+            owner_id,
+            created_by_username,
+            text_original,
+            media_json,
+            users_count,
+            chats_count,
+        )
     await state.update_data(
+        broadcast_id=broadcast_id,
         improved_text=improved_text,
         media_json=media_json,
         text_final=text_final,
         selected_variant="improved" if improved_text else "original",
     )
+    _log_broadcast_step("audience_preview_ready", await state.get_data())
     await state.set_state(BroadcastState.choosing_audience)
     await _send_audience_preview(message, text_final, media_json)
 
@@ -687,14 +759,17 @@ async def handle_test_self(callback: CallbackQuery, state: FSMContext) -> None:
         return
     
     data = await state.get_data()
-    
-    # Проверка наличия данных
-    text_final = data.get("text_final", "")
-    media_json = data.get("media_json", "")
-    
+    owner_id = callback.from_user.id if callback.from_user else 0
+    text_final, media_json, broadcast_id, recovered = await _ensure_broadcast_payload(
+        state, owner_id, fallback_broadcast_id=data.get("broadcast_id")
+    )
+    if recovered and callback.message:
+        await callback.message.answer(
+            f"ℹ️ Восстановил черновик рассылки из хранилища. ID: <code>{broadcast_id or 'n/a'}</code>",
+            parse_mode=ParseMode.HTML,
+        )
     if not text_final and not media_json:
         await callback.answer("❌ Нет данных рассылки, начните заново /broadcast", show_alert=True)
-        await state.clear()
         return
     
     await callback.answer("📤 Отправляю тест...")
@@ -705,6 +780,7 @@ async def handle_test_self(callback: CallbackQuery, state: FSMContext) -> None:
     # Состояние «после теста» до долгой отправки — уже в общем FSM (Redis); при MemoryStorage
     # по-прежнему нужен один воркер или REDIS_URL.
     await state.set_state(BroadcastState.choosing_audience_final)
+    _log_broadcast_step("test_self_send_started", await state.get_data())
 
     try:
         # Парсим медиа
@@ -772,11 +848,10 @@ async def handle_send_selected_chats(callback: CallbackQuery, state: FSMContext)
         await callback.answer("❌ Выберите хотя бы один чат", show_alert=True)
         return
 
-    text_final = data.get("text_final", "")
-    media_json = data.get("media_json", "")
+    owner_id = callback.from_user.id if callback.from_user else 0
+    text_final, media_json, _, _ = await _ensure_broadcast_payload(state, owner_id)
     if not text_final and not media_json:
         await callback.answer("❌ Нет данных рассылки, начните заново /broadcast", show_alert=True)
-        await state.clear()
         return
 
     await callback.answer()
@@ -932,11 +1007,10 @@ async def handle_send_selected_regions(callback: CallbackQuery, state: FSMContex
         await callback.answer("❌ В выбранных регионах нет активных чатов", show_alert=True)
         return
 
-    text_final = data.get("text_final", "")
-    media_json = data.get("media_json", "")
+    owner_id = callback.from_user.id if callback.from_user else 0
+    text_final, media_json, _, _ = await _ensure_broadcast_payload(state, owner_id)
     if not text_final and not media_json:
         await callback.answer("❌ Нет данных рассылки, начните заново /broadcast", show_alert=True)
-        await state.clear()
         return
 
     await callback.answer()
@@ -976,9 +1050,15 @@ async def handle_send_broadcast(callback: CallbackQuery, state: FSMContext) -> N
     data = await state.get_data()
     
     # Проверка наличия данных
-    broadcast_id = data.get("broadcast_id")
-    text_final = data.get("text_final", "")
-    media_json = data.get("media_json", "")
+    owner_id = callback.from_user.id if callback.from_user else 0
+    text_final, media_json, broadcast_id, recovered = await _ensure_broadcast_payload(
+        state, owner_id, fallback_broadcast_id=data.get("broadcast_id")
+    )
+    if recovered and callback.message:
+        await callback.message.answer(
+            f"ℹ️ Восстановил данные рассылки из черновика. ID: <code>{broadcast_id or 'n/a'}</code>",
+            parse_mode=ParseMode.HTML,
+        )
     
     if not text_final and not media_json:
         await callback.answer("❌ Нет данных рассылки, начните заново /broadcast", show_alert=True)
@@ -1002,6 +1082,7 @@ async def handle_send_broadcast(callback: CallbackQuery, state: FSMContext) -> N
 
     await callback.answer()
     await state.update_data(pending_send_mode=mode)
+    _log_broadcast_step("audience_selected", await state.get_data())
     await state.set_state(BroadcastState.choosing_send_type)
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📤 Отправить сейчас", callback_data="broadcast:send_now")],
@@ -1079,11 +1160,12 @@ async def handle_send_now(callback: CallbackQuery, state: FSMContext) -> None:
         await state.clear()
         return
 
-    text_final = data.get("text_final", "")
-    media_json = data.get("media_json", "")
+    owner_id = callback.from_user.id if callback.from_user else 0
+    text_final, media_json, broadcast_id, _ = await _ensure_broadcast_payload(
+        state, owner_id, fallback_broadcast_id=data.get("broadcast_id")
+    )
     if not text_final and not media_json:
         await callback.answer("❌ Нет данных рассылки", show_alert=True)
-        await state.clear()
         return
 
     mode_extra = _get_mode_extra_from_state(data, mode)
@@ -1093,6 +1175,7 @@ async def handle_send_now(callback: CallbackQuery, state: FSMContext) -> None:
     selected_variant = data.get("selected_variant", "original")
 
     await callback.answer("📤 Рассылка начата...")
+    _log_broadcast_step("send_now_started", await state.get_data())
     broadcast_id, sent_ok, sent_fail = await execute_broadcast(
         callback.message.bot,
         text_final=text_final,

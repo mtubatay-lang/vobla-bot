@@ -1,6 +1,8 @@
 """Клиент для чтения данных из Google Sheets."""
 
 import json
+import logging
+import time
 from typing import List, Dict, Optional
 
 import gspread
@@ -11,6 +13,37 @@ from app.config import GOOGLE_SERVICE_ACCOUNT_JSON, SHEET_ID, SHEET_RANGE
 # Синглтоны: один клиент с полным scope (чтение и запись), один только для чтения
 _sheets_client_rw: Optional[gspread.Client] = None
 _sheets_client_ro: Optional[gspread.Client] = None
+logger = logging.getLogger(__name__)
+
+
+def _is_quota_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "429" in text or "quota exceeded" in text or "rate limit" in text
+
+
+def run_with_retry_on_429(fn, retries: int = 3):
+    """
+    Выполняет fn() с retry на Google API quota/rate limit.
+    Нужен для сервисов, где массовые чтения в Sheets могут дать 429.
+    """
+    global _sheets_client_ro, _sheets_client_rw
+    for attempt in range(1, retries + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            if not _is_quota_error(exc) or attempt >= retries:
+                raise
+            delay = min(2 ** (attempt - 1), 8)
+            logger.warning(
+                "Sheets 429/quota: retry %s/%s after %ss",
+                attempt,
+                retries,
+                delay,
+            )
+            # Сбрасываем клиенты, чтобы пересоздать соединение на следующей попытке.
+            _sheets_client_ro = None
+            _sheets_client_rw = None
+            time.sleep(delay)
 
 
 def _get_client() -> gspread.Client:
@@ -57,18 +90,20 @@ def load_faq_rows() -> List[Dict[str, str]]:
 
     Диапазон задаем через SHEET_RANGE, например: 'Sheet1'!C:D или 'Sheet1'!C:E
     """
-    client = _get_client()
-    sh = client.open_by_key(SHEET_ID)
+    def _load():
+        client = _get_client()
+        sh = client.open_by_key(SHEET_ID)
 
-    # Если SHEET_RANGE вида 'Sheet1'!C:D
-    if "!" in SHEET_RANGE:
-        sheet_name, rng = SHEET_RANGE.split("!", 1)
-        sheet_name = sheet_name.strip().strip("'\"")
-        ws = sh.worksheet(sheet_name)
-        rows = ws.get(rng)
-    else:
+        # Если SHEET_RANGE вида 'Sheet1'!C:D
+        if "!" in SHEET_RANGE:
+            sheet_name, rng = SHEET_RANGE.split("!", 1)
+            sheet_name = sheet_name.strip().strip("'\"")
+            ws = sh.worksheet(sheet_name)
+            return ws.get(rng)
         ws = sh.sheet1
-        rows = ws.get(SHEET_RANGE)
+        return ws.get(SHEET_RANGE)
+
+    rows = run_with_retry_on_429(_load)
 
     result: List[Dict[str, str]] = []
     for row in rows:

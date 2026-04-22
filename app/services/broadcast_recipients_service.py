@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Dict, Optional
 
 from app.config import STATS_SHEET_ID, RECIPIENTS_USERS_TAB, RECIPIENTS_CHATS_TAB
-from app.services.sheets_client import get_sheets_client
+from app.services.sheets_client import get_sheets_client, run_with_retry_on_429
 
 logger = logging.getLogger(__name__)
 
@@ -20,9 +20,11 @@ def _get_ws(tab_name: str):
     """Открывает STATS_SHEET_ID и возвращает worksheet(tab_name)."""
     if not STATS_SHEET_ID:
         raise RuntimeError("STATS_SHEET_ID не задан")
-    client = get_sheets_client()
-    sh = client.open_by_key(STATS_SHEET_ID)
-    return sh.worksheet(tab_name)
+    def _open():
+        client = get_sheets_client()
+        sh = client.open_by_key(STATS_SHEET_ID)
+        return sh.worksheet(tab_name)
+    return run_with_retry_on_429(_open)
 
 
 def _get_headers(ws) -> Dict[str, int]:

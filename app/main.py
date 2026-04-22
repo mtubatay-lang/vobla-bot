@@ -1,7 +1,9 @@
 """Точка входа Telegram-бота Vobla Bot."""
 
 import asyncio
+import importlib
 import logging
+from contextlib import suppress
 
 import sentry_sdk
 from aiogram import Bot, Dispatcher, BaseMiddleware
@@ -26,6 +28,56 @@ from app.handlers.broadcast import router as broadcast_router
 from app.handlers.document_generator import router as document_generator_router
 from app.handlers.recipients_collector import router as recipients_collector_router
 from app.handlers.voice_to_text import router as voice_to_text_router
+
+
+async def _acquire_polling_guard(redis_url: str, bot_token: str):
+    """
+    Best-effort distributed guard: предотвращает одновременный polling одного токена.
+    Работает только если доступен redis.asyncio и REDIS_URL задан.
+    """
+    try:
+        redis = importlib.import_module("redis.asyncio")
+    except Exception:
+        return None
+
+    key = f"vobla:telegram_polling_lock:{bot_token[:12]}"
+    lock_value = f"pid:{id(asyncio.current_task())}"
+    client = redis.from_url(redis_url, decode_responses=True)
+    ttl_seconds = 90
+
+    acquired = await client.set(key, lock_value, ex=ttl_seconds, nx=True)
+    if not acquired:
+        await client.close()
+        return False
+
+    async def _heartbeat() -> None:
+        while True:
+            await asyncio.sleep(25)
+            try:
+                current = await client.get(key)
+                if current != lock_value:
+                    break
+                await client.expire(key, ttl_seconds)
+            except Exception:
+                break
+
+    task = asyncio.create_task(_heartbeat())
+    return (client, key, lock_value, task)
+
+
+async def _release_polling_guard(lock_tuple) -> None:
+    if not lock_tuple:
+        return
+    client, key, lock_value, heartbeat_task = lock_tuple
+    heartbeat_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await heartbeat_task
+    try:
+        current = await client.get(key)
+        if current == lock_value:
+            await client.delete(key)
+    finally:
+        await client.close()
 
 
 async def main() -> None:
@@ -127,12 +179,27 @@ async def main() -> None:
         return
 
     logger.info("Запускаем бота...")
+    polling_guard = None
+    if REDIS_URL:
+        guard = await _acquire_polling_guard(REDIS_URL, BOT_TOKEN)
+        if guard is False:
+            logger.error(
+                "[MAIN] Polling guard: lock занят другим инстансом. "
+                "Этот процесс не стартует long polling, чтобы не вызывать TelegramConflictError."
+            )
+            stop = asyncio.Event()
+            await stop.wait()
+            return
+        polling_guard = guard
 
     # На всякий случай удаляем вебхук и сбрасываем старые апдейты
     await bot.delete_webhook(drop_pending_updates=True)
 
     # Запускаем polling
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await _release_polling_guard(polling_guard)
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ from cachetools import TTLCache
 
 from app.config import USERS_SHEET_ID
 from app.core.types import Platform
-from app.services.sheets_client import get_sheets_client  # уже есть в проекте
+from app.services.sheets_client import get_sheets_client, run_with_retry_on_429  # уже есть в проекте
 
 USERS_SHEET_NAME = "Пользователи"
 MAX_ID_HEADERS = ("max_user_id", "max_id", "maxid")
@@ -49,9 +49,11 @@ def _get_worksheet():
     if not USERS_SHEET_ID:
         raise RuntimeError("USERS_SHEET_ID не задан в конфиге")
 
-    client = get_sheets_client()
-    spreadsheet = client.open_by_key(USERS_SHEET_ID)
-    return spreadsheet.worksheet(USERS_SHEET_NAME)
+    def _open():
+        client = get_sheets_client()
+        spreadsheet = client.open_by_key(USERS_SHEET_ID)
+        return spreadsheet.worksheet(USERS_SHEET_NAME)
+    return run_with_retry_on_429(_open)
 
 
 def _get_headers(ws) -> dict:
