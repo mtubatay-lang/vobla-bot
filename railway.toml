@@ -6,7 +6,7 @@ builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-# Сервис только MAX в Railway: переопредели Start Command в UI → python -m app.max_entrypoint
-startCommand = "python -m app.main"
+# Один репозиторий — два сервиса: имя сервиса MAX в Railway должно быть `vobla-max` (или поменяйте ветку ниже).
+startCommand = "sh -c \"case $RAILWAY_SERVICE_NAME in vobla-max) exec python -m app.max_entrypoint;; *) exec python -m app.main;; esac\""
 healthcheckPath = "/health"
 healthcheckTimeout = 30

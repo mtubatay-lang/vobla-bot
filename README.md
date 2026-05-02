@@ -117,25 +117,23 @@ MAX работает через **HTTPS webhook** к отдельному про
 
 ### Railway
 
-Репозиторий по умолчанию поднимает **только Telegram** ([Procfile](Procfile), [railway.toml](railway.toml), [Dockerfile](Dockerfile): `python -m app.main`). MAX webhook — **второй сервис** в том же проекте с переопределённым **Start Command**.
+Два сервиса из одного репозитория: **[railway.toml](railway.toml)** задаёт общий **Start Command** — ветка по **`$RAILWAY_SERVICE_NAME`**: сервис с именем **`vobla-max`** запускает `python -m app.max_entrypoint`, любой другой (например **`vobla-bot`**) — `python -m app.main`. [Procfile](Procfile) и [Dockerfile](Dockerfile) по умолчанию — только Telegram.
 
-#### Сервис 1 — Telegram (`vobla-bot` или аналог)
+#### Сервис 1 — Telegram (`vobla-bot`)
 
-- Репозиторий как есть, деплой из `main`. **Replicas = 1.** На `PORT` поднимается лёгкий aiohttp с **`GET /health`** (нужно для `healthcheckPath` в [railway.toml](railway.toml)); long polling Telegram этот порт для апдейтов не использует.
-- Переменные: как раньше; для рассылок на MAX-получателей из Telegram-админки процессу нужны **`ENABLE_MAX=true`** и **`MAX_BOT_TOKEN`** (и прочие секреты), даже если webhook MAX крутится на другом сервисе.
-- Через MCP (папка проекта привязана к Railway): `link-service` → имя сервиса, затем `deploy` для выката нового коммита.
+- Деплой из `main`, **Replicas = 1.** На `PORT` — **`GET /health`** для проверки Railway (см. `app/main.py`).
+- MCP Railway **не создаёт** новые сервисы в проекте; деплой/переменные — `link-service`, `set-variables`, `deploy`, `generate-domain`.
 
-#### Сервис 2 — только MAX webhook
+#### Сервис 2 — MAX webhook (`vobla-max`)
 
-1. В Railway: **New → Duplicate** от Telegram-сервиса (или новый сервис с тем же GitHub-репозиторием).
-2. **Settings → Deploy → Start Command:** `python -m app.max_entrypoint` (обязательно переопределить; иначе поднимется только Telegram).
-3. Переменные: скопируй с Telegram-сервиса и добавь **`TELEGRAM_POLLING_ENABLED=false`**, **`ENABLE_MAX=true`**, **`MAX_BOT_TOKEN`**. Остальные секреты (`BOT_TOKEN`, Sheets, OpenAI и т.д.) должны совпадать с Telegram-сервисом.
-4. **Networking → Generate Domain** (или MCP `generate-domain` для **привязанного** MAX-сервиса после `link-service`) — публичный HTTPS для webhook.
-5. Обнови **`MAX_WEBHOOK_PUBLIC_BASE`** на URL **этого** MAX-сервиса и заново выполни `scripts/max_subscribe_webhook.py` (подписка MAX должна указывать на домен MAX-сервиса, не Telegram).
+1. **CLI** (из корня репо, проект уже `railway link`):  
+   `railway add --service vobla-max --repo mtubatay-lang/vobla-bot`  
+   Имя сервиса должно быть ровно **`vobla-max`**, иначе поправьте ветку `vobla-max)` в [railway.toml](railway.toml).
+2. Переменные: на сервисе **`TELEGRAM_POLLING_ENABLED=false`**; остальные секреты удобно задать **ссылками** на `vobla-bot`, например `BOT_TOKEN=${{vobla-bot.BOT_TOKEN}}` (см. [Variables](https://docs.railway.com/develop/variables)).
+3. Публичный URL: `railway domain -s vobla-max` или UI **Networking → Generate Domain**.
+4. Выставь **`MAX_WEBHOOK_PUBLIC_BASE`** на `https://<домен-vobla-max>` и снова выполни `scripts/max_subscribe_webhook.py`.
 
-MCP: для переменных окружения — `set-variables` с `service: <имя>`; для деплоя — `deploy` после `link-service` на нужный сервис.
-
-**Устаревший вариант — один сервис на оба процесса:** раньше в Procfile был фоновый `max_entrypoint` + `app.main`; так проще не поддерживать (два процесса в одном деплое). Разделение на два сервиса — текущая схема.
+**Устаревший вариант** — один контейнер на оба процесса (фоновый `max_entrypoint` + `app.main`) — не используем.
 
 ### Подписка на обновления (POST /subscriptions)
 
