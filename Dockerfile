@@ -26,5 +26,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 ENV PYTHONUNBUFFERED=1
 
-# Запуск как в Procfile (Telegram + MAX webhook)
-CMD ["sh", "-c", "python -m app.max_entrypoint & exec python -m app.main"]
+# По умолчанию только Telegram; сервис MAX — переопределение CMD / Start Command в Railway.
+CMD ["python", "-m", "app.main"]

@@ -117,14 +117,25 @@ MAX работает через **HTTPS webhook** к отдельному про
 
 ### Railway
 
-**Вариант A — один сервис (текущий [Procfile](Procfile)):** процесс `worker` запускает `python -m app.max_entrypoint` в фоне (uvicorn на `PORT`) и затем `python -m app.main`. Нужны публичный домен и включённый **Public Networking**, иначе MAX не достучится до webhook. Домен можно сгенерировать в Railway (или через MCP `generate-domain` для связанного сервиса). Для стабильной авторизации и polling держите **1 реплику** этого сервиса.
+Репозиторий по умолчанию поднимает **только Telegram** ([Procfile](Procfile), [railway.toml](railway.toml), [Dockerfile](Dockerfile): `python -m app.main`). MAX webhook — **второй сервис** в том же проекте с переопределённым **Start Command**.
 
-**Вариант B — второй сервис только под MAX (предпочтительно для продакшена):**
+#### Сервис 1 — Telegram (`vobla-bot` или аналог)
 
-1. Создай **новый** сервис в том же проекте Railway (не тот, где Telegram).
-2. Подключи тот же репозиторий; **Start Command:** `python -m app.max_entrypoint` (и в [Procfile](Procfile) верни строку `worker: python -m app.main` для Telegram-сервиса).
-3. Переменные окружения: `ENABLE_MAX=true`, `MAX_BOT_TOKEN`, те же секреты, что у Telegram-сервиса (импорт `app.config` требует `BOT_TOKEN` и др.). Railway подставит **`PORT`**.
-4. **Settings → Networking → Generate Domain** — HTTPS URL вида `https://…up.railway.app`.
+- Репозиторий как есть, деплой из `main`. **Replicas = 1.**
+- Переменные: как раньше; для рассылок на MAX-получателей из Telegram-админки процессу нужны **`ENABLE_MAX=true`** и **`MAX_BOT_TOKEN`** (и прочие секреты), даже если webhook MAX крутится на другом сервисе.
+- Через MCP (папка проекта привязана к Railway): `link-service` → имя сервиса, затем `deploy` для выката нового коммита.
+
+#### Сервис 2 — только MAX webhook
+
+1. В Railway: **New → Duplicate** от Telegram-сервиса (или новый сервис с тем же GitHub-репозиторием).
+2. **Settings → Deploy → Start Command:** `python -m app.max_entrypoint` (обязательно переопределить; иначе поднимется только Telegram).
+3. Переменные: скопируй с Telegram-сервиса и добавь **`TELEGRAM_POLLING_ENABLED=false`**, **`ENABLE_MAX=true`**, **`MAX_BOT_TOKEN`**. Остальные секреты (`BOT_TOKEN`, Sheets, OpenAI и т.д.) должны совпадать с Telegram-сервисом.
+4. **Networking → Generate Domain** (или MCP `generate-domain` для **привязанного** MAX-сервиса после `link-service`) — публичный HTTPS для webhook.
+5. Обнови **`MAX_WEBHOOK_PUBLIC_BASE`** на URL **этого** MAX-сервиса и заново выполни `scripts/max_subscribe_webhook.py` (подписка MAX должна указывать на домен MAX-сервиса, не Telegram).
+
+MCP: для переменных окружения — `set-variables` с `service: <имя>`; для деплоя — `deploy` после `link-service` на нужный сервис.
+
+**Устаревший вариант — один сервис на оба процесса:** раньше в Procfile был фоновый `max_entrypoint` + `app.main`; так проще не поддерживать (два процесса в одном деплое). Разделение на два сервиса — текущая схема.
 
 ### Подписка на обновления (POST /subscriptions)
 

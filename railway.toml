@@ -6,6 +6,7 @@ builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "sh -c 'python -m app.max_entrypoint & exec python -m app.main'"
+# Сервис только MAX в Railway: переопредели Start Command в UI → python -m app.max_entrypoint
+startCommand = "python -m app.main"
 healthcheckPath = "/health"
 healthcheckTimeout = 30
