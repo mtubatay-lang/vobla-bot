@@ -121,7 +121,7 @@ MAX работает через **HTTPS webhook** к отдельному про
 
 #### Сервис 1 — Telegram (`vobla-bot` или аналог)
 
-- Репозиторий как есть, деплой из `main`. **Replicas = 1.**
+- Репозиторий как есть, деплой из `main`. **Replicas = 1.** На `PORT` поднимается лёгкий aiohttp с **`GET /health`** (нужно для `healthcheckPath` в [railway.toml](railway.toml)); long polling Telegram этот порт для апдейтов не использует.
 - Переменные: как раньше; для рассылок на MAX-получателей из Telegram-админки процессу нужны **`ENABLE_MAX=true`** и **`MAX_BOT_TOKEN`** (и прочие секреты), даже если webhook MAX крутится на другом сервисе.
 - Через MCP (папка проекта привязана к Railway): `link-service` → имя сервиса, затем `deploy` для выката нового коммита.
 

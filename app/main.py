@@ -3,6 +3,7 @@
 import asyncio
 import importlib
 import logging
+import os
 from contextlib import suppress
 
 import sentry_sdk
@@ -28,6 +29,33 @@ from app.handlers.broadcast import router as broadcast_router
 from app.handlers.document_generator import router as document_generator_router
 from app.handlers.recipients_collector import router as recipients_collector_router
 from app.handlers.voice_to_text import router as voice_to_text_router
+
+
+async def _railway_health_runner(logger: logging.Logger):
+    """
+    Railway healthcheck (railway.toml healthcheckPath=/health) бьёт в $PORT.
+    Long polling сам по себе HTTP-сервер на PORT не поднимает — без этого шага деплой падает.
+    """
+    port_str = os.getenv("PORT")
+    if not port_str:
+        return None
+    try:
+        from aiohttp import web
+    except ImportError:
+        logger.warning("[MAIN] aiohttp недоступен — пропускаем /health на PORT")
+        return None
+
+    app = web.Application()
+
+    async def health(_request):
+        return web.json_response({"status": "ok", "role": "telegram"})
+
+    app.router.add_get("/health", health)
+    runner = web.AppRunner(app, access_log=None)
+    await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", int(port_str)).start()
+    logger.info("[MAIN] Railway: GET /health на 0.0.0.0:%s", port_str)
+    return runner
 
 
 async def _acquire_polling_guard(redis_url: str, bot_token: str):
@@ -179,26 +207,29 @@ async def main() -> None:
         return
 
     logger.info("Запускаем бота...")
+    health_runner = None
     polling_guard = None
-    if REDIS_URL:
-        guard = await _acquire_polling_guard(REDIS_URL, BOT_TOKEN)
-        if guard is False:
-            logger.error(
-                "[MAIN] Polling guard: lock занят другим инстансом. "
-                "Этот процесс не стартует long polling, чтобы не вызывать TelegramConflictError."
-            )
-            stop = asyncio.Event()
-            await stop.wait()
-            return
-        polling_guard = guard
-
-    # На всякий случай удаляем вебхук и сбрасываем старые апдейты
-    await bot.delete_webhook(drop_pending_updates=True)
-
-    # Запускаем polling
     try:
+        health_runner = await _railway_health_runner(logger)
+        if REDIS_URL:
+            guard = await _acquire_polling_guard(REDIS_URL, BOT_TOKEN)
+            if guard is False:
+                logger.error(
+                    "[MAIN] Polling guard: lock занят другим инстансом. "
+                    "Этот процесс не стартует long polling, чтобы не вызывать TelegramConflictError."
+                )
+                stop = asyncio.Event()
+                await stop.wait()
+                return
+            polling_guard = guard
+
+        # На всякий случай удаляем вебхук и сбрасываем старые апдейты
+        await bot.delete_webhook(drop_pending_updates=True)
+
         await dp.start_polling(bot)
     finally:
+        if health_runner:
+            await health_runner.cleanup()
         await _release_polling_guard(polling_guard)
 
 
