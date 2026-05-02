@@ -19,6 +19,20 @@ from app.config import (
 
 logger = logging.getLogger(__name__)
 
+# Хвосты пути, которые иногда копируют из браузера/доков — у QdrantClient должен быть только корень REST API.
+_QDRANT_URL_SUFFIXES = ("/collections", "/dashboard", "/ui")
+
+
+def _normalize_qdrant_url(url: str) -> str:
+    """Обрезает пробелы, завершающий `/` и лишние сегменты пути у базового URL кластера."""
+    u = (url or "").strip().rstrip("/")
+    low = u.lower()
+    for suf in _QDRANT_URL_SUFFIXES:
+        if low.endswith(suf):
+            u = u[: -len(suf)].rstrip("/")
+            low = u.lower()
+    return u
+
 
 class QdrantService:
     """Сервис для работы с Qdrant векторной БД."""
@@ -26,19 +40,35 @@ class QdrantService:
     def __init__(self):
         """Инициализирует подключение к Qdrant и создает/получает коллекцию."""
         try:
+            base_url = _normalize_qdrant_url(QDRANT_URL)
+            if base_url != (QDRANT_URL or "").strip().rstrip("/"):
+                logger.info("[QDRANT] QDRANT_URL нормализован (убраны хвосты пути/пробелы) для REST-корня кластера")
+
             if QDRANT_API_KEY:
                 self.client = QdrantClient(
-                    url=QDRANT_URL,
+                    url=base_url,
                     api_key=QDRANT_API_KEY,
                     timeout=QDRANT_TIMEOUT,
+                    check_compatibility=False,
                 )
             else:
-                self.client = QdrantClient(url=QDRANT_URL, timeout=QDRANT_TIMEOUT)
-            
+                self.client = QdrantClient(
+                    url=base_url,
+                    timeout=QDRANT_TIMEOUT,
+                    check_compatibility=False,
+                )
+
             self.collection_name = QDRANT_COLLECTION_NAME
             self._ensure_collection()
-            logger.info(f"[QDRANT] Подключен к {QDRANT_URL}, коллекция: {self.collection_name}")
+            logger.info("[QDRANT] Подключено, коллекция: %s", self.collection_name)
         except Exception as e:
+            err = str(e).lower()
+            if "404" in err or "not found" in err:
+                logger.error(
+                    "[QDRANT] 404 обычно значит: неверный QDRANT_URL (в Qdrant Cloud — только "
+                    "https://…cluster….cloud.qdrant.io без /collections), удалённый кластер или опечатка в хосте. "
+                    "Ключ — в QDRANT_API_KEY."
+                )
             logger.exception(f"[QDRANT] Ошибка подключения: {e}")
             raise
     

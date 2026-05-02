@@ -185,6 +185,13 @@ python scripts/max_subscribe_webhook.py --url https://<домен>/webhook/max
 - `SHEET_ID`, `USERS_SHEET_ID`, `GOOGLE_SERVICE_ACCOUNT_JSON` — Google Sheets  
 - При необходимости: `STATS_SHEET_ID`, `MANAGER_CHAT_ID`, `KB_MANAGERS_CHAT_ID` и др. (см. `app/config.py`)
 
+### Qdrant (RAG / база знаний)
+
+- **`QDRANT_URL`** — только **корень** REST API кластера из [Qdrant Cloud](https://cloud.qdrant.io/) (вида `https://<cluster-id>.<region>.gcp.cloud.qdrant.io`), **без** путей вроде `/collections`, `/dashboard`. Лишние хвосты код обрежет (см. `app/services/qdrant_service.py`), но хост должен совпадать с активным кластером.
+- **`QDRANT_API_KEY`** — API key кластера (облако).
+- **`QDRANT_COLLECTION_NAME`** — имя коллекции (по умолчанию `knowledge_base`).
+- Если в логах **`404 page not found`** при вызовах Qdrant — чаще всего неверный **`QDRANT_URL`**, удалённый кластер или ключ не от того проекта; не путайте URL консоли и URL API.
+
 ### MAX (только при `ENABLE_MAX=true`)
 
 - `MAX_BOT_TOKEN` — токен бота в MAX  
