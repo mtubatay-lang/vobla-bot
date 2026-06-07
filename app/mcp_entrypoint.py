@@ -144,6 +144,7 @@ async def _run_job(
 
 def _create_mcp():
     from mcp.server.fastmcp import FastMCP
+    from mcp.server.transport_security import TransportSecuritySettings
 
     mcp = FastMCP(
         "Vobla Broadcast",
@@ -154,6 +155,9 @@ def _create_mcp():
         stateless_http=True,
         json_response=True,
         streamable_http_path=MCP_PATH,
+        # Сервис за прокси Railway и защищён MCP_API_KEY; DNS-rebinding защита
+        # (проверка Host/Origin) нацелена на браузерные атаки и отклоняет домен Railway.
+        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
     )
 
     @mcp.tool()
