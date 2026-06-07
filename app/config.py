@@ -206,6 +206,14 @@ MAX_DEBUG_ATTACHMENTS = _env_bool("MAX_DEBUG_ATTACHMENTS", False)
 # False — временно отключить ответы на вопросы в групповых чатах MAX (RAG, голос→RAG). Личка /ask и Kilbil не трогаем.
 MAX_GROUP_CHAT_QA_ENABLED = _env_bool("MAX_GROUP_CHAT_QA_ENABLED", True)
 
+# --- MCP-сервер для внешних рассылок (Telegram + MAX) ---
+# Поднимается отдельным процессом app.mcp_entrypoint (Railway-сервис vobla-mcp).
+MCP_ENABLED = os.getenv("MCP_ENABLED", "false").lower() == "true"
+# Статический ключ доступа: внешний агент шлёт Authorization: Bearer <MCP_API_KEY> (или X-Api-Key).
+MCP_API_KEY = os.getenv("MCP_API_KEY", "").strip()
+# Путь MCP-эндпоинта (streamable HTTP).
+MCP_PATH = os.getenv("MCP_PATH", "/mcp")
+
 # Ревизия деплоя: APP_REVISION вручную или RAILWAY_GIT_COMMIT_SHA на Railway; в логах main/max_entrypoint — сверка с git при подозрении на старый образ.
 APP_REVISION = os.getenv("APP_REVISION", "").strip() or os.getenv("RAILWAY_GIT_COMMIT_SHA", "").strip()
 

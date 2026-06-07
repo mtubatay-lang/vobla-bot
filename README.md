@@ -175,6 +175,51 @@ python scripts/max_subscribe_webhook.py --url https://<домен>/webhook/max
 
 Если в логах всё ещё виден старый стек (`answer_callback` → `_request` с `json=body` на одной строке с прежним номером) — на Railway не задеплоен последний коммит; сделай **Redeploy**.
 
+## MCP-сервер для внешних рассылок (Telegram + MAX)
+
+Отдельный процесс **`python -m app.mcp_entrypoint`** ([app/mcp_entrypoint.py](app/mcp_entrypoint.py)) поднимает MCP-сервер (транспорт **streamable HTTP**), через который внешний агент с другой платформы выбирает платформы/сегменты и запускает рассылки. Переиспользуется существующий движок `execute_broadcast_multi` (см. `app/services/broadcast_service.py`) — те же получатели из Google Sheets, логи в `broadcasts`/`broadcast_logs`, деактивация упавших адресатов.
+
+### Инструменты (MCP tools)
+
+- **`list_targets()`** — возвращает доступные `platforms` (`telegram`, `max`), `modes` (сегменты), `regions` и `chats` (с id/названием) по платформам. Агент использует это, чтобы понять «куда и в какие чаты» слать.
+- **`send_broadcast(...)`** — запускает рассылку в фоне, сразу возвращает `job_id`. Параметры:
+  - `text` — текст (HTML);
+  - `platforms` — `["telegram"]`, `["max"]` или оба;
+  - `mode` — `users | chats | users_chats | selected_regions | selected_chats`;
+  - `regions` — для `selected_regions`; `chat_ids` — для `selected_chats`;
+  - `audience_platform` — платформа адресатов для `selected_*` (по умолчанию первая из `platforms`);
+  - `attachments` — `[{"type":"photo|video|document","url":...,"filename"?:...}]`. Telegram берёт URL напрямую, для MAX файл скачивается и загружается через `POST /upload` (`app/services/broadcast_media.py`);
+  - `test_chat_id` / `test_platform` / `test_is_chat` — тест-отправка одному адресату, минуя сегменты.
+- **`get_broadcast_status(id)`** — статус по `job_id` (из `send_broadcast`) или по `broadcast_id` (читает таблицу `broadcasts`): `status`, `sent_ok`, `sent_fail`.
+
+Поток данных: агент → MCP (`Authorization: Bearer <MCP_API_KEY>`) → `execute_broadcast_multi` → `TelegramAdapter` / `MaxAdapter` → Telegram/MAX API; получатели и логи — в Google Sheets.
+
+### Авторизация
+
+Статический ключ **`MCP_API_KEY`** проверяется на каждом запросе MCP-эндпоинта (`Authorization: Bearer <ключ>` или `X-Api-Key`). Путь `/health` открыт без ключа (для healthcheck). Без заданного `MCP_API_KEY` доступ не ограничивается — в проде ключ обязателен.
+
+### Запуск локально
+
+```bash
+export BOT_TOKEN=...            # для отправки в Telegram (long polling не запускается)
+export ENABLE_MAX=true          # если нужен MAX
+export MAX_BOT_TOKEN=...
+export MCP_ENABLED=true
+export MCP_API_KEY=<секрет>
+export PORT=8080                # порт MCP-сервера
+python -m app.mcp_entrypoint
+```
+
+Эндпоинт MCP: `http://<host>:<PORT>/mcp` (путь меняется через `MCP_PATH`). Проверка: `curl http://localhost:8080/health` → `{"status":"ok","mcp":true}`.
+
+### Railway (сервис `vobla-mcp`)
+
+[railway.toml](railway.toml) ветвится по `$RAILWAY_SERVICE_NAME`: сервис с именем **`vobla-mcp`** запускает `python -m app.mcp_entrypoint`.
+
+1. `railway add --service vobla-mcp --repo <owner>/<repo>` (имя ровно `vobla-mcp`).
+2. Переменные: `MCP_ENABLED=true`, `MCP_API_KEY=<секрет>`, `TELEGRAM_POLLING_ENABLED=false`; секреты ссылками на `vobla-bot`: `BOT_TOKEN=${{vobla-bot.BOT_TOKEN}}`, `GOOGLE_SERVICE_ACCOUNT_JSON=${{vobla-bot.GOOGLE_SERVICE_ACCOUNT_JSON}}`, `STATS_SHEET_ID=${{vobla-bot.STATS_SHEET_ID}}`, при MAX — `ENABLE_MAX`, `MAX_BOT_TOKEN` и т.д.
+3. Публичный домен: `railway domain -s vobla-mcp`. Агент подключается к `https://<домен>/mcp`.
+
 ## Конфигурация
 
 ### Обязательные переменные (для основного бота)
@@ -201,6 +246,13 @@ python scripts/max_subscribe_webhook.py --url https://<домен>/webhook/max
 - `MAX_WEBHOOK_SECRET` — если задан при подписке с `secret`, входящие запросы без совпадающего `X-Max-Bot-Api-Secret` отклоняются (403)  
 - Для скрипта подписки: `MAX_WEBHOOK_PUBLIC_BASE` — HTTPS-база Railway без пути (к `MAX_WEBHOOK_PATH` он добавится)
 - В листе `Пользователи` колонка MAX ID: **`max_user_id`** (если у вас было `max_id` — переименуйте в Sheets)
+
+### MCP-сервер рассылок (только при `MCP_ENABLED=true`)
+
+- `MCP_API_KEY` — статический ключ доступа внешнего агента (`Authorization: Bearer <ключ>` / `X-Api-Key`); в проде обязателен
+- `MCP_PATH` — путь MCP-эндпоинта (по умолчанию `/mcp`)
+- `PORT` — порт HTTP-сервера (Railway задаёт автоматически; локально по умолчанию `8080`)
+- Для отправки используются те же `BOT_TOKEN` (Telegram) и `ENABLE_MAX`/`MAX_BOT_TOKEN` (MAX), а получатели — из `STATS_SHEET_ID` (как у обычных рассылок)
 
 ## Плановые рассылки
 

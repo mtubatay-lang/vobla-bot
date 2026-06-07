@@ -6,7 +6,8 @@ builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-# Один репозиторий — два сервиса: имя сервиса MAX в Railway должно быть `vobla-max` (или поменяйте ветку ниже).
-startCommand = "sh -c \"case $RAILWAY_SERVICE_NAME in vobla-max) exec python -m app.max_entrypoint;; *) exec python -m app.main;; esac\""
+# Один репозиторий — три сервиса по имени Railway-сервиса:
+#   vobla-max → MAX webhook (FastAPI), vobla-mcp → MCP-сервер рассылок, прочее → Telegram-бот.
+startCommand = "sh -c \"case $RAILWAY_SERVICE_NAME in vobla-max) exec python -m app.max_entrypoint;; vobla-mcp) exec python -m app.mcp_entrypoint;; *) exec python -m app.main;; esac\""
 healthcheckPath = "/health"
 healthcheckTimeout = 30

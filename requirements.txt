@@ -58,3 +58,7 @@ redis==5.3.1
 # --- MAX webhook entrypoint ---
 fastapi>=0.115.0
 uvicorn>=0.32.0
+
+# --- MCP-сервер для внешних рассылок (Telegram + MAX) ---
+# Транзитивно тянет starlette/sse-starlette; верхнюю границу starlette держит fastapi.
+mcp==1.27.2
